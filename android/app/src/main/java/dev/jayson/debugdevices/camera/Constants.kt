@@ -20,11 +20,25 @@ object Constants {
         const val ZOOM = "$PREFIX/zoom"
         const val TORCH = "$PREFIX/torch"
         const val SNAPSHOT = "$PREFIX/snapshot"
+        const val ROTATION = "$PREFIX/rotation"
     }
 
     object Zoom {
         /** `step: "in"` multiplies the zoom ratio by this factor, `step: "out"` divides it. */
         const val STEP_FACTOR = 1.5f
+    }
+
+    object Orientation {
+        const val DEGREES_PER_TURN = 360
+        private const val BUCKETS = 4
+        const val BUCKET_DEGREES = DEGREES_PER_TURN / BUCKETS
+
+        /** Extra degrees past the bucket edge before the rotation changes. */
+        const val HYSTERESIS_DEGREES = 15
+        const val SWITCH_DISTANCE_DEGREES = BUCKET_DEGREES / 2 + HYSTERESIS_DEGREES
+
+        /** Same value as `OrientationEventListener.ORIENTATION_UNKNOWN` (phone flat on a table). */
+        const val UNKNOWN_ANGLE = -1
     }
 
     object Start {
@@ -44,8 +58,13 @@ object Constants {
         const val CAPTURE_FAILED = "The still capture failed"
         const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
         const val START_STATE_PENDING = "Camera start state is not set yet"
+        const val ROTATION_CHANGED = "Snapshot rotation degrees: "
         const val START_STATE_FAILED = "Camera bind or start state failed"
         const val EXPECTED_NUMBER = "Expected a JSON number"
+        const val EXPECTED_INTEGER = "Expected a JSON integer"
+        const val ROTATION_NEEDS_ONE_FIELD = "Send exactly one of 'degrees' or 'auto'"
+        const val ROTATION_BAD_DEGREES = "'degrees' must be 0, 90, 180, or 270"
+        const val ROTATION_AUTO_TRUE = "'auto' must be true"
         const val EXPECTED_BOOLEAN = "Expected a JSON boolean"
         const val EXPECTED_LITERAL = "Expected a JSON number or boolean, not a string"
         const val JSON_ONLY = "This serializer reads JSON only"

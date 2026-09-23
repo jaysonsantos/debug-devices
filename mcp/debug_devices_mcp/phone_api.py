@@ -3,6 +3,7 @@
 from datetime import timedelta
 from enum import StrEnum
 from http import HTTPMethod, HTTPStatus
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -17,12 +18,18 @@ class Health(BaseModel):
     app_version: str
 
 
+# Snapshot rotation in degrees, as the contract allows it.
+type RotationDegrees = Literal[0, 90, 180, 270]
+
+
 class CameraStatus(BaseModel):
     zoom_ratio: float
     min_zoom_ratio: float
     max_zoom_ratio: float
     torch_enabled: bool
     has_flash_unit: bool
+    rotation_degrees: RotationDegrees
+    rotation_locked: bool
 
 
 class ApiErrorCode(StrEnum):
@@ -30,7 +37,9 @@ class ApiErrorCode(StrEnum):
     NO_FLASH_UNIT = "no_flash_unit"
     BAD_REQUEST = "bad_request"
     NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
     CAPTURE_FAILED = "capture_failed"
+    INTERNAL_ERROR = "internal_error"
 
 
 class ApiError(BaseModel):
@@ -53,6 +62,14 @@ class ZoomStepRequest(BaseModel):
 
 class TorchRequest(BaseModel):
     enabled: bool
+
+
+class RotationLockRequest(BaseModel):
+    degrees: RotationDegrees
+
+
+class RotationAutoRequest(BaseModel):
+    auto: Literal[True] = True
 
 
 # endregion: models
@@ -105,17 +122,22 @@ class PhoneClient:
         await self._http.aclose()
 
     async def health(self) -> Health:
-        return Health.model_validate_json(await self._request(HTTPMethod.GET, phone.PATH_HEALTH))
+        return _parse(Health, phone.PATH_HEALTH, await self._request(HTTPMethod.GET, phone.PATH_HEALTH))
 
     async def status(self) -> CameraStatus:
-        return CameraStatus.model_validate_json(await self._request(HTTPMethod.GET, phone.PATH_STATUS))
+        return _parse(CameraStatus, phone.PATH_STATUS, await self._request(HTTPMethod.GET, phone.PATH_STATUS))
 
     async def zoom(self, request: ZoomRatioRequest | ZoomStepRequest) -> CameraStatus:
-        return CameraStatus.model_validate_json(await self._request(HTTPMethod.POST, phone.PATH_ZOOM, request))
+        body = await self._request(HTTPMethod.POST, phone.PATH_ZOOM, request)
+        return _parse(CameraStatus, phone.PATH_ZOOM, body)
 
     async def torch(self, enabled: bool) -> CameraStatus:
-        body = TorchRequest(enabled=enabled)
-        return CameraStatus.model_validate_json(await self._request(HTTPMethod.POST, phone.PATH_TORCH, body))
+        body = await self._request(HTTPMethod.POST, phone.PATH_TORCH, TorchRequest(enabled=enabled))
+        return _parse(CameraStatus, phone.PATH_TORCH, body)
+
+    async def rotation(self, request: RotationLockRequest | RotationAutoRequest) -> CameraStatus:
+        body = await self._request(HTTPMethod.POST, phone.PATH_ROTATION, request)
+        return _parse(CameraStatus, phone.PATH_ROTATION, body)
 
     async def snapshot(self) -> bytes:
         return await self._request(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)
@@ -131,7 +153,7 @@ class PhoneClient:
         except httpx.TransportError as exc:
             raise PhoneUnreachableError(f"phone API at {self._http.base_url} is unreachable: {exc!r}") from exc
         if response.status_code >= HTTPStatus.MULTIPLE_CHOICES:
-            preview = response.text[:ERROR_BODY_PREVIEW_CHARS]
+            preview = response.text.strip()[:ERROR_BODY_PREVIEW_CHARS]
             try:
                 error = ApiError.model_validate_json(response.content)
             except ValidationError as exc:
@@ -140,3 +162,14 @@ class PhoneClient:
                 ) from exc
             raise PhoneApiError(response.status_code, error)
         return response.content
+
+
+def _parse[T: BaseModel](model: type[T], path: str, body: bytes) -> T:
+    """A 2xx body that does not match the contract is a `PhoneProtocolError`, not a bare `ValidationError`."""
+    try:
+        return model.model_validate_json(body)
+    except ValidationError as exc:
+        preview = body.decode(errors="replace").strip()[:ERROR_BODY_PREVIEW_CHARS]
+        raise PhoneProtocolError(
+            f"phone API {path} returned a body that is not a {model.__name__}: {preview!r}"
+        ) from exc

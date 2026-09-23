@@ -10,14 +10,29 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <TextView
-        android:id="@+id/status"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|start"
-        android:layout_margin="12dp"
-        android:background="#99000000"
-        android:padding="6dp"
-        android:textColor="@android:color/white"
-        android:textSize="12sp" />
+    <!-- Padding from the system bar and cutout insets (set in code). -->
+    <FrameLayout
+        android:id="@+id/safe_area"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- Turned as one piece to the physical orientation, with width and height swapped in landscape. -->
+        <FrameLayout
+            android:id="@+id/overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center">
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|start"
+                android:layout_margin="12dp"
+                android:background="#99000000"
+                android:padding="6dp"
+                android:textColor="@android:color/white"
+                android:textSize="12sp" />
+        </FrameLayout>
+    </FrameLayout>
 </FrameLayout>

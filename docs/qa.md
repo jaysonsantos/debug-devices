@@ -18,6 +18,7 @@ This plan tests the phone app (`android/`), the MCP server (`mcp/`), and the con
 | `scripts/fake_phone.py` | HTTP server that implements `docs/phone-api.md` with state in memory. Standard library only. |
 | `scripts/fake_adb.py` | Fake `adb` with one device (`fake-phone-0001`). It accepts `devices`, `forward`, and `shell am start`. |
 | `scripts/qa_contract.py` | Contract checks against a base URL: the fake phone or the real phone through `adb forward`. |
+| `scripts/qa_mcp_stdio.py` | MCP tool tests over stdio with the fake phone, the fake adb, and a mock OpenRouter. Run it with `uv run`. |
 | `scripts/multimeter_capture.sh` | Captures webcam frames and writes a CSV for the multimeter accuracy check. |
 
 `fake_phone.py` modes:
@@ -29,6 +30,10 @@ This plan tests the phone app (`android/`), the MCP server (`mcp/`), and the con
 | `--no-flash` | `POST /v1/torch` returns 409 `no_flash_unit` |
 | `--not-ready` | All camera endpoints return 503 `camera_not_ready`. `/v1/health` returns 200. |
 | `--capture-fails` | `GET /v1/snapshot` returns 500 `capture_failed` |
+| `--background` | The app is in the background: all camera endpoints return 503 `camera_not_ready` |
+| `--physical-rotation N` | The phone orientation (0, 90, 180, 270). The auto rotation follows it. |
+| `--internal-error` | All camera endpoints return 500 `internal_error` |
+| `--start-delay S` | For `S` seconds, the camera endpoints return 503 `camera_not_ready`. Then the start state applies. |
 | `--snapshot FILE` | Serve `FILE` as the snapshot, for example a real webcam frame |
 | `--self-check` | Start the server in each mode and run `qa_contract.py` against it |
 
@@ -58,6 +63,13 @@ Expected result: `self-check PASSED`. This proves that the checks and the fake a
 | `torch` | With a flash unit: on, then off, and `GET /v1/status` agrees. Without one: 409 `no_flash_unit`. |
 | `torch_bad_request` | Missing or non-bool `enabled` gives 400 `bad_request` |
 | `snapshot` | 200, `image/jpeg`, SOI and EOI markers, a SOF segment. It prints the width and height. |
+| `snapshot_keeps_torch` | With a flash unit: torch on, snapshot, torch still on. Then the same with the torch off. |
+| `rotation` | Lock 0, 90, 180, 270: each gives that `rotation_degrees` with `rotation_locked: true`, and `GET /v1/status` agrees. `{"auto": true}` gives `rotation_locked: false`. |
+| `rotation_bad_request` | Bad rotation bodies give 400 `bad_request`: 45, `"90"`, `true`, 90.5, `auto: false`, `auto: "true"`, both fields, neither |
+| `post_needs_json_content_type` | A POST to zoom, torch, or rotation without `Content-Type: application/json` (none, or `text/plain`) gives 400, and nothing changes |
+| `snapshot_rotation` | Lock each rotation and take a snapshot. The displayed size (pixel size turned by the EXIF orientation) of 90 and 270 is the size of 0 and 180 with width and height swapped. |
+| `concurrent_zoom` | 8 zoom requests at the same time. Each gets 200 with its own ratio. No request cancels another. |
+| `method_not_allowed` | A known path with a wrong method gives 405 `method_not_allowed`: `GET /v1/zoom`, `GET /v1/torch`, `POST /v1/status`, `POST /v1/health`, `POST /v1/snapshot` |
 | `not_found` | Unknown path gives 404 `not_found` for `GET` and `POST` |
 
 Every error response must be an `ApiError`: exactly the keys `error` and `message`, a known code, and the HTTP status for that code.
@@ -66,7 +78,19 @@ The script restores the zoom ratio and the torch state that it found at the star
 
 `--strict` adds checks for cases that the contract does not state:
 
-- A zoom body with both `ratio` and `step` gives 400 `bad_request`.
+- A zoom body with `"ratio": 1e400` (overflow) or `"step": "IN"` (wrong case) gives 400 `bad_request`.
+- `PUT /v1/zoom` and `DELETE /v1/status` give 405 `method_not_allowed`.
+- Rotation bodies `-90`, `360`, `"degrees": null`, and `"auto": null` give 400 `bad_request`.
+
+`--expect starting` is for a run right after `am start`. It polls `/v1/status`. Every answer must be 503 `camera_not_ready` until the first 200. The first 200 must show the start state. Then the normal checks run.
+
+`--expect background` is for the app in the background (press HOME on the phone). Health gives 200, and every camera endpoint gives 503 `camera_not_ready`.
+
+The start state now also has `rotation_locked: false` (auto). `--after-start` and `--expect starting` check it.
+
+`--expect starting-race` is also for a run right after `am start`. It sends `POST /v1/zoom {"ratio": 3}` until it gets 200. Every earlier answer must be 503 `camera_not_ready`. Then the app must answer health and status for 3 s. A connection error in this time means a crash. This is the check for bug 1 of round 1.
+
+`--after-start` adds one check before the others: the torch is off and the zoom is at min. Use it only right after an app start.
 
 `--expect not-ready` checks a camera that is not bound: health 200, and 503 `camera_not_ready` on the other endpoints.
 
@@ -77,8 +101,11 @@ The script restores the zoom ratio and the torch state that it found at the star
 3. Install the app: `adb -s "$SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk`.
 4. Start the app: `adb -s "$SERIAL" shell am start -n dev.jayson.debugdevices.camera/.MainActivity`.
 5. Forward the port: `adb -s "$SERIAL" forward tcp:18765 tcp:8765`.
-6. Run: `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict`.
-7. Record the output in `docs/reports/dd-qa.md`.
+6. Wait about 5 s. The app sets the start state (zoom at min, torch off) after the camera opens.
+7. Run: `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict --after-start`.
+   Alternative without the wait: run `am start`, then at once `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict --expect starting`.
+   For the start race: run `am start`, then at once `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict --expect starting-race`.
+8. Record the output in `docs/reports/dd-qa.md`.
 
 Expected result: all checks pass. The torch check turns the torch on and then off.
 
@@ -96,7 +123,7 @@ The Android unit tests must cover the same rules without a device:
 Run:
 
 ```sh
-cd android && ./gradlew testDebugUnitTest lint
+cd android && nix develop .. --command ./gradlew :app:testDebugUnitTest --rerun
 ```
 
 ### 1.5 Contract tests on the MCP side (`pytest`)
@@ -122,7 +149,15 @@ export DEBUG_DEVICES_ADB_PATH="$PWD/scripts/fake_adb.py"
 export FAKE_ADB_LOG=/tmp/dd-qa/fake_adb.log
 ```
 
-### 2.2 Driver
+### 2.2 Automatic run
+
+```sh
+uv run python scripts/qa_mcp_stdio.py --snapshot /tmp/dd-qa/frame_1080p.jpg --real-adb-several-devices
+```
+
+The script starts the MCP with `--no-ui` (no monitor window, no scrcpy, no shared webcam stream). The webcam must be free: another MCP process with its UI on holds `/dev/video0`. The script starts the fake phone, the mock OpenRouter, and one MCP server process for each group of cases. It replaces `OPENROUTER_API_KEY` with a dummy value. It never sends a request to OpenRouter. `--real-adb-several-devices` runs `phone_connect` with the real adb and no serial. Only `adb devices -l` runs, and the server must refuse.
+
+### 2.3 Manual driver
 
 Use the Python `mcp` client (`mcp.client.stdio.stdio_client`) through `uv run`. The MCP Inspector CLI is an alternative:
 
@@ -131,7 +166,7 @@ npx @modelcontextprotocol/inspector --cli uv run debug-devices-mcp --method tool
 npx @modelcontextprotocol/inspector --cli uv run debug-devices-mcp --method tools/call --tool-name <tool>
 ```
 
-### 2.3 Cases
+### 2.4 Cases
 
 | Case | Set-up | Expected result |
 |---|---|---|
@@ -157,7 +192,7 @@ npx @modelcontextprotocol/inspector --cli uv run debug-devices-mcp --method tool
 
 For the mocked API, set `--openrouter-base-url` to a local HTTP server. The mock returns a fixed chat completion.
 
-### 2.4 Stdout hygiene
+### 2.5 Stdout hygiene
 
 The stdio transport uses stdout for JSON-RPC. Logs must go to stderr. Run the server and send `tools/list`. Every stdout line must be JSON.
 

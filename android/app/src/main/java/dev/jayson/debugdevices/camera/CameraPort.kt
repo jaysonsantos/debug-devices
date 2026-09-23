@@ -12,6 +12,9 @@ interface CameraPort {
 
     suspend fun setTorch(enabled: Boolean): CameraStatus
 
+    /** Locks the snapshot rotation to a `Surface.ROTATION_*` value, or goes back to auto with null. */
+    suspend fun setRotation(lockedRotation: Int?): CameraStatus
+
     /** One full still capture as JPEG bytes. */
     suspend fun capture(): ByteArray
 }

@@ -28,7 +28,8 @@ android {
     packaging {
         resources {
             // Ktor and kotlinx jars carry these files. The APK does not need them.
-            excludes += setOf("META-INF/INDEX.LIST", "META-INF/{AL2.0,LGPL2.1}", "META-INF/io.netty.versions.properties")
+            excludes +=
+                setOf("META-INF/INDEX.LIST", "META-INF/{AL2.0,LGPL2.1}", "META-INF/io.netty.versions.properties")
         }
     }
 }

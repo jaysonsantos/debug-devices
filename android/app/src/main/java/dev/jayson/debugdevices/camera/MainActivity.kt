@@ -4,7 +4,10 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
+import android.view.OrientationEventListener
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,6 +15,8 @@ import androidx.camera.core.Camera
 import androidx.camera.core.TorchState
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +34,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var server: ApiServer
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
+    private lateinit var safeArea: FrameLayout
+    private lateinit var overlay: FrameLayout
+    private lateinit var orientationListener: OrientationEventListener
     private var zoomRatio = 1f
     private var torchEnabled = false
 
@@ -42,9 +50,25 @@ class MainActivity : ComponentActivity() {
         setContentView(R.layout.activity_main)
         previewView = findViewById(R.id.preview)
         statusView = findViewById(R.id.status)
+        safeArea = findViewById(R.id.safe_area)
+        overlay = findViewById(R.id.overlay)
+        // Keep the label out of the status bar, the navigation bar, and the camera cutout.
+        ViewCompat.setOnApplyWindowInsetsListener(safeArea) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        safeArea.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> layoutOverlay() }
         renderStatus()
 
-        camera = CameraController(applicationContext)
+        camera = CameraController(applicationContext) { next -> onRotationChanged(next) }
+        // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
+        // the physical orientation.
+        orientationListener = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                camera.onSensorAngle(orientation)
+            }
+        }
         server = ApiServer(camera, BuildConfig.VERSION_NAME) { cause ->
             Log.e(Constants.Log.TAG, Constants.Messages.UNEXPECTED, cause)
         }
@@ -55,6 +79,16 @@ class MainActivity : ComponentActivity() {
         } else {
             permissionRequest.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
+    }
+
+    override fun onPause() {
+        orientationListener.disable()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -79,6 +113,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun onRotationChanged(next: Int) {
+        layoutOverlay()
+        Log.i(Constants.Log.TAG, Constants.Messages.ROTATION_CHANGED + OrientationLogic.surfaceDegrees(next))
+    }
+
+    /**
+     * Turns the overlay so the label reads upright in the viewer's top-left corner. The overlay is centered in
+     * the safe area; when sideways it takes the safe area size with width and height swapped, so after the turn
+     * it covers the safe area exactly.
+     */
+    private fun layoutOverlay() {
+        val width = safeArea.width - safeArea.paddingLeft - safeArea.paddingRight
+        val height = safeArea.height - safeArea.paddingTop - safeArea.paddingBottom
+        if (width <= 0 || height <= 0) return
+        val rotation = camera.effectiveRotation
+        val sideways = OrientationLogic.isSideways(rotation)
+        val overlayWidth = if (sideways) height else width
+        val overlayHeight = if (sideways) width else height
+        val params = overlay.layoutParams as FrameLayout.LayoutParams
+        if (params.width != overlayWidth || params.height != overlayHeight) {
+            overlay.layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight, Gravity.CENTER)
+        }
+        overlay.rotation = OrientationLogic.surfaceDegrees(rotation).toFloat()
+    }
+
     private fun observe(boundCamera: Camera) {
         boundCamera.cameraInfo.zoomState.observe(this) { state ->
             zoomRatio = state.zoomRatio
@@ -92,6 +151,7 @@ class MainActivity : ComponentActivity() {
 
     private fun renderStatus() {
         val torch = getString(if (torchEnabled) R.string.torch_on else R.string.torch_off)
-        statusView.text = getString(R.string.status_label, zoomRatio, torch, Constants.Server.HOST, Constants.Server.PORT)
+        statusView.text =
+            getString(R.string.status_label, zoomRatio, torch, Constants.Server.HOST, Constants.Server.PORT)
     }
 }

@@ -11,10 +11,7 @@ val ApiJson = Json {
 }
 
 @Serializable
-data class HealthResponse(
-    val ok: Boolean,
-    @SerialName("app_version") val appVersion: String,
-)
+data class HealthResponse(val ok: Boolean, @SerialName("app_version") val appVersion: String)
 
 @Serializable
 data class CameraStatus(
@@ -23,6 +20,8 @@ data class CameraStatus(
     @SerialName("max_zoom_ratio") val maxZoomRatio: Float,
     @SerialName("torch_enabled") val torchEnabled: Boolean,
     @SerialName("has_flash_unit") val hasFlashUnit: Boolean,
+    @SerialName("rotation_degrees") val rotationDegrees: Int,
+    @SerialName("rotation_locked") val rotationLocked: Boolean
 )
 
 @Serializable
@@ -31,24 +30,26 @@ enum class ZoomStep {
     IN,
 
     @SerialName("out")
-    OUT,
+    OUT
 }
 
 @Serializable
 data class ZoomRequest(
     @Serializable(with = StrictFloatSerializer::class) val ratio: Float? = null,
-    val step: ZoomStep? = null,
+    val step: ZoomStep? = null
 )
 
 @Serializable
-data class TorchRequest(
-    @Serializable(with = StrictBooleanSerializer::class) val enabled: Boolean,
+data class RotationRequest(
+    @Serializable(with = StrictIntSerializer::class) val degrees: Int? = null,
+    @Serializable(with = StrictBooleanSerializer::class) val auto: Boolean? = null
 )
 
 @Serializable
-enum class ErrorCode(
-    val status: HttpStatusCode,
-) {
+data class TorchRequest(@Serializable(with = StrictBooleanSerializer::class) val enabled: Boolean)
+
+@Serializable
+enum class ErrorCode(val status: HttpStatusCode) {
     @SerialName("camera_not_ready")
     CAMERA_NOT_READY(HttpStatusCode.ServiceUnavailable),
 
@@ -68,17 +69,11 @@ enum class ErrorCode(
     CAPTURE_FAILED(HttpStatusCode.InternalServerError),
 
     @SerialName("internal_error")
-    INTERNAL_ERROR(HttpStatusCode.InternalServerError),
+    INTERNAL_ERROR(HttpStatusCode.InternalServerError)
 }
 
 @Serializable
-data class ApiError(
-    val error: ErrorCode,
-    val message: String,
-)
+data class ApiError(val error: ErrorCode, val message: String)
 
-class ApiException(
-    val code: ErrorCode,
-    override val message: String,
-    cause: Throwable? = null,
-) : Exception(message, cause)
+class ApiException(val code: ErrorCode, override val message: String, cause: Throwable? = null) :
+    Exception(message, cause)

@@ -1,0 +1,7 @@
+[default]
+extend-ignore-re = [
+  # H.264 Exp-Golomb syntax names, for example ue(v) and se(v).
+  "\\b[us]e\\(v\\)",
+  # Random hex ids, the scrcpy socket names.
+  "scrcpy_[0-9a-f]{8}",
+]

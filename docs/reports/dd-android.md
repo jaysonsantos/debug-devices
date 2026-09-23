@@ -37,9 +37,25 @@ The activity is `singleTask` and handles configuration changes itself, so a seco
 - Bug 5: new error code `internal_error` (500) for every error that is not in the contract. `cameraApi(..., onUnexpected)` gets the error. `MainActivity` logs the stack trace with `Log.e(DebugCamera, ...)`.
 - New unit tests: `ControlGateTest` (4: 503 before start, 503 at once during start, failed start opens the gate, 20 parallel changes run one at a time and none is cancelled). `ApiServerTest` (+8: zoom during start state, ratio as string/bool/array, number forms still work, 1e400, enabled as string, 10 parallel steps all counted, internal_error logged, contract errors not logged). `ZoomLogicTest` (+1: validate).
 
+### Round 4 (landscape snapshots)
+
+- The activity stays locked to portrait, so the preview does not restart when the phone turns.
+- `OrientationLogic.kt` (pure): maps the `OrientationEventListener` angle to `Surface.ROTATION_*`. Four buckets: angle 0 -> `ROTATION_0`, 90 -> `ROTATION_270`, 180 -> `ROTATION_180`, 270 -> `ROTATION_90` (the CameraX mapping). Hysteresis: the rotation changes only when the angle is 60 degrees (45 + `HYSTERESIS_DEGREES` 15) or more from the center of the current bucket. `ORIENTATION_UNKNOWN` (phone flat) keeps the current rotation.
+- `MainActivity`: the listener runs from `onResume` to `onPause`. A change sets `imageCapture.targetRotation` (`CameraController.setTargetRotation`), turns the overlay with the status label (see the overlay fix below), and logs `Snapshot rotation degrees: <n>` with tag `DebugCamera` (level I).
+- Constants in `Constants.Orientation`. `CameraStatus` is not changed (see the contract proposal below).
+- New unit tests: `OrientationLogicTest` (7): bucket centers, 359/360, unknown angle, hysteresis from portrait (59 stays, 60 switches; 301 stays, 300 switches), hysteresis from landscape, jitter around 45 degrees, surface degrees.
+
+### Round 5 (rotation endpoint, foreground rule)
+
+- `POST /v1/rotation`: `RotationRequest(degrees, auto)` with strict serializers (new `StrictIntSerializer`: `"90"` and `90.5` give 400). `OrientationLogic.lockedRotationFor` gives the locked `Surface.ROTATION_*` (`degrees / 90`) or null for `{"auto": true}`. Both fields, no field, other degrees, and `auto: false` give 400.
+- `RotationState.kt` (pure): the sensor rotation and an optional lock. The lock wins. The sensor value stays current while locked, so `auto` goes back to how the phone is held now. Auto after an app start. A change sets `imageCapture.targetRotation` and turns the overlay. It lives in `CameraController`, on the main thread.
+- `CameraStatus` has `rotation_degrees` and `rotation_locked`. `setRotation` goes through `ControlGate` (503 until the start state is set).
+- Foreground rule: `activeCamera()` now needs lifecycle `RESUMED` (was `STARTED`). Status, zoom, torch, rotation, and snapshot give 503 `camera_not_ready` ("Camera is not active") in the background. `/v1/health` stays 200.
+- New unit tests: `RotationStateTest` (4), `OrientationLogicTest` +2 (request to rotation, bad requests), `ApiServerTest` +3 (lock and unlock, 8 bad bodies, 503 before the start state and 405 on GET). 63 tests in total.
+
 ## What works
 
-Build and unit tests (46 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 26 with a fake camera), from `android/`:
+Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:
 
 ```sh
 nix develop .. --command ./gradlew assembleDebug testDebugUnitTest
@@ -110,6 +126,34 @@ Bugs 2 and 4 on the phone:
 
 I cannot trigger `internal_error` on the phone without a bug. A unit test covers it.
 
+Round 4 check on `7fad170e` (APK installed at 19:13):
+
+- Accelerometer (`dumpsys sensorservice`): `0.29, -0.78, 9.77`. The phone lies flat, screen up. `OrientationEventListener` gives `ORIENTATION_UNKNOWN` in this position, so the rotation stays `ROTATION_0` and no rotation log line appears.
+- `GET /v1/snapshot`: 200, 2.87 MB. `exiftool`: `Orientation: Unknown (0)`, 3060x4080. This phone (with CameraX) writes the rotation into the pixels. It does not use the EXIF tag. So for a landscape check, look at the pixel size: portrait gives 3060x4080, landscape must give 4080x3060 (or EXIF 6/8 with 3060x4080).
+- Crash buffer: no FATAL entry.
+- Landscape, checked at 19:29 after the user turned the phone: `logcat -s DebugCamera:I` shows `19:28:57 Snapshot rotation degrees: 90` (one change, no flips). `GET /v1/snapshot`: 200, 2.47 MB, `exiftool`: 4080x3060, `Orientation: Horizontal (normal)`. The image is a landscape top-down view of a circuit board with a red probe. App PID 26636, no FATAL entry in the crash buffer.
+- At 19:29 the accelerometer read `1.26, -0.61, 9.69` (phone close to flat, pointing down). The app kept rotation 90, as designed: a flat phone gives `ORIENTATION_UNKNOWN`. This confirms the risk in the contract proposal below.
+- Portrait upright, 19:33: accelerometer `-1.26, 8.32, 6.13`. Log: rotation 0. Snapshot 3060x4080, upright (monitor, multimeter, magnifier). While the user turned the phone, the log showed 0, 90, 0 at 19:33:36-39, 1-2 s apart: real movement, not jitter.
+- Other landscape direction, 19:34: accelerometer `-9.69, 0.37, 1.53`. Log: `19:34:22 Snapshot rotation degrees: 270`. Snapshot 4080x3060, EXIF `Orientation: Unknown (0)`, and the scene is upright.
+- The three positions give upright images: portrait (0), landscape (90), and landscape (270). No FATAL entry in the crash buffer.
+- Not checked: upside-down (180). The unit tests cover its mapping.
+- Overlay fix (user report: the label was cut). Cause: the label turned around its own center in the top-left corner, so in landscape most of it went off the screen. The top of the screen also has the status bar and the camera cutout. Fix: the label is inside a full-screen `overlay` that turns as one piece. When the phone is sideways, the overlay takes the safe area size with width and height swapped (`OrientationLogic.isSideways`), so the label stays in the viewer's top-left corner. A `safe_area` parent gets padding from the system bar and cutout insets. The label animation was removed. Screenshot at 19:36 (landscape, rotation 90): the full label is visible, below the status bar. New unit test `sideways rotations` (54 tests in total).
+
+Round 5 check on `7fad170e` (APK installed at about 19:42, phone in landscape, accelerometer `7.57, 0.23, 6.16`):
+
+| Request | Result |
+|---|---|
+| `GET /v1/status` after start | 200, `rotation_degrees` 90 (sensor), `rotation_locked` false; snapshot 4080x3060 |
+| `{"degrees":0}` / `90` / `180` / `270` | 200, locked; snapshots 3060x4080 / 4080x3060 / 3060x4080 / 4080x3060 |
+| `GET /v1/status` | `rotation_degrees` 270, `rotation_locked` true |
+| `{"auto":true}` | 200, `rotation_degrees` 90 (back to the sensor), unlocked; snapshot 4080x3060 |
+| `{}`, `{"degrees":90,"auto":true}`, `{"degrees":45}`, `{"degrees":"90"}`, `{"auto":false}` | 400 `bad_request` |
+| `GET /v1/rotation` | 405 `method_not_allowed` |
+| HOME key (app in background): health / status / rotation / snapshot | 200 / 503 / 503 / 503 (`camera_not_ready`, "Camera is not active") |
+| `am start` again, `GET /v1/status` | 200 |
+
+Crash buffer: no FATAL entry. `logcat -s DebugCamera:E`: empty.
+
 The Fire TV devices were not touched. Only `-s 7fad170e` was used.
 
 ## Open items and notes
@@ -118,8 +162,7 @@ The Fire TV devices were not touched. Only `-s 7fad170e` was used.
 2. Local port 8765 on the PC is in use by another process (`python`, pid 1117704, listens on 127.0.0.1:8765, answers `{"error": "auth required"}` 401). `adb forward tcp:8765 tcp:8765` fails with `Address already in use`. dd-mcp: use a different local port by default (for example 18765), or pick a free port. The forward `tcp:18765 -> tcp:8765` on 7fad170e is still active.
 3. Done in round 2: compileSdk/targetSdk 37 and `androidx.core` 1.19.0.
 4. Proposals for `docs/phone-api.md` (not changed):
-   - When the activity is stopped (screen off, app in background), camera endpoints return 503 `camera_not_ready` with the message `Camera is not active`. Document this.
-   - Write in the contract that POST bodies need `Content-Type: application/json` (dd-qa gap). The app returns 400 without it.
    - Zoom ratios are 32-bit floats. A step can give values such as `3.375` or `1.6500001` in JSON.
+   - A rotation lock stays when the app goes to the background and comes back. Only an app start resets it to auto. The contract does not say this.
 5. The vision model change (`openai/gpt-6-luna`) does not touch `android/`.
 6. ktlint is in the flake but I did not add a lint task or a prek hook for Kotlin. That belongs to the repository setup.

@@ -7,6 +7,10 @@ It keeps the camera state in memory, so the MCP server can run without a phone.
     python3 scripts/fake_phone.py --no-flash           # torch returns 409 no_flash_unit
     python3 scripts/fake_phone.py --not-ready          # camera endpoints return 503 camera_not_ready
     python3 scripts/fake_phone.py --capture-fails      # snapshot returns 500 capture_failed
+    python3 scripts/fake_phone.py --background         # the app is in the background: camera endpoints return 503
+    python3 scripts/fake_phone.py --physical-rotation 90 # auto rotation follows this phone orientation
+    python3 scripts/fake_phone.py --internal-error     # camera endpoints return 500 internal_error
+    python3 scripts/fake_phone.py --start-delay 3      # camera endpoints return 503 for 3 s, then the start state
     python3 scripts/fake_phone.py --snapshot frame.jpg # serve this JPEG as the snapshot
     python3 scripts/fake_phone.py --self-check         # run scripts/qa_contract.py against every mode
 """
@@ -18,8 +22,10 @@ import base64
 import json
 import math
 import os
+import struct
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -38,6 +44,7 @@ DEFAULT_PORT = 8765
 DEFAULT_MIN_ZOOM = 1.0
 DEFAULT_MAX_ZOOM = 8.0
 EPHEMERAL_PORT = 0
+SELF_CHECK_START_DELAY = 0.5
 MAX_BODY_BYTES = 64 * 1024
 
 
@@ -54,7 +61,11 @@ class Route(StrEnum):
     STATUS = "/v1/status"
     ZOOM = "/v1/zoom"
     TORCH = "/v1/torch"
+    ROTATION = "/v1/rotation"
     SNAPSHOT = "/v1/snapshot"
+
+
+KNOWN_PATHS = frozenset(Route)
 
 
 class ContentType(StrEnum):
@@ -72,7 +83,9 @@ class ErrorCode(StrEnum):
     NO_FLASH_UNIT = "no_flash_unit"
     BAD_REQUEST = "bad_request"
     NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
     CAPTURE_FAILED = "capture_failed"
+    INTERNAL_ERROR = "internal_error"
 
 
 ERROR_STATUS: dict[ErrorCode, HTTPStatus] = {
@@ -80,7 +93,9 @@ ERROR_STATUS: dict[ErrorCode, HTTPStatus] = {
     ErrorCode.NO_FLASH_UNIT: HTTPStatus.CONFLICT,
     ErrorCode.BAD_REQUEST: HTTPStatus.BAD_REQUEST,
     ErrorCode.NOT_FOUND: HTTPStatus.NOT_FOUND,
+    ErrorCode.METHOD_NOT_ALLOWED: HTTPStatus.METHOD_NOT_ALLOWED,
     ErrorCode.CAPTURE_FAILED: HTTPStatus.INTERNAL_SERVER_ERROR,
+    ErrorCode.INTERNAL_ERROR: HTTPStatus.INTERNAL_SERVER_ERROR,
 }
 
 # A 64x48 test pattern (ffmpeg testsrc2). Used when --snapshot is not given.
@@ -103,6 +118,17 @@ TEST_JPEG = base64.b64decode(
     "IjAAtp5fazX4jjNgZcOHDAYGCr8dTMu47FaUv//Z"
 )
 
+ROTATIONS = (0, 90, 180, 270)
+DEGREES_TO_EXIF_ORIENTATION = {0: 1, 90: 6, 180: 3, 270: 8}
+JPEG_SOI = b"\xff\xd8"
+JPEG_LENGTH_FIELD_BYTES = 2
+EXIF_APP1_MARKER = b"\xff\xe1"
+EXIF_HEADER = b"Exif\x00\x00"
+EXIF_ORIENTATION_TAG = 0x0112
+TIFF_SHORT = 3
+TIFF_BIG_ENDIAN_HEADER = b"MM\x00\x2a"
+TIFF_FIRST_IFD_OFFSET = 8
+
 # endregion: constants
 
 # region: state
@@ -115,6 +141,8 @@ class CameraStatus:
     max_zoom_ratio: float
     torch_enabled: bool
     has_flash_unit: bool
+    rotation_degrees: int
+    rotation_locked: bool
 
 
 @dataclass(frozen=True)
@@ -124,6 +152,13 @@ class FakeConfig:
     has_flash_unit: bool = True
     ready: bool = True
     capture_fails: bool = False
+    # The app is in the background: camera endpoints return 503 camera_not_ready.
+    background: bool = False
+    # The physical orientation of the fake phone. The rotation follows it while it is not locked.
+    physical_rotation: int = 0
+    internal_error: bool = False
+    # Seconds after the server start in which the camera endpoints return 503 (bind and start state).
+    start_delay: float = 0.0
     snapshot: bytes = TEST_JPEG
 
 
@@ -139,6 +174,7 @@ class FakeCamera:
 
     def __init__(self, config: FakeConfig) -> None:
         self.config = config
+        self._ready_at = time.monotonic() + config.start_delay
         self._lock = threading.Lock()
         self._status = CameraStatus(
             zoom_ratio=config.min_zoom,
@@ -146,11 +182,17 @@ class FakeCamera:
             max_zoom_ratio=config.max_zoom,
             torch_enabled=False,
             has_flash_unit=config.has_flash_unit,
+            rotation_degrees=config.physical_rotation,
+            rotation_locked=False,
         )
 
     def _require_ready(self) -> None:
-        if not self.config.ready:
+        if self.config.background:
+            raise ApiError(ErrorCode.CAMERA_NOT_READY, "Camera is not active")
+        if not self.config.ready or time.monotonic() < self._ready_at:
             raise ApiError(ErrorCode.CAMERA_NOT_READY, "Camera is not bound yet")
+        if self.config.internal_error:
+            raise ApiError(ErrorCode.INTERNAL_ERROR, "Unexpected error (fake)")
 
     def _clamp(self, ratio: float) -> float:
         return min(max(ratio, self._status.min_zoom_ratio), self._status.max_zoom_ratio)
@@ -182,11 +224,30 @@ class FakeCamera:
             self._status.torch_enabled = enabled
         return self.status()
 
+    def rotation(self, degrees: int | None) -> CameraStatus:
+        """`degrees` locks the rotation. None goes back to the physical orientation."""
+        self._require_ready()
+        with self._lock:
+            self._status.rotation_locked = degrees is not None
+            self._status.rotation_degrees = self.config.physical_rotation if degrees is None else degrees
+        return self.status()
+
     def snapshot(self) -> bytes:
         self._require_ready()
         if self.config.capture_fails:
             raise ApiError(ErrorCode.CAPTURE_FAILED, "Still capture failed (fake)")
-        return self.config.snapshot
+        with self._lock:
+            degrees = self._status.rotation_degrees
+        return with_exif_orientation(self.config.snapshot, DEGREES_TO_EXIF_ORIENTATION[degrees])
+
+
+def with_exif_orientation(jpeg: bytes, orientation: int) -> bytes:
+    """Insert an EXIF APP1 segment with one orientation tag right after the SOI marker."""
+    ifd_entry = struct.pack(">HHIHH", EXIF_ORIENTATION_TAG, TIFF_SHORT, 1, orientation, 0)
+    tiff = TIFF_BIG_ENDIAN_HEADER + struct.pack(">IH", TIFF_FIRST_IFD_OFFSET, 1) + ifd_entry + struct.pack(">I", 0)
+    payload = EXIF_HEADER + tiff
+    segment = EXIF_APP1_MARKER + struct.pack(">H", len(payload) + JPEG_LENGTH_FIELD_BYTES) + payload
+    return jpeg[: len(JPEG_SOI)] + segment + jpeg[len(JPEG_SOI) :]
 
 
 # endregion: state
@@ -230,14 +291,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": err.code, "message": err.message}, ERROR_STATUS[err.code])
 
     def _read_body(self) -> bytes:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != ContentType.JSON:
+            raise ApiError(ErrorCode.BAD_REQUEST, f"Content-Type must be {ContentType.JSON}")
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY_BYTES:
             raise ApiError(ErrorCode.BAD_REQUEST, f"Body is larger than {MAX_BODY_BYTES} bytes")
         return self.rfile.read(length)
 
     def _dispatch(self, routes: dict[str, Callable[[], None]]) -> None:
-        route = routes.get(self.path.split("?", 1)[0])
+        path = self.path.split("?", 1)[0]
+        route = routes.get(path)
         try:
+            if route is None and path in KNOWN_PATHS:
+                raise ApiError(ErrorCode.METHOD_NOT_ALLOWED, f"{self.command} is not allowed on {path}")
             if route is None:
                 raise ApiError(ErrorCode.NOT_FOUND, f"No route for {self.command} {self.path}")
             route()
@@ -254,7 +321,13 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:
-        self._dispatch({Route.ZOOM: self.zoom, Route.TORCH: self.torch})
+        self._dispatch({Route.ZOOM: self.zoom, Route.TORCH: self.torch, Route.ROTATION: self.rotation})
+
+    def do_PUT(self) -> None:
+        self._dispatch({})
+
+    def do_DELETE(self) -> None:
+        self._dispatch({})
 
     def health(self) -> None:
         self._send_json({"ok": True, "app_version": APP_VERSION})
@@ -282,6 +355,21 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(enabled, bool):
             raise ApiError(ErrorCode.BAD_REQUEST, '"enabled" must be true or false')
         self._send_json(asdict(self.camera.torch(enabled)))
+
+    def rotation(self) -> None:
+        data = parse_body(self._read_body())
+        has_degrees, has_auto = "degrees" in data, "auto" in data
+        if has_degrees == has_auto:
+            raise ApiError(ErrorCode.BAD_REQUEST, 'Send exactly one of "degrees" or "auto"')
+        if has_auto:
+            if data["auto"] is not True:
+                raise ApiError(ErrorCode.BAD_REQUEST, '"auto" must be true')
+            self._send_json(asdict(self.camera.rotation(None)))
+            return
+        degrees = data["degrees"]
+        if isinstance(degrees, bool) or not isinstance(degrees, int) or degrees not in ROTATIONS:
+            raise ApiError(ErrorCode.BAD_REQUEST, f'"degrees" must be one of {list(ROTATIONS)}')
+        self._send_json(asdict(self.camera.rotation(degrees)))
 
     def snapshot(self) -> None:
         self._send(HTTPStatus.OK, ContentType.JPEG, self.camera.snapshot())
@@ -312,6 +400,11 @@ def self_check() -> int:
             qa_contract.Expect.READY,
             [qa_contract.check_capture_failed],
         ),
+        ("starting", FakeConfig(start_delay=SELF_CHECK_START_DELAY), qa_contract.Expect.STARTING, []),
+        ("starting race", FakeConfig(start_delay=SELF_CHECK_START_DELAY), qa_contract.Expect.STARTING_RACE, []),
+        ("internal error", FakeConfig(internal_error=True), qa_contract.Expect.READY, []),
+        ("background", FakeConfig(background=True), qa_contract.Expect.BACKGROUND, []),
+        ("lying at 270", FakeConfig(physical_rotation=270), qa_contract.Expect.READY, []),
     ]
     all_passed = True
     for label, config, expect_state, extra in scenarios:
@@ -320,12 +413,33 @@ def self_check() -> int:
         thread.start()
         try:
             base_url = f"http://{DEFAULT_HOST}:{server.server_address[1]}"
+            if label == "internal error":
+                # Every camera endpoint fails in this mode, so only these checks apply.
+                ctx = qa_contract.Context(
+                    qa_contract.Client(base_url, qa_contract.DEFAULT_TIMEOUT_SECONDS),
+                    qa_contract.DEFAULT_SNAPSHOT_TIMEOUT_SECONDS,
+                    strict=True,
+                )
+                checks = [
+                    qa_contract.check_health,
+                    qa_contract.check_internal_error,
+                    qa_contract.check_method_not_allowed,
+                    qa_contract.check_not_found,
+                ]
+                all_passed &= qa_contract.print_results(qa_contract.run_checks(ctx, checks), label)
+                continue
             results = qa_contract.run_contract(
-                base_url, qa_contract.Options(expect_state=expect_state, strict=True), extra
+                base_url,
+                qa_contract.Options(
+                    expect_state=expect_state, strict=True, after_start=expect_state is qa_contract.Expect.READY
+                ),
+                extra,
             )
             if label == "capture fails":
                 # The normal snapshot check must fail in this mode; the extra check covers it.
-                results = [r for r in results if r.name != "snapshot"]
+                results = [
+                    r for r in results if r.name not in {"snapshot", "snapshot_keeps_torch", "snapshot_rotation"}
+                ]
             all_passed &= qa_contract.print_results(results, label)
         finally:
             server.shutdown()
@@ -348,6 +462,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-flash", action="store_true", help="simulate a camera without a flash unit")
     parser.add_argument("--not-ready", action="store_true", help="camera endpoints return 503 camera_not_ready")
     parser.add_argument("--capture-fails", action="store_true", help="snapshot returns 500 capture_failed")
+    parser.add_argument("--background", action="store_true", help="the app is in the background: camera endpoints 503")
+    parser.add_argument(
+        "--physical-rotation", type=int, choices=[0, 90, 180, 270], default=0, help="phone orientation for auto"
+    )
+    parser.add_argument("--internal-error", action="store_true", help="camera endpoints return 500 internal_error")
+    parser.add_argument(
+        "--start-delay",
+        type=float,
+        default=0.0,
+        help="seconds after the start in which camera endpoints return 503, like the app before the start state",
+    )
     parser.add_argument(
         "--snapshot",
         type=Path,
@@ -372,6 +497,10 @@ def main(argv: list[str] | None = None) -> int:
         has_flash_unit=not args.no_flash,
         ready=not args.not_ready,
         capture_fails=args.capture_fails,
+        internal_error=args.internal_error,
+        background=args.background,
+        physical_rotation=args.physical_rotation,
+        start_delay=args.start_delay,
         snapshot=Path(args.snapshot).read_bytes() if args.snapshot else TEST_JPEG,
     )
     server = make_server(args.host, args.port, config, args.quiet)

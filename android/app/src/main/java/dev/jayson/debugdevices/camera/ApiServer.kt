@@ -75,6 +75,10 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             }
             call.respond(camera.setTorch(request.enabled))
         }
+        post(Constants.Paths.ROTATION) {
+            val request = call.receive<RotationRequest>()
+            call.respond(camera.setRotation(OrientationLogic.lockedRotationFor(request)))
+        }
         get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
     }
 }

@@ -11,6 +11,8 @@ class ZoomLogicTest {
         maxZoomRatio = 8f,
         torchEnabled = false,
         hasFlashUnit = true,
+        rotationDegrees = 0,
+        rotationLocked = false
     )
 
     @Test
@@ -77,7 +79,11 @@ class ZoomLogicTest {
 
     @Test
     fun `validate refuses both fields, no field, and a non finite ratio`() {
-        for (request in listOf(ZoomRequest(2f, ZoomStep.IN), ZoomRequest(), ZoomRequest(ratio = Float.POSITIVE_INFINITY))) {
+        for (request in listOf(
+            ZoomRequest(2f, ZoomStep.IN),
+            ZoomRequest(),
+            ZoomRequest(ratio = Float.POSITIVE_INFINITY)
+        )) {
             val error = assertThrows(ApiException::class.java) { ZoomLogic.validate(request) }
             assertEquals(ErrorCode.BAD_REQUEST, error.code)
         }

@@ -12,6 +12,8 @@ from debug_devices_mcp.phone_api import (
     PhoneClient,
     PhoneProtocolError,
     PhoneUnreachableError,
+    RotationAutoRequest,
+    RotationLockRequest,
     ZoomRatioRequest,
     ZoomStep,
     ZoomStepRequest,
@@ -25,6 +27,8 @@ STATUS = {
     "max_zoom_ratio": 8.0,
     "torch_enabled": False,
     "has_flash_unit": True,
+    "rotation_degrees": 0,
+    "rotation_locked": False,
 }
 
 
@@ -104,10 +108,69 @@ async def test_unreachable() -> None:
 def test_contract_examples_parse() -> None:
     status = CameraStatus.model_validate_json(
         '{"zoom_ratio": 1.0, "min_zoom_ratio": 1.0, "max_zoom_ratio": 8.0, "torch_enabled": false,'
-        ' "has_flash_unit": true}'
+        ' "has_flash_unit": true, "rotation_degrees": 0, "rotation_locked": false}'
     )
     error = ApiError.model_validate_json('{"error": "camera_not_ready", "message": "Camera is not bound yet"}')
 
     assert status.max_zoom_ratio == 8.0
     assert error.error == ApiErrorCode.CAMERA_NOT_READY
     assert "camera_not_ready" in str(PhoneApiError(503, error))
+
+
+@pytest.mark.parametrize("body", [b"{}", b"not json", b'{"zoom_ratio": "x"}'])
+async def test_bad_2xx_body_is_protocol_error(body: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    with pytest.raises(PhoneProtocolError, match="not a CameraStatus"):
+        await client(httpx.MockTransport(handler)).status()
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(500, ApiErrorCode.INTERNAL_ERROR), (405, ApiErrorCode.METHOD_NOT_ALLOWED), (500, ApiErrorCode.CAPTURE_FAILED)],
+)
+async def test_error_codes(status: int, code: ApiErrorCode) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": code.value, "message": "m"})
+
+    with pytest.raises(PhoneApiError) as caught:
+        await client(httpx.MockTransport(handler)).status()
+    assert caught.value.error.error == code
+    assert caught.value.status == status
+
+
+@pytest.mark.parametrize(
+    ("request_model", "body"),
+    [(RotationLockRequest(degrees=90), {"degrees": 90}), (RotationAutoRequest(), {"auto": True})],
+)
+async def test_rotation_body(request_model: RotationLockRequest | RotationAutoRequest, body: dict[str, object]) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={**STATUS, "rotation_degrees": 90, "rotation_locked": True})
+
+    status = await client(httpx.MockTransport(handler)).rotation(request_model)
+
+    assert (status.rotation_degrees, status.rotation_locked) == (90, True)
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/rotation"
+    assert json.loads(seen[0].content) == body
+
+
+def test_rotation_degrees_are_checked() -> None:
+    with pytest.raises(ValueError, match="rotation_degrees"):
+        CameraStatus.model_validate({**STATUS, "rotation_degrees": 45})
+    with pytest.raises(ValueError, match="degrees"):
+        RotationLockRequest.model_validate({"degrees": 45})
+
+
+async def test_old_app_without_rotation_fields_is_a_protocol_error() -> None:
+    old_status = {key: value for key, value in STATUS.items() if not key.startswith("rotation")}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=old_status)
+
+    with pytest.raises(PhoneProtocolError, match="not a CameraStatus"):
+        await client(httpx.MockTransport(handler)).status()

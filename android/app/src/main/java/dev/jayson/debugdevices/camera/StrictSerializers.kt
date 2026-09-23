@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 
 // kotlinx.serialization reads "2" into a Float and "true" into a Boolean. The contract wants JSON numbers and
 // booleans only, so these serializers refuse a JSON string.
@@ -22,6 +23,15 @@ object StrictFloatSerializer : KSerializer<Float> {
         decodeLiteral(decoder).floatOrNull ?: throw SerializationException(Constants.Messages.EXPECTED_NUMBER)
 
     override fun serialize(encoder: Encoder, value: Float) = encoder.encodeFloat(value)
+}
+
+object StrictIntSerializer : KSerializer<Int> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("StrictInt", PrimitiveKind.INT)
+
+    override fun deserialize(decoder: Decoder): Int =
+        decodeLiteral(decoder).intOrNull ?: throw SerializationException(Constants.Messages.EXPECTED_INTEGER)
+
+    override fun serialize(encoder: Encoder, value: Int) = encoder.encodeInt(value)
 }
 
 object StrictBooleanSerializer : KSerializer<Boolean> {

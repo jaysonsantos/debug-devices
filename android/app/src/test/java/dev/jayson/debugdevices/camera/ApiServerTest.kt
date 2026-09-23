@@ -12,14 +12,14 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
-import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
-import org.junit.Test
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Test
 
 class ApiServerTest {
     /** Uses a real [ControlGate], like the CameraX controller. [gate] is ready unless a test says otherwise. */
@@ -44,6 +44,11 @@ class ApiServerTest {
         override suspend fun setTorch(enabled: Boolean): CameraStatus =
             gate.control { status().copy(torchEnabled = enabled).also { status = it } }
 
+        override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
+            val degrees = OrientationLogic.surfaceDegrees(lockedRotation ?: SENSOR_ROTATION)
+            status().copy(rotationDegrees = degrees, rotationLocked = lockedRotation != null).also { status = it }
+        }
+
         override suspend fun capture(): ByteArray {
             captureError?.let { throw it }
             status()
@@ -57,6 +62,8 @@ class ApiServerTest {
         maxZoomRatio = 8f,
         torchEnabled = false,
         hasFlashUnit = true,
+        rotationDegrees = 0,
+        rotationLocked = false
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -68,11 +75,10 @@ class ApiServerTest {
         block()
     }
 
-    private suspend fun ApplicationTestBuilder.postJson(path: String, body: String): HttpResponse =
-        client.post(path) {
-            contentType(ContentType.Application.Json)
-            setBody(body)
-        }
+    private suspend fun ApplicationTestBuilder.postJson(path: String, body: String): HttpResponse = client.post(path) {
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
 
     private suspend fun HttpResponse.status(): CameraStatus = ApiJson.decodeFromString(bodyAsText())
 
@@ -89,8 +95,8 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true}""",
-            body,
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false}""",
+            body
         )
     }
 
@@ -198,13 +204,13 @@ class ApiServerTest {
             client.get(Constants.Paths.ZOOM),
             client.get(Constants.Paths.TORCH),
             client.post(Constants.Paths.STATUS),
-            client.delete(Constants.Paths.SNAPSHOT),
+            client.delete(Constants.Paths.SNAPSHOT)
         )
         for (response in responses) {
             assertEquals(HttpStatusCode.MethodNotAllowed, response.status)
             assertEquals(
                 """{"error":"method_not_allowed","message":"This method is not allowed on this endpoint"}""",
-                response.bodyAsText(),
+                response.bodyAsText()
             )
         }
     }
@@ -293,6 +299,42 @@ class ApiServerTest {
     }
 
     @Test
+    fun `rotation locks and unlocks`() = api(ready(ready)) {
+        val locked = postJson(Constants.Paths.ROTATION, """{"degrees":90}""").status()
+        assertEquals(90, locked.rotationDegrees)
+        assertEquals(true, locked.rotationLocked)
+        assertEquals(true, client.get(Constants.Paths.STATUS).status().rotationLocked)
+        val auto = postJson(Constants.Paths.ROTATION, """{"auto":true}""").status()
+        assertEquals(0, auto.rotationDegrees)
+        assertEquals(false, auto.rotationLocked)
+    }
+
+    @Test
+    fun `rotation bad bodies are 400`() = api(ready(ready)) {
+        val bodies = listOf(
+            "{}",
+            """{"degrees":90,"auto":true}""",
+            """{"degrees":45}""",
+            """{"degrees":360}""",
+            """{"degrees":"90"}""",
+            """{"degrees":90.5}""",
+            """{"auto":false}""",
+            """{"auto":"true"}"""
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.ROTATION, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+    }
+
+    @Test
+    fun `rotation is 503 before the start state and 405 on get`() = api(FakeCamera(ready)) {
+        assertEquals(HttpStatusCode.ServiceUnavailable, postJson(Constants.Paths.ROTATION, """{"degrees":90}""").status)
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get(Constants.Paths.ROTATION).status)
+    }
+
+    @Test
     fun `unknown path is 404 not_found`() = api(ready(ready)) {
         val response = client.get("/v1/nope")
         assertEquals(HttpStatusCode.NotFound, response.status)
@@ -302,5 +344,6 @@ class ApiServerTest {
     private companion object {
         const val APP_VERSION = "0.1.0"
         const val CONCURRENT_REQUESTS = 10
+        const val SENSOR_ROTATION = android.view.Surface.ROTATION_0
     }
 }

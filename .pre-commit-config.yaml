@@ -11,6 +11,8 @@ repos:
       - id: check-json
       - id: check-toml
       - id: check-added-large-files
+        # The README demo recordings are large on purpose.
+        exclude: ^docs/images/
       - id: mixed-line-ending
         args: [--fix=lf]
 

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>debug-devices monitor</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>debug-devices monitor</h1>
+    <span id="link" class="badge" title="Live event stream">connecting…</span>
+  </header>
+
+  <main>
+    <section id="webcam-panel" class="panel">
+      <h2>Webcam <small id="webcam-info"></small></h2>
+      <div id="stage">
+        <img id="webcam" alt="Live webcam view" draggable="false">
+        <div id="crop" hidden>
+          <span class="handle" data-corner="nw"></span>
+          <span class="handle" data-corner="ne"></span>
+          <span class="handle" data-corner="sw"></span>
+          <span class="handle" data-corner="se"></span>
+        </div>
+        <p id="webcam-off" class="overlay-message" hidden></p>
+      </div>
+      <div class="row">
+        <span>Crop: <code id="crop-text">none</code></span>
+        <button id="clear-crop" type="button">Clear crop</button>
+        <span class="hint">Drag on the image to draw the area that goes to the model. Drag the box to move it, drag a corner to resize it.</span>
+      </div>
+      <div class="row">
+        <span>Crop preview (what <code>multimeter_read</code> sends):</span>
+      </div>
+      <canvas id="crop-preview" width="1" height="1"></canvas>
+      <div class="row">
+        <button id="multimeter-read" type="button">Read multimeter</button>
+        <select id="multimeter-source" title="The camera that sees the multimeter">
+          <option value="webcam">from the webcam</option>
+          <option value="phone">from a phone snapshot</option>
+        </select>
+        <span id="multimeter-result" class="reading"></span>
+      </div>
+      <p id="multimeter-error" class="error" hidden></p>
+    </section>
+
+    <section id="phone-panel" class="panel">
+      <h2>Phone</h2>
+      <dl class="facts">
+        <dt>Serial</dt><dd id="phone-serial">not connected</dd>
+        <dt>Screen</dt><dd id="phone-screen-state">off</dd>
+        <dt>scrcpy window</dt><dd id="phone-scrcpy">off</dd>
+        <dt>Zoom</dt><dd id="phone-zoom">–</dd>
+        <dt>Torch</dt><dd id="phone-torch">–</dd>
+        <dt>Rotation</dt><dd id="phone-rotation">–</dd>
+      </dl>
+      <div class="row">
+        <button id="phone-connect" type="button">Connect</button>
+        <button id="phone-refresh" type="button">Refresh status</button>
+      </div>
+      <div class="row">
+        <button id="zoom-out" type="button" title="Zoom out (÷1.5)">−</button>
+        <input id="zoom-slider" type="range" min="1" max="8" step="0.1" value="1" disabled>
+        <button id="zoom-in" type="button" title="Zoom in (×1.5)">+</button>
+      </div>
+      <div class="row">
+        <label><input id="torch" type="checkbox" disabled> Torch</label>
+        <button id="phone-snapshot" type="button">Take snapshot</button>
+      </div>
+      <div class="row">
+        <span>Screen view</span>
+        <button id="view-rotate-left" type="button" title="Turn the phone screen 90° to the left">⟲</button>
+        <button id="view-rotate-right" type="button" title="Turn the phone screen 90° to the right">⟳</button>
+        <button id="view-auto" type="button" title="Turn the phone screen with the phone">Auto</button>
+        <span id="view-rotation" class="hint"></span>
+      </div>
+      <div class="row">
+        <label for="snapshot-rotation">Snapshot rotation</label>
+        <select id="snapshot-rotation" disabled title="Lock the rotation of the next phone snapshots, or follow the phone">
+          <option value="auto">Auto</option>
+          <option value="0">0°</option>
+          <option value="90">90°</option>
+          <option value="180">180°</option>
+          <option value="270">270°</option>
+        </select>
+      </div>
+      <p id="phone-error" class="error" hidden></p>
+      <canvas id="phone-screen" width="1" height="1" hidden></canvas>
+      <p id="phone-screen-note" class="hint">The phone screen shows here after Connect.</p>
+      <a id="snapshot-link" target="_blank" hidden><img id="snapshot" alt="Last phone snapshot"></a>
+    </section>
+
+    <section id="settings-panel" class="panel">
+      <h2>Settings</h2>
+      <form id="settings-form">
+        <label>Vision model
+          <input id="vision-model" name="vision_model" type="text" autocomplete="off" spellcheck="false">
+        </label>
+        <label>Webcam warm-up frames
+          <input id="warmup" name="webcam_warmup_frames" type="number" min="0" step="1">
+        </label>
+        <div class="row">
+          <button type="submit">Save</button>
+          <button id="settings-reset" type="button">Reset to start values</button>
+          <span id="settings-status" class="hint"></span>
+        </div>
+        <p class="hint">Empty field: the value from the CLI flag or the environment. Saved in <code id="settings-file"></code>.</p>
+      </form>
+    </section>
+
+    <section id="log-panel" class="panel">
+      <h2>Activity <small id="log-count"></small></h2>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <template id="log-row">
+    <li class="call">
+      <details>
+        <summary>
+          <span class="time"></span>
+          <span class="source badge"></span>
+          <span class="tool"></span>
+          <code class="args"></code>
+          <span class="duration"></span>
+          <span class="status badge"></span>
+          <span class="summary"></span>
+        </summary>
+        <div class="body">
+          <pre class="error-text" hidden></pre>
+          <div class="reading" hidden></div>
+          <div class="images"></div>
+          <pre class="details-json" hidden></pre>
+        </div>
+      </details>
+    </li>
+  </template>
+</body>
+</html>

@@ -28,6 +28,13 @@ class MeterMode(StrEnum):
     OTHER = "other"
 
 
+class MeterSource(StrEnum):
+    """The camera that sees the multimeter."""
+
+    WEBCAM = "webcam"
+    PHONE = "phone"
+
+
 class MultimeterReading(BaseModel):
     """Every field is required and nullable where it can be empty, so the schema works in strict mode."""
 
@@ -47,39 +54,83 @@ class MultimeterReading(BaseModel):
 
 
 SYSTEM_PROMPT = (
-    "You read a digital multimeter from one photo. Report only what the photo shows. "
-    "Read every digit, the decimal point, the sign, and the unit prefix on the LCD. "
-    "Find the mode from the rotary dial position and the display symbols (DC bar or '⎓', AC '~', Ω, the diode "
-    "symbol, the buzzer symbol for continuity, F, Hz, %, °C). Put 'OL' in display_text and null in value for an "
-    "overload. If you cannot read the display, set readable to false and explain why in notes. "
+    "You read a digital multimeter from one photo. Report only what the photo shows.\n"
+    "- Read every digit, the decimal point, the sign, and the unit with its prefix on the LCD.\n"
+    "- The unit symbol and the annunciators on the LCD decide the mode: V or mV with the DC bar or '⎓' is "
+    "dc_voltage, with '~' or AC is ac_voltage, A/mA/µA the same way for current, Ω/kΩ/MΩ is resistance, "
+    "the diode symbol is diode, the buzzer symbol is continuity, nF/µF is capacitance, Hz is frequency, "
+    "% is duty_cycle, °C/°F is temperature.\n"
+    "- The rotary dial only helps. On many meters one dial position has several functions "
+    "(for example resistance, diode, and continuity). Do not take the mode from the dial alone.\n"
+    "- If you cannot read the unit symbol, say so in notes, give the mode that the dial and the digits suggest, "
+    "and set confidence to 0.5 or lower.\n"
+    "- For an overload, put 'OL' in display_text and null in value.\n"
+    "- If the display is blank or you cannot read the digits, set readable to false and say why in notes.\n"
     "Answer with one JSON object that matches the schema. No other text."
 )
 USER_PROMPT = "Read this multimeter."
+METER_MODEL_PROMPT = "The meter is a {meter_model}. Use what you know about its display and dial."
 
 
+def user_prompt(meter_model: str) -> str:
+    if not meter_model.strip():
+        return USER_PROMPT
+    return f"{USER_PROMPT} {METER_MODEL_PROMPT.format(meter_model=meter_model.strip())}"
+
+
+# Keywords that OpenAI strict mode does not accept, or that add nothing for the model.
+# pydantic still checks the bounds (for example `confidence` in [0, 1]) when it parses the answer.
+UNSUPPORTED_KEYWORDS = frozenset({"title", "default", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"})
 DEFS_KEY = "$defs"
 REF_KEY = "$ref"
 REF_PREFIX = "#/$defs/"
+ANY_OF_KEY = "anyOf"
+TYPE_KEY = "type"
+NULL_TYPE = "null"
+OBJECT_TYPE = "object"
+PROPERTIES_KEY = "properties"
+REQUIRED_KEY = "required"
+ADDITIONAL_PROPERTIES_KEY = "additionalProperties"
 
 
-def _inline_refs(node: Any, defs: dict[str, Any]) -> Any:
-    """Replace each `$ref` with a copy of its definition. Keep the keywords next to the `$ref`."""
+def _nullable_type(options: list[Any]) -> list[str] | None:
+    """`anyOf: [{type: x}, {type: null}]` becomes `[x, "null"]`. Other unions stay as they are."""
+    if not all(isinstance(option, dict) and set(option) == {TYPE_KEY} for option in options):
+        return None
+    types = [option[TYPE_KEY] for option in options]
+    if NULL_TYPE not in types or not all(isinstance(kind, str) for kind in types):
+        return None
+    return types
+
+
+def _strict(node: Any, defs: dict[str, Any]) -> Any:
     if isinstance(node, list):
-        return [_inline_refs(item, defs) for item in node]
+        return [_strict(item, defs) for item in node]
     if not isinstance(node, dict):
         return node
     if REF_KEY in node:
-        siblings = {key: value for key, value in node.items() if key != REF_KEY}
         target = defs[node[REF_KEY].removeprefix(REF_PREFIX)]
-        return {**_inline_refs(target, defs), **_inline_refs(siblings, defs)}
-    return {key: _inline_refs(value, defs) for key, value in node.items()}
+        siblings = {key: value for key, value in node.items() if key != REF_KEY}
+        return _strict({**target, **siblings}, defs)
+    result = {key: _strict(value, defs) for key, value in node.items() if key not in UNSUPPORTED_KEYWORDS}
+    if ANY_OF_KEY in result and (types := _nullable_type(result[ANY_OF_KEY])) is not None:
+        del result[ANY_OF_KEY]
+        result[TYPE_KEY] = types
+    if result.get(TYPE_KEY) == OBJECT_TYPE and PROPERTIES_KEY in result:
+        result[REQUIRED_KEY] = list(result[PROPERTIES_KEY])
+        result[ADDITIONAL_PROPERTIES_KEY] = False
+    return result
 
 
 def reading_json_schema() -> dict[str, Any]:
-    """JSON schema for strict structured outputs. OpenAI strict mode refuses keywords next to a `$ref`."""
+    """JSON schema for OpenAI strict structured outputs.
+
+    No `$ref` or `$defs` (enums are inline), nullable fields as `type: [x, "null"]`, every property required,
+    and `additionalProperties: false` on every object.
+    """
     schema = MultimeterReading.model_json_schema()
     defs = schema.pop(DEFS_KEY, {})
-    return _inline_refs(schema, defs)
+    return _strict(schema, defs)
 
 
 # endregion: reading
@@ -92,8 +143,16 @@ class TextPart(BaseModel):
     text: str
 
 
+class ImageDetail(StrEnum):
+    AUTO = "auto"
+    LOW = "low"
+    HIGH = "high"
+
+
 class ImageUrl(BaseModel):
     url: str
+    # High detail: the unit symbol on the LCD is only a few pixels high.
+    detail: ImageDetail = ImageDetail.HIGH
 
 
 class ImagePart(BaseModel):
@@ -117,11 +176,23 @@ class ResponseFormat(BaseModel):
     json_schema: JsonSchemaFormat
 
 
+class ProviderPreferences(BaseModel):
+    require_parameters: bool = True
+
+
+class Reasoning(BaseModel):
+    effort: str = openrouter.REASONING_EFFORT
+
+
 class ChatCompletionRequest(BaseModel):
+    """No `temperature`, `top_p`, or `stop`: `openai/gpt-6-luna` does not accept them (docs/research.md)."""
+
     model: str
     messages: list[ChatMessage]
     response_format: ResponseFormat
-    temperature: float
+    provider: ProviderPreferences = ProviderPreferences()
+    reasoning: Reasoning = Reasoning()
+    max_tokens: int
 
 
 class ResponseMessage(BaseModel):
@@ -130,6 +201,7 @@ class ResponseMessage(BaseModel):
 
 class Choice(BaseModel):
     message: ResponseMessage
+    finish_reason: str | None = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -149,24 +221,31 @@ class MissingApiKeyError(VisionError):
     """OPENROUTER_API_KEY is not set."""
 
 
+class OutputTruncatedError(VisionError):
+    """The model used the full token budget (`finish_reason: length`) before it finished the answer."""
+
+
 def jpeg_data_url(jpeg: bytes) -> str:
     return openrouter.JPEG_DATA_URL_PREFIX + base64.b64encode(jpeg).decode()
 
 
-def build_request(model: str, jpeg: bytes) -> ChatCompletionRequest:
+def build_request(model: str, jpeg: bytes, meter_model: str = "") -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=model,
         messages=[
             ChatMessage(role="system", content=SYSTEM_PROMPT),
             ChatMessage(
                 role="user",
-                content=[TextPart(text=USER_PROMPT), ImagePart(image_url=ImageUrl(url=jpeg_data_url(jpeg)))],
+                content=[
+                    TextPart(text=user_prompt(meter_model)),
+                    ImagePart(image_url=ImageUrl(url=jpeg_data_url(jpeg))),
+                ],
             ),
         ],
         response_format=ResponseFormat(
             json_schema=JsonSchemaFormat(name=openrouter.SCHEMA_NAME, strict=True, schema_=reading_json_schema())
         ),
-        temperature=openrouter.TEMPERATURE,
+        max_tokens=openrouter.MAX_TOKENS,
     )
 
 
@@ -189,24 +268,44 @@ class VisionClient:
     ) -> None:
         self._api_key = api_key
         self._model = model
+        self._meter_model = ""
         self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout.total_seconds(), transport=transport)
 
     @property
     def model(self) -> str:
         return self._model
 
+    @model.setter
+    def model(self, model: str) -> None:
+        """The monitor page changes the model at run time."""
+        self._model = model
+
+    @property
+    def meter_model(self) -> str:
+        return self._meter_model
+
+    @meter_model.setter
+    def meter_model(self, meter_model: str) -> None:
+        """Free text such as "PROSTER T21D". The prompt names it. Empty: no hint."""
+        self._meter_model = meter_model
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def read_multimeter(self, jpeg: bytes) -> MultimeterReading:
+    def require_api_key(self) -> SecretStr:
+        """Raise `MissingApiKeyError` before any other work (for example before the webcam opens)."""
         if self._api_key is None or not self._api_key.get_secret_value():
             raise MissingApiKeyError(
                 "OPENROUTER_API_KEY is not set. Put it in the .env file at the repo root or in the environment."
             )
-        request = build_request(self._model, jpeg)
+        return self._api_key
+
+    async def read_multimeter(self, jpeg: bytes) -> MultimeterReading:
+        api_key = self.require_api_key()
+        request = build_request(self._model, jpeg, self._meter_model)
         last_error: ValidationError | None = None
         for _ in range(openrouter.MAX_ATTEMPTS):
-            content = await self._complete(self._api_key, request)
+            content = await self._complete(api_key, request)
             try:
                 return parse_reading(content)
             except ValidationError as exc:
@@ -229,16 +328,28 @@ class VisionClient:
             )
         except httpx.TransportError as exc:
             raise VisionError(f"OpenRouter request failed: {exc!r}") from exc
-        preview = response.text[:ERROR_BODY_PREVIEW_CHARS]
+        # OpenRouter sends keep-alive white space before the JSON body.
+        preview = response.text.strip()[:ERROR_BODY_PREVIEW_CHARS]
         if response.is_error:
             raise VisionError(f"OpenRouter returned {response.status_code}: {preview}")
         try:
             completion = ChatCompletionResponse.model_validate_json(response.content)
         except ValidationError as exc:
             raise VisionError(f"OpenRouter returned an unexpected body: {preview}") from exc
-        if not completion.choices or not completion.choices[0].message.content:
-            raise VisionError(f"OpenRouter returned no message content: {preview}")
-        return completion.choices[0].message.content
+        if not completion.choices:
+            raise VisionError(f"OpenRouter returned no choices: {preview}")
+        choice = completion.choices[0]
+        if choice.finish_reason == openrouter.FINISH_REASON_LENGTH:
+            # A retry with the same budget fails the same way, so do not retry.
+            raise OutputTruncatedError(
+                f"model {request.model} stopped at the token limit (max_tokens={request.max_tokens}, "
+                f"reasoning effort {request.reasoning.effort}) before it finished the JSON answer"
+            )
+        if not choice.message.content:
+            raise VisionError(
+                f"OpenRouter returned no message content (finish_reason={choice.finish_reason}): {preview}"
+            )
+        return choice.message.content
 
 
 # endregion: client

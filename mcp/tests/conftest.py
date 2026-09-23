@@ -1,15 +1,24 @@
 """Shared fakes. Run the tests with `uv run pytest` from the repo root."""
 
+import io
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 
 import pytest
+from PIL import Image
 
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import env
 from debug_devices_mcp.process import CommandResult
 
-JPEG = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
+
+def make_jpeg(width: int, height: int) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), (200, 30, 30)).save(output, format="JPEG")
+    return output.getvalue()
+
+
+JPEG = make_jpeg(64, 48)
 
 type Responder = Callable[[list[str]], CommandResult]
 
@@ -38,6 +47,6 @@ def failed(stderr: bytes, returncode: int = 1) -> CommandResult:
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """Defaults only: no .env file and no variables from the shell."""
-    for name in (env.OPENROUTER_API_KEY, env.VISION_MODEL, env.WEBCAM, env.ADB_SERIAL):
+    for name in (env.OPENROUTER_API_KEY, env.VISION_MODEL, env.WEBCAM, env.ADB_SERIAL, env.METER_MODEL):
         monkeypatch.delenv(name, raising=False)
     return Settings(_env_file=None, poll_interval=timedelta(milliseconds=1), app_start_timeout=timedelta(seconds=1))

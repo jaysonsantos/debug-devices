@@ -20,6 +20,7 @@ Change this file first, then change both sides.
 | GET | `/v1/status` | none | `CameraStatus` |
 | POST | `/v1/zoom` | `{"ratio": 2.5}` or `{"step": "in" \| "out"}` | `CameraStatus` |
 | POST | `/v1/torch` | `{"enabled": true}` | `CameraStatus` |
+| POST | `/v1/rotation` | `{"degrees": 0 \| 90 \| 180 \| 270}` or `{"auto": true}` | `CameraStatus` |
 | GET | `/v1/snapshot` | none | `image/jpeg` bytes of one full still capture |
 
 `CameraStatus`:
@@ -30,7 +31,9 @@ Change this file first, then change both sides.
   "min_zoom_ratio": 1.0,
   "max_zoom_ratio": 8.0,
   "torch_enabled": false,
-  "has_flash_unit": true
+  "has_flash_unit": true,
+  "rotation_degrees": 0,
+  "rotation_locked": false
 }
 ```
 
@@ -46,6 +49,9 @@ Rules:
 - The app runs zoom and torch changes one at a time. A request never cancels another request.
 - `ratio` must be a JSON number. A string (also `"2"`) returns 400 `bad_request`.
 - After an app start, the torch is off and the zoom is at `min_zoom_ratio`.
+- `rotation_degrees` is the rotation of the next snapshot (0, 90, 180, 270). With `rotation_locked: false`, the app follows the physical orientation of the phone. When the phone lies flat (no angle), the app keeps the last value.
+- `POST /v1/rotation {"degrees": N}` locks the snapshot rotation to N. `{"auto": true}` goes back to the physical orientation. Other values, or both fields, or neither, return 400 `bad_request`. After an app start, the rotation is auto.
+- The camera endpoints return 503 `camera_not_ready` while the app is not in the foreground.
 - `/v1/snapshot` does not fire the flash. The torch state after a snapshot is the same as before it.
 
 `ApiError` (every non-2xx response):

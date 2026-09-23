@@ -42,6 +42,8 @@ curl -s localhost:8765/v1/health
 curl -s localhost:8765/v1/status
 curl -s -X POST -H 'Content-Type: application/json' -d '{"step":"in"}' localhost:8765/v1/zoom
 curl -s -X POST -H 'Content-Type: application/json' -d '{"enabled":true}' localhost:8765/v1/torch
+curl -s -X POST -H 'Content-Type: application/json' -d '{"degrees":90}' localhost:8765/v1/rotation
+curl -s -X POST -H 'Content-Type: application/json' -d '{"auto":true}' localhost:8765/v1/rotation
 curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 ```
 
@@ -53,6 +55,12 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   `/v1/health` returns 200 before that. Retry `/v1/status` while it returns 503.
 - Zoom and torch changes run one at a time (`ControlGate`), so a request never cancels another request.
 - An unexpected error returns `500 internal_error`. Read the stack trace with `adb -s <serial> logcat -s DebugCamera:E`.
-- When the activity is not started (for example, the screen is off), the camera endpoints return `503 camera_not_ready`.
+- The activity stays in portrait, so the preview never restarts. An `OrientationEventListener` sets the snapshot
+  rotation (`ImageCapture.targetRotation`) and turns the on-screen label (inside the system bar and cutout insets) to the physical orientation. It uses 4 buckets
+  with 15 degrees of hysteresis (`OrientationLogic`). When the phone lies flat, Android reports no orientation, and the
+  app keeps the last rotation. `adb -s <serial> logcat -s DebugCamera:I` shows each rotation change.
+- `POST /v1/rotation {"degrees": 0|90|180|270}` locks the snapshot rotation (`RotationState`); `{"auto": true}` goes
+  back to the sensor. `CameraStatus` has `rotation_degrees` and `rotation_locked`. After a start, the rotation is auto.
+- When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

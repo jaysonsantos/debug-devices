@@ -16,26 +16,36 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.asFlow
+import java.io.ByteArrayOutputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 /**
  * CameraX back camera behind [CameraPort]. Every CameraX call runs on the main thread.
  * Zoom, torch, and the start state go through one [ControlGate].
  */
-class CameraController(private val context: Context) : CameraPort {
+class CameraController(private val context: Context, onRotationChanged: (Int) -> Unit) : CameraPort {
     private val imageCapture = ImageCapture.Builder()
         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
         .setFlashMode(ImageCapture.FLASH_MODE_OFF)
         .build()
     private val gate = ControlGate()
+
+    /** Touch it on the main thread only. */
+    private val rotation = RotationState { next ->
+        imageCapture.targetRotation = next
+        onRotationChanged(next)
+    }
+
+    /** The rotation that the overlay shows: the snapshot rotation. */
+    val effectiveRotation: Int
+        get() = rotation.effectiveRotation
     private val captureLock = Mutex()
     private var camera: Camera? = null
     private var owner: LifecycleOwner? = null
@@ -66,6 +76,9 @@ class CameraController(private val context: Context) : CameraPort {
         }
     }
 
+    /** An `OrientationEventListener` angle. Call it on the main thread. */
+    fun onSensorAngle(angle: Int) = rotation.onSensorAngle(angle)
+
     override suspend fun status(): CameraStatus = withContext(Dispatchers.Main) {
         gate.checkReady()
         readStatus(activeCamera())
@@ -89,6 +102,14 @@ class CameraController(private val context: Context) : CameraPort {
         }
     }
 
+    override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            val camera = activeCamera()
+            rotation.lock(lockedRotation)
+            readStatus(camera)
+        }
+    }
+
     override suspend fun capture(): ByteArray = captureLock.withLock {
         withContext(Dispatchers.Main) {
             gate.checkReady()
@@ -109,11 +130,11 @@ class CameraController(private val context: Context) : CameraPort {
                                 ApiException(
                                     ErrorCode.CAPTURE_FAILED,
                                     exception.message ?: Constants.Messages.CAPTURE_FAILED,
-                                    exception,
-                                ),
+                                    exception
+                                )
                             )
                         }
-                    },
+                    }
                 )
             }
         }
@@ -121,8 +142,9 @@ class CameraController(private val context: Context) : CameraPort {
 
     private fun activeCamera(): Camera {
         val camera = camera ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
-        val started = owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true
-        if (!started) throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_ACTIVE)
+        // The contract: 503 while the app is not in the foreground.
+        val foreground = owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true
+        if (!foreground) throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_ACTIVE)
         return camera
     }
 
@@ -136,6 +158,8 @@ class CameraController(private val context: Context) : CameraPort {
             maxZoomRatio = zoom.maxZoomRatio,
             torchEnabled = info.torchState.value == TorchState.ON,
             hasFlashUnit = info.hasFlashUnit(),
+            rotationDegrees = rotation.effectiveDegrees,
+            rotationLocked = rotation.isLocked
         )
     }
 

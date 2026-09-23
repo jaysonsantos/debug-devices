@@ -5,10 +5,13 @@ description = "MCP server that lets a coding agent see a phone camera and read a
 readme = "mcp/README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "httpx>=0.28.1",
-    "mcp>=1",
-    "pydantic>=2",
-    "pydantic-settings>=2.15.0",
+  "httpx>=0.28.1",
+  "mcp>=2.2",
+  "pillow>=12.3.0",
+  "pydantic>=2",
+  "pydantic-settings>=2.15.0",
+  "starlette>=1.7.0",
+  "uvicorn>=0.53.0",
 ]
 
 [project.scripts]
@@ -42,8 +45,4 @@ testpaths = ["mcp/tests"]
 asyncio_mode = "auto"
 
 [dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.8",
-]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "ruff>=0.16.8"]

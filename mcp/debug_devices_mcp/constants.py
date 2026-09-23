@@ -18,6 +18,7 @@ class env:
     VISION_MODEL = f"{PREFIX}VISION_MODEL"
     WEBCAM = f"{PREFIX}WEBCAM"
     ADB_SERIAL = f"{PREFIX}ADB_SERIAL"
+    METER_MODEL = f"{PREFIX}METER_MODEL"
 
 
 class defaults:
@@ -50,6 +51,7 @@ class phone:
     PATH_STATUS = "/v1/status"
     PATH_ZOOM = "/v1/zoom"
     PATH_TORCH = "/v1/torch"
+    PATH_ROTATION = "/v1/rotation"
     PATH_SNAPSHOT = "/v1/snapshot"
 
 
@@ -88,7 +90,10 @@ class openrouter:
     SCHEMA_NAME = "multimeter_reading"
     JPEG_DATA_URL_PREFIX = "data:image/jpeg;base64,"
     MAX_ATTEMPTS = 2
-    TEMPERATURE = 0.0
+    # gpt-6-luna is a reasoning model: reasoning tokens count against this budget before the JSON answer.
+    MAX_TOKENS = 4000
+    REASONING_EFFORT = "low"
+    FINISH_REASON_LENGTH = "length"
 
 
 JPEG_FORMAT = "jpeg"
@@ -97,3 +102,11 @@ JSON_CONTENT_TYPE = "application/json"
 ERROR_BODY_PREVIEW_CHARS = 500
 # One INFO line per HTTP request drowns the server log on stderr.
 QUIET_LOGGERS = ("httpx", "httpcore")
+
+
+class images:
+    # Long edge in pixels. Larger images are scaled down by the Claude API anyway.
+    DEFAULT_MAX_SIDE = 1568
+    JPEG_QUALITY_STEPS = (85, 75, 65)
+    JPEG_MODE = "RGB"
+    PIL_JPEG_FORMAT = "JPEG"
