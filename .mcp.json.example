@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "debug-devices": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", ".", "debug-devices-mcp"],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Debug Camera</string>
+    <string name="status_label">zoom %1$.2fx · torch %2$s · listening on %3$s:%4$d</string>
+    <string name="torch_on">on</string>
+    <string name="torch_off">off</string>
+    <string name="permission_denied">Camera permission denied. The API returns camera_not_ready.</string>
+</resources>

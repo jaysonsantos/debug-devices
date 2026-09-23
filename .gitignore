@@ -1,0 +1,15 @@
+.direnv/
+result
+.env
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+.idea/
+*.iml

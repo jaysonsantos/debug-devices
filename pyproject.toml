@@ -1,0 +1,49 @@
+[project]
+name = "debug-devices-mcp"
+version = "0.1.0"
+description = "MCP server that lets a coding agent see a phone camera and read a multimeter through a webcam."
+readme = "mcp/README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=1",
+    "pydantic>=2",
+    "pydantic-settings>=2.15.0",
+]
+
+[project.scripts]
+debug-devices-mcp = "debug_devices_mcp.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "debug_devices_mcp"
+module-root = "mcp"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["mcp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PL", "ASYNC", "PT"]
+ignore = [
+  # Timeouts are settings (timedelta) that the caller passes down; the callee applies them.
+  "ASYNC109",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"mcp/tests/**" = ["PLR2004"]
+
+[tool.pytest.ini_options]
+testpaths = ["mcp/tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]

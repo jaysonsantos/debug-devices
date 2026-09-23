@@ -1,0 +1,58 @@
+# Run with `prek run --all-files`. Install the git hook with `prek install`.
+# Every tool comes from flake.nix, so the local hooks use `language: system`.
+repos:
+  # Basic hygiene hooks. prek has them built in, so they need no download.
+  - repo: builtin
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      # mcp/: Python
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format --check
+        entry: ruff format --check --force-exclude
+        language: system
+        types_or: [python, pyi]
+
+      # android/: Kotlin
+      - id: ktlint
+        name: ktlint
+        entry: ktlint --relative
+        language: system
+        types_or: [kotlin]
+
+      # Whole repository
+      - id: typos
+        name: typos
+        entry: typos --force-exclude
+        language: system
+        types: [text]
+      - id: taplo
+        name: taplo format --check
+        entry: taplo format --check
+        language: system
+        types: [toml]
+      - id: nixfmt
+        name: nixfmt --check
+        entry: nixfmt --check
+        language: system
+        types: [nix]
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
