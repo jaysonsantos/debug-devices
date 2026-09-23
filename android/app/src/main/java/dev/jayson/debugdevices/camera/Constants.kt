@@ -9,6 +9,10 @@ object Constants {
         const val STOP_TIMEOUT_MILLIS = 500L
     }
 
+    object Log {
+        const val TAG = "DebugCamera"
+    }
+
     object Paths {
         private const val PREFIX = "/v1"
         const val HEALTH = "$PREFIX/health"
@@ -23,6 +27,11 @@ object Constants {
         const val STEP_FACTOR = 1.5f
     }
 
+    object Start {
+        /** After an app start the torch is off. The zoom starts at the minimum ratio (see [ZoomLogic.startRatio]). */
+        const val TORCH_ENABLED = false
+    }
+
     object Messages {
         const val CAMERA_NOT_READY = "Camera is not bound yet"
         const val CAMERA_NOT_ACTIVE = "Camera is not active"
@@ -33,6 +42,12 @@ object Constants {
         const val NOT_FOUND = "No such endpoint"
         const val METHOD_NOT_ALLOWED = "This method is not allowed on this endpoint"
         const val CAPTURE_FAILED = "The still capture failed"
-        const val UNEXPECTED = "Unexpected camera error"
+        const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
+        const val START_STATE_PENDING = "Camera start state is not set yet"
+        const val START_STATE_FAILED = "Camera bind or start state failed"
+        const val EXPECTED_NUMBER = "Expected a JSON number"
+        const val EXPECTED_BOOLEAN = "Expected a JSON boolean"
+        const val EXPECTED_LITERAL = "Expected a JSON number or boolean, not a string"
+        const val JSON_ONLY = "This serializer reads JSON only"
     }
 }

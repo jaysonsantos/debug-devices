@@ -12,9 +12,9 @@ The dev shell comes from `flake.nix` (nixpkgs `nixos-unstable`, locked 2026-09-2
 | Gradle | 9.7.1 | nixpkgs `gradle_9` |
 | Android Gradle Plugin (AGP) | 9.4.1 (latest stable). Compatible range for this shell: 9.4.x. | Google Maven |
 | AGP 9.4 needs | Gradle 9.6.0 or later, JDK 17, build-tools 36.0.0 or later, compileSdk up to 37 | AGP release notes |
-| compileSdk / targetSdk | 36 | SDK in the shell: `platforms;android-36` |
+| compileSdk / targetSdk | 37 (`compileSdk = 37` resolves to `platforms/android-37.0`) | SDK in the shell: `platforms;android-37.0` |
 | minSdk | 26 or later (recommended; CameraX 1.6 needs 23 or later) | |
-| Build-tools | 36.0.0 | SDK in the shell |
+| Build-tools | 37.0.0 (aapt2 `2.20-15087165`) | SDK in the shell |
 | Platform-tools (adb) | 37.0.x (`android-tools` and SDK `platform-tools`) | nixpkgs |
 | Kotlin | 2.4.20 (latest Kotlin Gradle plugin). AGP 9 has built-in Kotlin: do not apply `org.jetbrains.kotlin.android`. Apply `org.jetbrains.kotlin.plugin.serialization` with the same Kotlin version. | Maven Central |
 | ktlint | 1.8.0 | nixpkgs |
@@ -38,10 +38,11 @@ Library versions (latest stable on 2026-09-23):
 
 ### Android SDK in the shell
 
-- The SDK is `androidenv.composeAndroidPackages` with platform 36 and build-tools 36.0.0. No emulator, no system images, no NDK.
+- The SDK is `androidenv.composeAndroidPackages` with platform `37.0` and build-tools 37.0.0. No emulator, no system images, no NDK. Platform 36 is not in the shell: it is not necessary.
+- nixpkgs names platform 37 `"37.0"`, and the directory is `platforms/android-37.0`. AGP 9.4.1 finds it with `compileSdk = 37`.
 - `ANDROID_HOME` and `ANDROID_SDK_ROOT` point to `<sdk>/libexec/android-sdk` in the Nix store. The store is read-only: Gradle cannot install more SDK packages. To add a package, change `flake.nix`.
 - The flake accepts the SDK license with `config.android_sdk.accept_license = true` and `allowUnfree = true`.
-- `GRADLE_OPTS` sets `-Dorg.gradle.project.android.aapt2FromMavenOverride=$ANDROID_HOME/build-tools/36.0.0/aapt2`. The aapt2 from Maven is a dynamic binary that does not run on NixOS. The SDK aapt2 runs (`aapt2 version` prints `2.20-13193326`).
+- `GRADLE_OPTS` sets `-Dorg.gradle.project.android.aapt2FromMavenOverride=$ANDROID_HOME/build-tools/37.0.0/aapt2`. The aapt2 from Maven is a dynamic binary that does not run on NixOS. The SDK aapt2 runs (`aapt2 version` prints `2.20-15087165`).
 - Do not write `sdk.dir` into `local.properties`. `ANDROID_HOME` is sufficient.
 - Use the Gradle from the shell to make the wrapper once: `gradle wrapper --gradle-version 9.7.1`. After that, `./gradlew` works in the shell.
 
@@ -52,10 +53,10 @@ nix develop --command python3 --version      # Python 3.14.7
 nix develop --command uv --version           # uv 0.12.17
 nix develop --command gradle --version       # Gradle 9.7.1, JVM 17.0.20.1
 nix develop --command sdkmanager --list_installed
-# build-tools;36.0.0, platforms;android-36, platform-tools 37.0.1, cmdline-tools;22.0
+# build-tools;37.0.0, platforms;android-37.0, platform-tools 37.0.1, cmdline-tools;22.0
 ```
 
-Minimal `android/` build settings that match the shell. A smoke build with these settings, CameraX 1.6.2, kotlinx.serialization 1.11.0, Ktor CIO 3.6.0, and a `@Serializable` class passed: `gradle assembleDebug` made `app-debug.apk` (built-in Kotlin, no `kotlin-android` plugin):
+Minimal `android/` build settings that match the shell. A smoke build with these settings, CameraX 1.6.2, kotlinx.serialization 1.11.0, Ktor CIO 3.6.0, and a `@Serializable` class passed: `gradle assembleDebug` made `app-debug.apk` (built-in Kotlin, no `kotlin-android` plugin). `aapt2 dump badging` of that APK shows `compileSdkVersion='37'` and `targetSdkVersion:'37'`:
 
 ```kotlin
 // settings.gradle.kts
@@ -77,9 +78,9 @@ plugins {
 }
 android {
     namespace = "dev.jayson.debugdevices.camera"
-    compileSdk = 36
-    buildToolsVersion = "36.0.0"
-    defaultConfig { minSdk = 26; targetSdk = 36 }
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
+    defaultConfig { minSdk = 26; targetSdk = 37 }
 }
 kotlin { jvmToolchain(17) }
 ```

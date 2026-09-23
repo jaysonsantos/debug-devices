@@ -20,9 +20,9 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 
 /** Runs the contract API on 127.0.0.1:8765 with the CIO engine. */
-class ApiServer(camera: CameraPort, appVersion: String) {
+class ApiServer(camera: CameraPort, appVersion: String, onUnexpected: (Throwable) -> Unit) {
     private val engine = embeddedServer(CIO, port = Constants.Server.PORT, host = Constants.Server.HOST) {
-        cameraApi(camera, appVersion)
+        cameraApi(camera, appVersion, onUnexpected)
     }
 
     fun start() {
@@ -34,7 +34,8 @@ class ApiServer(camera: CameraPort, appVersion: String) {
     }
 }
 
-fun Application.cameraApi(camera: CameraPort, appVersion: String) {
+/** [onUnexpected] gets every error that is not part of the contract, so the caller can log the stack trace. */
+fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: (Throwable) -> Unit) {
     install(ContentNegotiation) { json(ApiJson) }
     install(StatusPages) {
         exception<ApiException> { call, cause -> call.respondError(cause.code, cause.message) }
@@ -45,13 +46,14 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String) {
             call.respondError(ErrorCode.BAD_REQUEST, Constants.Messages.BAD_BODY)
         }
         exception<Throwable> { call, cause ->
-            call.respondError(ErrorCode.CAMERA_NOT_READY, cause.message ?: Constants.Messages.UNEXPECTED)
+            onUnexpected(cause)
+            call.respondError(ErrorCode.INTERNAL_ERROR, Constants.Messages.UNEXPECTED)
         }
         status(HttpStatusCode.NotFound) { call, _ ->
             call.respondError(ErrorCode.NOT_FOUND, Constants.Messages.NOT_FOUND)
         }
-        status(HttpStatusCode.MethodNotAllowed) { call, status ->
-            call.respond(status, ApiError(ErrorCode.BAD_REQUEST, Constants.Messages.METHOD_NOT_ALLOWED))
+        status(HttpStatusCode.MethodNotAllowed) { call, _ ->
+            call.respondError(ErrorCode.METHOD_NOT_ALLOWED, Constants.Messages.METHOD_NOT_ALLOWED)
         }
         status(HttpStatusCode.UnsupportedMediaType) { call, _ ->
             call.respondError(ErrorCode.BAD_REQUEST, Constants.Messages.BAD_BODY)
@@ -62,8 +64,9 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String) {
         get(Constants.Paths.STATUS) { call.respond(camera.status()) }
         post(Constants.Paths.ZOOM) {
             val request = call.receive<ZoomRequest>()
-            val target = ZoomLogic.resolve(request, camera.status())
-            call.respond(camera.setZoomRatio(target))
+            // Refuse a bad body with 400 before the camera state matters.
+            ZoomLogic.validate(request)
+            call.respond(camera.updateZoom { status -> ZoomLogic.resolve(request, status) })
         }
         post(Constants.Paths.TORCH) {
             val request = call.receive<TorchRequest>()

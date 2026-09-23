@@ -5,12 +5,13 @@ plugins {
 
 android {
     namespace = "dev.jayson.debugdevices.camera"
-    compileSdk = 36
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "dev.jayson.debugdevices.camera"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
     }
@@ -40,6 +41,7 @@ dependencies {
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.livedata.ktx)
     implementation(libs.androidx.concurrent.futures.ktx)
     implementation(libs.camerax.core)
     implementation(libs.camerax.camera2)

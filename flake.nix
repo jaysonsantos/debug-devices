@@ -13,8 +13,9 @@
       ];
 
       # Android SDK versions. AGP 9.4 needs build-tools 36.0.0 or later and supports compileSdk up to 37.
-      androidPlatformVersion = "36";
-      androidBuildToolsVersion = "36.0.0";
+      # nixpkgs names platform 37 "37.0" (directory platforms/android-37.0).
+      androidPlatformVersion = "37.0";
+      androidBuildToolsVersion = "37.0.0";
     in
     {
       devShells = forAllSystems (
@@ -62,8 +63,12 @@
               pkgs.nixfmt
               pkgs.shellcheck
             ]
-            # v4l2-ctl lists the webcam formats. Video4Linux exists only on Linux.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.v4l-utils ];
+            # Linux only: v4l2-ctl lists the webcam formats (Video4Linux),
+            # and scrcpy mirrors the phone screen for the monitor feature.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.v4l-utils
+              pkgs.scrcpy
+            ];
 
             ANDROID_HOME = androidHome;
             ANDROID_SDK_ROOT = androidHome;

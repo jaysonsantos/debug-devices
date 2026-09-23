@@ -4,7 +4,7 @@ Android app that makes the phone a remote-controlled camera for a coding agent.
 It shows the back camera full screen and serves the HTTP API in [`../docs/phone-api.md`](../docs/phone-api.md) on `127.0.0.1:8765`.
 
 - Package: `dev.jayson.debugdevices.camera`
-- minSdk 26, compileSdk and targetSdk 36 (the Android platform in `flake.nix`)
+- minSdk 26, compileSdk and targetSdk 37 (the Android platform in `flake.nix`)
 - CameraX (preview, still capture, zoom, torch), Ktor server with the CIO engine, kotlinx.serialization
 
 ## Build
@@ -49,6 +49,10 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 
 - The server runs from `onCreate` to `onDestroy` of `MainActivity`. Android gives camera access only to a visible app
   or to a camera foreground service. The app keeps the screen on, so the activity is enough.
+- After a start, the camera endpoints return `503 camera_not_ready` until the start state is set (zoom at min, torch off).
+  `/v1/health` returns 200 before that. Retry `/v1/status` while it returns 503.
+- Zoom and torch changes run one at a time (`ControlGate`), so a request never cancels another request.
+- An unexpected error returns `500 internal_error`. Read the stack trace with `adb -s <serial> logcat -s DebugCamera:E`.
 - When the activity is not started (for example, the screen is off), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

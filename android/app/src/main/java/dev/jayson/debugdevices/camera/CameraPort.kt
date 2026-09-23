@@ -4,7 +4,11 @@ package dev.jayson.debugdevices.camera
 interface CameraPort {
     suspend fun status(): CameraStatus
 
-    suspend fun setZoomRatio(ratio: Float): CameraStatus
+    /**
+     * Sets the zoom to [target] of the current status. The read and the change run under one lock, so parallel
+     * `step` requests do not lose updates.
+     */
+    suspend fun updateZoom(target: (CameraStatus) -> Float): CameraStatus
 
     suspend fun setTorch(enabled: Boolean): CameraStatus
 

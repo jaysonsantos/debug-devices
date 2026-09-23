@@ -44,6 +44,17 @@ class ZoomLogicTest {
     }
 
     @Test
+    fun `start ratio is the minimum`() {
+        assertEquals(1f, ZoomLogic.startRatio(1f), DELTA)
+        assertEquals(0.6f, ZoomLogic.startRatio(0.6f), DELTA)
+    }
+
+    @Test
+    fun `torch is off after start`() {
+        assertEquals(false, Constants.Start.TORCH_ENABLED)
+    }
+
+    @Test
     fun `explicit ratio inside the range is kept`() {
         assertEquals(2.5f, ZoomLogic.resolve(ZoomRequest(ratio = 2.5f), status), DELTA)
     }
@@ -62,6 +73,16 @@ class ZoomLogicTest {
     fun `resolve step uses the current ratio`() {
         assertEquals(3f, ZoomLogic.resolve(ZoomRequest(step = ZoomStep.IN), status), DELTA)
         assertEquals(4f / 3f, ZoomLogic.resolve(ZoomRequest(step = ZoomStep.OUT), status), DELTA)
+    }
+
+    @Test
+    fun `validate refuses both fields, no field, and a non finite ratio`() {
+        for (request in listOf(ZoomRequest(2f, ZoomStep.IN), ZoomRequest(), ZoomRequest(ratio = Float.POSITIVE_INFINITY))) {
+            val error = assertThrows(ApiException::class.java) { ZoomLogic.validate(request) }
+            assertEquals(ErrorCode.BAD_REQUEST, error.code)
+        }
+        ZoomLogic.validate(ZoomRequest(ratio = 2f))
+        ZoomLogic.validate(ZoomRequest(step = ZoomStep.OUT))
     }
 
     @Test

@@ -4,7 +4,7 @@
 
 - `flake.nix` and `flake.lock`: dev shell for all parts. nixpkgs `nixos-unstable` (locked 2026-09-22), `forAllSystems`, one comment per package group.
   - Python: `python314` (3.14.7), `uv` 0.12.17, `ruff` 0.16.8, `ffmpeg` 9.0.1, `v4l-utils` (Linux only).
-  - Android: `jdk17`, `gradle_9` (9.7.1), `android-tools`, `ktlint` 1.8.0, and an SDK from `androidenv.composeAndroidPackages` (platform 36, build-tools 36.0.0, no emulator, no NDK). The flake accepts the SDK license (`android_sdk.accept_license`, `allowUnfree`).
+  - Android: `jdk17`, `gradle_9` (9.7.1), `android-tools`, `ktlint` 1.8.0, and an SDK from `androidenv.composeAndroidPackages` (platform `37.0`, build-tools 37.0.0, no emulator, no NDK). The flake accepts the SDK license (`android_sdk.accept_license`, `allowUnfree`).
   - Linters: `prek`, `typos`, `taplo`, `nixfmt`, `shellcheck`.
   - Environment: `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `JAVA_HOME`, `GRADLE_OPTS` with `android.aapt2FromMavenOverride` to the SDK aapt2, `UV_PYTHON_DOWNLOADS=never`, `UV_PYTHON_PREFERENCE=only-system`.
 - `.pre-commit-config.yaml`: prek built-in hygiene hooks (merge conflicts, end of file, trailing white space, YAML, JSON, TOML, large files, line endings) and local `language: system` hooks: ruff check, ruff format --check, ktlint, typos, taplo, nixfmt, shellcheck.
@@ -18,9 +18,9 @@
 | Python | `nix develop --command python3 --version` | `Python 3.14.7` |
 | uv | `nix develop --command uv --version` | `uv 0.12.17` |
 | Gradle | `nix develop --command gradle --version` | `Gradle 9.7.1`, JVM 17.0.20.1 |
-| SDK | `nix develop --command sdkmanager --list_installed` | build-tools 36.0.0, platforms android-36, platform-tools 37.0.1 |
-| aapt2 | `$ANDROID_HOME/build-tools/36.0.0/aapt2 version` | `2.20-13193326` |
-| Android build | smoke project in the scratchpad: AGP 9.4.1, built-in Kotlin 2.4.20, serialization, CameraX 1.6.2, Ktor CIO 3.6.0; `gradle assembleDebug` | `app-debug.apk` made |
+| SDK | `nix develop --command sdkmanager --list_installed` | `build-tools;37.0.0`, `platforms;android-37.0`, platform-tools 37.0.1 |
+| aapt2 | `$ANDROID_HOME/build-tools/37.0.0/aapt2 version` | `2.20-15087165` |
+| Android build | smoke project in the scratchpad: AGP 9.4.1, `compileSdk = 37`, `targetSdk = 37`, `buildToolsVersion = "37.0.0"`, built-in Kotlin 2.4.20, serialization, CameraX 1.6.2, Ktor CIO 3.6.0; `gradle assembleDebug` | `app-debug.apk` made; `aapt2 dump badging` shows `compileSdkVersion='37'` |
 | Hooks | `nix develop --command prek run --all-files` | all pass (only on files that git knows) |
 | MCP SDK | probe server with `mcp==2.2.0`, in-process `Client` | image + `structured_content` + `outputSchema` work |
 | Webcam | the ffmpeg command in `docs/research.md` section 5 on `/dev/video0` | 1920x1080 JPEG, exit 0, about 2.5 s |
@@ -32,6 +32,19 @@
 3. **dd-mcp: webcam warm-up is necessary.** The first frame has a green cast. Skip 30 frames at 30 fps (`select=gte(n\,30)`). Use MJPEG input; YUYV 1080p is only 5 fps.
 4. **dd-android: AGP 9 has built-in Kotlin.** Do not apply `org.jetbrains.kotlin.android`. `ListenableFuture.await()` needs `androidx.concurrent:concurrent-futures-ktx`. `setZoomRatio` fails outside `[min, max]`: clamp first.
 5. The SDK is in the read-only Nix store. Gradle cannot download SDK packages. If the app needs another platform or build-tools version, change `flake.nix`.
+
+## Update: Android platform 37
+
+- `flake.nix` now has platform `37.0` and build-tools 37.0.0. I removed platform 36 and build-tools 36.0.0: the build does not need them.
+- nixpkgs names the platform `"37.0"`. The SDK directory is `platforms/android-37.0`. AGP 9.4.1 finds it with `compileSdk = 37`. No `compileSdk { ... minorApiLevel ... }` block is necessary.
+- `GRADLE_OPTS` now points to `build-tools/37.0.0/aapt2`.
+- dd-android: set `compileSdk = 37`, `targetSdk = 37`, and `buildToolsVersion = "37.0.0"` in `android/`. An `android/` build that still says `compileSdk = 36` now fails, because platform 36 is not in the shell.
+
+## Update: scrcpy
+
+- `flake.nix` now has `scrcpy` 4.1 in the Linux shells (`x86_64-linux`, `aarch64-linux`), next to `v4l-utils`. It is for the monitor feature. The `aarch64-darwin` shell does not have it.
+- Verify: `nix develop --command scrcpy --version` prints `scrcpy 4.1`. `nixfmt --check flake.nix` passes. I did not start scrcpy.
+- scrcpy uses the `adb` from the shell. Always give the serial: `scrcpy -s 7fad170e`. With more than one device and no serial, scrcpy stops with an error, and the Fire TV devices are also visible to adb.
 
 ## Changes outside my paths
 

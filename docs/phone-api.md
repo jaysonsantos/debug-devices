@@ -9,6 +9,7 @@ Change this file first, then change both sides.
 - The server binds to `127.0.0.1` only, port `8765`.
 - The MCP server reaches it through ADB: `adb -s <serial> forward tcp:<local> tcp:8765`.
 - All bodies are JSON (`application/json`), except the snapshot (`image/jpeg`).
+- A POST body must have `Content-Type: application/json`. Without it, the app returns 400 `bad_request`.
 - The camera is the back camera. The app keeps the screen on while it runs.
 
 ## Endpoints
@@ -40,7 +41,10 @@ Rules:
 - `torch` on a phone without a flash unit returns 409 with an `ApiError`.
 - A zoom body with both `ratio` and `step`, or with neither, returns 400 `bad_request`.
 - A known path with a wrong method (for example `GET /v1/zoom`) returns 405 `method_not_allowed`.
-- `/v1/health` returns 200 while the camera is not bound yet. The other camera endpoints return 503 `camera_not_ready` until then.
+- `/v1/health` returns 200 while the camera is not bound yet. The other camera endpoints return 503 `camera_not_ready` until the camera is bound AND the start state (torch off, zoom at min) is set.
+- The HTTP server needs a few seconds after `am start`. The client retries `/v1/health`, then `/v1/status` while it gets 503, until its start timeout ends.
+- The app runs zoom and torch changes one at a time. A request never cancels another request.
+- `ratio` must be a JSON number. A string (also `"2"`) returns 400 `bad_request`.
 - After an app start, the torch is off and the zoom is at `min_zoom_ratio`.
 - `/v1/snapshot` does not fire the flash. The torch state after a snapshot is the same as before it.
 
@@ -50,7 +54,7 @@ Rules:
 {"error": "camera_not_ready", "message": "Camera is not bound yet"}
 ```
 
-Error codes: `camera_not_ready` (503), `no_flash_unit` (409), `bad_request` (400), `not_found` (404), `method_not_allowed` (405), `capture_failed` (500).
+Error codes: `camera_not_ready` (503), `no_flash_unit` (409), `bad_request` (400), `not_found` (404), `method_not_allowed` (405), `capture_failed` (500), `internal_error` (500, an unexpected error; the app logs the stack trace).
 
 ## App launch
 

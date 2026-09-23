@@ -12,6 +12,20 @@ object ZoomLogic {
         return clamp(next, min, max)
     }
 
+    /** The zoom ratio after an app start: the minimum of the camera. */
+    fun startRatio(minZoomRatio: Float): Float = minZoomRatio
+
+    /** Throws [ApiException] with [ErrorCode.BAD_REQUEST] when the request is not exactly one finite field. */
+    fun validate(request: ZoomRequest) {
+        val ratio = request.ratio
+        if ((ratio == null) == (request.step == null)) {
+            throw ApiException(ErrorCode.BAD_REQUEST, Constants.Messages.ZOOM_NEEDS_ONE_FIELD)
+        }
+        if (ratio != null && !ratio.isFinite()) {
+            throw ApiException(ErrorCode.BAD_REQUEST, Constants.Messages.ZOOM_RATIO_NOT_FINITE)
+        }
+    }
+
     /** Returns the clamped target ratio, or throws [ApiException] with [ErrorCode.BAD_REQUEST]. */
     fun resolve(request: ZoomRequest, status: CameraStatus): Float {
         val ratio = request.ratio

@@ -36,13 +36,13 @@ enum class ZoomStep {
 
 @Serializable
 data class ZoomRequest(
-    val ratio: Float? = null,
+    @Serializable(with = StrictFloatSerializer::class) val ratio: Float? = null,
     val step: ZoomStep? = null,
 )
 
 @Serializable
 data class TorchRequest(
-    val enabled: Boolean,
+    @Serializable(with = StrictBooleanSerializer::class) val enabled: Boolean,
 )
 
 @Serializable
@@ -61,8 +61,14 @@ enum class ErrorCode(
     @SerialName("not_found")
     NOT_FOUND(HttpStatusCode.NotFound),
 
+    @SerialName("method_not_allowed")
+    METHOD_NOT_ALLOWED(HttpStatusCode.MethodNotAllowed),
+
     @SerialName("capture_failed")
     CAPTURE_FAILED(HttpStatusCode.InternalServerError),
+
+    @SerialName("internal_error")
+    INTERNAL_ERROR(HttpStatusCode.InternalServerError),
 }
 
 @Serializable

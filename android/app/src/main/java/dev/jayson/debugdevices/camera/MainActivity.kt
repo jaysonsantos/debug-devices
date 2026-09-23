@@ -3,6 +3,7 @@ package dev.jayson.debugdevices.camera
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.camera.core.TorchState
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -43,7 +45,9 @@ class MainActivity : ComponentActivity() {
         renderStatus()
 
         camera = CameraController(applicationContext)
-        server = ApiServer(camera, BuildConfig.VERSION_NAME)
+        server = ApiServer(camera, BuildConfig.VERSION_NAME) { cause ->
+            Log.e(Constants.Log.TAG, Constants.Messages.UNEXPECTED, cause)
+        }
         lifecycleScope.launch(Dispatchers.IO) { server.start() }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -60,7 +64,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun bindCamera() {
-        lifecycleScope.launch { observe(camera.bind(this@MainActivity, previewView)) }
+        lifecycleScope.launch {
+            // No error from bind or the start state may escape this coroutine: it runs on the main thread,
+            // so an escaped error kills the app. A coroutine cancel (activity destroyed) goes through.
+            try {
+                val boundCamera = camera.bind(this@MainActivity, previewView)
+                observe(boundCamera)
+                camera.applyStartState(boundCamera)
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                Log.e(Constants.Log.TAG, Constants.Messages.START_STATE_FAILED, cause)
+            }
+        }
     }
 
     private fun observe(boundCamera: Camera) {
