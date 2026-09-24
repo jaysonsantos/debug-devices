@@ -17,3 +17,5 @@ local.properties
 .codex/
 # Local Claude Code MCP config (absolute paths). See .mcp.json.example.
 .mcp.json
+# Personal bench instructions for the agents (see instructions.example.md)
+instructions.md

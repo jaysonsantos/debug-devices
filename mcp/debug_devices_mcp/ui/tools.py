@@ -90,6 +90,8 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
     ) -> BenchResult:
         """Start the bench in one call. Use it when the user says "start the bench".
 
+        Follow bench_instructions (the user's instructions file): call it first in a new session.
+
         Steps: the monitor page (a Firefox window with `open_browser`), the webcam stream, phone_connect (with
         the phone screen), and board_open when `board_path` is given. Each step runs even when another one fails.
         The result has the page URL and the status of each step; tell the user both.

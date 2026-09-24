@@ -1,41 +1,104 @@
 # debug-devices
 
-Tools that let a coding agent (Claude Code) see and measure real hardware while it debugs.
+Tools that let an AI agent see and measure real hardware while you debug it: a phone camera, a multimeter read through a webcam, and the boardview file of the board.
 
 ![The monitor page: webcam crop, live phone screen, phone controls, and the activity log](docs/images/monitor-demo.webp)
 
 A short MP4 of the same demo is in [docs/images/monitor-demo.mp4](docs/images/monitor-demo.mp4).
 
+## What it does
+
+You debug a board on your bench. An AI agent (Claude Code, Codex, or ChatGPT desktop) helps you, and this project gives it eyes and data:
+
+- **Phone camera:** the agent zooms, turns on the torch, rotates, and takes photos of the board through a small Android app.
+- **Multimeter:** the PC webcam looks at the multimeter. The agent reads the value, the unit, and the mode through a vision model.
+- **Board file:** the agent reads the boardview file and finds parts, nets, test points, and their positions.
+- **Monitor page:** you see the webcam, the phone screen, and each action of the agent on a local web page.
+- **Your instructions:** the agent reads your notes about the device and the repair (`instructions.md`) at the start of each session.
+
+## How to use it
+
+### 1. Set up one time
+
+1. Open the dev shell in this repository: `nix develop`. With direnv, put `dotenv_if_exists` and `use flake` in `.envrc`.
+2. Copy `.env.example` to `.env`. Set `OPENROUTER_API_KEY`. Set `DEBUG_DEVICES_ADB_SERIAL` to the serial of your phone (`adb devices`). Other Android devices on the network then get no command.
+3. Build the app and install it on the phone. The steps are in [android/README.md](android/README.md). Allow the camera when the app asks.
+4. Run `uv sync`.
+5. Point the PC webcam at the multimeter display.
+
+### 2. Write your instructions
+
+Copy the template and fill it in:
+
+```sh
+cp instructions.example.md instructions.md
+```
+
+Write the device under test, the fault, the paths of the board file and the schematic, your bench set-up, safety limits, the measurements so far, the next step, and your preferences. Git ignores `instructions.md`, so it stays on your PC. Do not put secrets in it.
+
+When an agent connects to the server, it gets the order to call `bench_instructions` first. That tool returns your file. The file is read again on each call, so you can add new measurements during a session. Details: [Bench instructions](#bench-instructions-instructionsmd).
+
+### 3. Connect an agent
+
+Choose one:
+
+- **Claude Code (CLI):** run `scripts/claude.sh` from any folder. Add `--browser` as the first argument to open the monitor page in Firefox.
+- **Codex (CLI):** run `scripts/codex.sh`, with the same `--browser` option.
+- **Claude Code in this folder:** put the server in `.mcp.json` (start from `.mcp.json.example`, with absolute paths and `nix develop`, see below). Start `claude` here and approve `debug-devices` one time.
+- **Codex CLI or ChatGPT desktop in this folder:** put the server in `.codex/config.toml`:
+
+  ```toml
+  [mcp_servers.debug_devices]
+  command = "nix"
+  args = ["develop", "/abs/path/debug-devices", "--command", "uv", "run", "--directory", "/abs/path/debug-devices", "debug-devices-mcp", "--no-ui-open-browser"]
+  startup_timeout_sec = 180
+  tool_timeout_sec = 120
+  ```
+
+  Codex loads it only in this folder (the folder must be trusted). In ChatGPT desktop, open this folder in Codex.
+
+`.mcp.json` and `.codex/config.toml` contain absolute paths, so git ignores them. `nix develop` gives the server `obv-dump`, `ffmpeg`, `scrcpy`, and `adb`.
+
+### 4. Debug
+
+A normal session:
+
+1. Say **"start the bench"**. The agent runs `bench_start`: it starts the monitor page, the webcam, and the phone, opens the board file when your instructions give its path, and gives you the page URL.
+2. Open the page (default `http://127.0.0.1:18766/`). Draw the crop box around the multimeter display one time. Only this area goes to the vision model.
+3. Ask questions. Examples:
+   - "Where is U2? Show it on the board."
+   - "Which test point is near U2 on the PP3V3 net?"
+   - "Zoom the phone to 3x and take a photo."
+   - "Read the multimeter."
+4. Add each result to `instructions.md`, or tell the agent to note it.
+5. Say **"stop the bench"**. The agent runs `bench_stop`, and the webcam and the phone are free again.
+
+**Voice:** in ChatGPT desktop, use the dictation button in Codex. You speak, and the text goes to the agent that has the tools. The phrases "start the bench" and "stop the bench" work well.
+
+**Lazy start:** the server starts nothing until a tool needs it. At process start, it opens no port and starts no ffmpeg, adb, scrcpy, or browser. The first tool call starts the page, the first webcam use starts the webcam, and `phone_connect` starts adb. The webcam stops after 5 minutes without use. So a session that does not use the bench costs nothing.
+
+## Tools
+
+| Group | Tools |
+|---|---|
+| Bench | `bench_instructions`, `bench_start`, `bench_stop`, `monitor_open` |
+| Phone camera | `phone_connect`, `phone_status`, `phone_zoom`, `phone_torch`, `phone_rotation`, `phone_snapshot` |
+| Webcam and multimeter | `webcam_snapshot`, `multimeter_read` (source `webcam` or `phone`) |
+| Board file | `board_open`, `board_find_part`, `board_part_pins`, `board_find_net`, `board_parts_near`, `board_render`, `board_register_photo`, `board_locate_in_photo` |
+
+Details of each tool: [mcp/README.md](mcp/README.md).
+
 ## Parts
 
-- `android/`: an Android app. It is a remote-controlled back camera with zoom in, zoom out, torch, and snapshot. It serves the HTTP API in [docs/phone-api.md](docs/phone-api.md). See [android/README.md](android/README.md).
-- `mcp/`: a Python MCP server (stdio) for Claude Code:
-  - It controls the phone camera through an ADB port forward.
-  - It reads a multimeter through the PC webcam and an OpenRouter vision model.
-  - It serves a local monitor page that shows the webcam, the live phone screen, and each tool call.
-  - It reads boardview files and answers questions about parts, nets, and their positions on the board.
-  - See [mcp/README.md](mcp/README.md).
+- `android/`: the Android app. It is a remote-controlled back camera (zoom, torch, rotation, snapshot). It serves the HTTP API in [docs/phone-api.md](docs/phone-api.md) on `127.0.0.1` of the phone. See [android/README.md](android/README.md).
+- `mcp/`: the Python MCP server (stdio) and the monitor page. See [mcp/README.md](mcp/README.md).
 - `boardview/`: `obv-dump`, a small C++ CLI on the [OpenBoardView](https://github.com/OpenBoardView/OpenBoardView) parsers. It reads a boardview file and writes JSON. See [boardview/README.md](boardview/README.md).
 - `docs/`: the API contracts ([phone](docs/phone-api.md), [boardview JSON](docs/boardview-json.md)), the research notes, the QA guide, and the agent reports.
-- `scripts/`: QA tools, the live reload monitor, and the demo recorder.
+- `scripts/`: the agent start scripts, QA tools, the live reload monitor, and the demo recorder.
 
-## Quick start
+## Start scripts
 
-1. Open the dev shell: `nix develop`. With direnv, put `dotenv_if_exists` and `use flake` in `.envrc`.
-2. Copy `.env.example` to `.env`. Set `OPENROUTER_API_KEY`. If more than one ADB device is connected, set `DEBUG_DEVICES_ADB_SERIAL` to the serial of the phone.
-3. Build and install the app on the phone. The steps are in [android/README.md](android/README.md).
-4. Run `uv sync`.
-5. Add the server to Claude Code. Replace `<repo>` with the absolute path of this repository:
-
-   ```sh
-   claude mcp add debug-devices -- uv run --directory <repo> debug-devices-mcp
-   ```
-
-When the server starts, the monitor page opens in a new Firefox window. Point the webcam at the multimeter. Then draw the crop box around the display on the page.
-
-## Start an agent with the server
-
-These scripts start Claude Code or Codex in the dev shell, with this MCP server. Run them from the project that you debug. The agent starts in the current directory, and the server reads `.env` from this repository.
+`scripts/claude.sh` and `scripts/codex.sh` start the agent in the dev shell, with this MCP server. Run them from the project that you debug. The agent starts in the current directory, and the server reads `.env` from this repository.
 
 ```sh
 ~/p/personal/debug-devices/scripts/claude.sh             # Claude Code
@@ -44,18 +107,16 @@ These scripts start Claude Code or Codex in the dev shell, with this MCP server.
 ```
 
 - `--browser` must be the first argument. The scripts give all other arguments to the agent, for example `scripts/claude.sh --browser --model opus`.
-- Without `--browser`, the page does not open. Use this when `scripts/dev-monitor.sh` already runs: the new server then takes the webcam frames from that monitor.
+- Without `--browser`, the page does not open. Ask the agent for `monitor_open` to get the URL.
 - `scripts/agent.sh <claude|codex>` does the same work. The two scripts call it.
 
-The server starts lazily, so an agent session that never uses the hardware costs nothing:
+## Bench instructions (instructions.md)
 
-- At process start, the server opens no port and starts no ffmpeg, adb, scrcpy, or browser.
-- The first tool call starts the monitor page. With `--browser`, Firefox opens then, one time.
-- The first webcam use starts the webcam stream. After 5 minutes without use, the stream stops and the camera is free again.
-- `phone_connect` starts adb and the phone screen. `board_open` starts `obv-dump`.
-- Say "start the bench" to the agent: `bench_start` starts the page, the webcam, and the phone, and it shows the status of each step. "Stop the bench" (`bench_stop`) stops them again. `monitor_open` gives the page URL.
-
-ChatGPT desktop and the Codex CLI start the MCP servers of a project in every session. For this repository, the server is in `.codex/config.toml` (git-ignored) with `--no-ui-open-browser`. Ask the agent for `monitor_open` or "start the bench" to get the page URL.
+- Default path: `instructions.md` at the repo root. Another path: `--instructions-file` or `DEBUG_DEVICES_INSTRUCTIONS`.
+- At connection, the server sends a short header ("the user wants to debug hardware now, call `bench_instructions` first") and the first 8 KiB of the file as MCP server instructions. Some clients (for example Codex) keep only the header. The agent then calls `bench_instructions` and gets the full file.
+- A change to the header needs a restart of the server. The tool always returns the current file.
+- The server does not log the file and does not send it to OpenRouter.
+- Without the file, the server works and tells the agent how to create it.
 
 ## Board files (OpenBoardView)
 

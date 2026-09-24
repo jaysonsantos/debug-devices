@@ -19,6 +19,7 @@ class env:
     WEBCAM = f"{PREFIX}WEBCAM"
     ADB_SERIAL = f"{PREFIX}ADB_SERIAL"
     METER_MODEL = f"{PREFIX}METER_MODEL"
+    INSTRUCTIONS = f"{PREFIX}INSTRUCTIONS"
 
 
 class defaults:

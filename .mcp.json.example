@@ -2,9 +2,18 @@
   "mcpServers": {
     "debug-devices": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "--directory", ".", "debug-devices-mcp"],
-      "env": {}
+      "command": "nix",
+      "args": [
+        "develop",
+        "/abs/path/debug-devices",
+        "--command",
+        "uv",
+        "run",
+        "--directory",
+        "/abs/path/debug-devices",
+        "debug-devices-mcp",
+        "--no-ui-open-browser"
+      ]
     }
   }
 }

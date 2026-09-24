@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, CliApp, NoDecode, SettingsConfigDict
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.constants import env as board_env
 from debug_devices_mcp.constants import ENV_FILE, PROGRAM_NAME, defaults, env
+from debug_devices_mcp.instructions import DEFAULT_INSTRUCTIONS_FILE
 from debug_devices_mcp.ui.constants import UiStart
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
@@ -33,6 +34,13 @@ def _parse_crop(value: object) -> object:
     """Read `x,y,w,h` text. Empty text means no crop."""
     if isinstance(value, str):
         return Crop.parse(value) if value.strip() else None
+    return value
+
+
+def _default_if_empty(value: object) -> object:
+    """An empty variable (as in .env.example) means the default instructions file, not the current directory."""
+    if isinstance(value, str) and not value.strip():
+        return DEFAULT_INSTRUCTIONS_FILE
     return value
 
 
@@ -108,6 +116,12 @@ class Settings(BaseSettings):
     )
     scrcpy_server_version: str = Field(
         default="", description="Version of the scrcpy server. Empty: from `scrcpy --version`. Must match the server."
+    )
+    instructions_file: Annotated[Path, BeforeValidator(_default_if_empty)] = Field(
+        default=DEFAULT_INSTRUCTIONS_FILE,
+        # The environment name is DEBUG_DEVICES_INSTRUCTIONS (without _FILE); the first alias names the flag.
+        validation_alias=AliasChoices("instructions_file", env.INSTRUCTIONS.lower()),
+        description="The user's bench instructions (Markdown). Missing file: no error. See instructions.example.md.",
     )
     # region: boardview. The environment names have no DEBUG_DEVICES_ prefix (see .env.example).
     obv_dump_path: str = Field(

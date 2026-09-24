@@ -306,3 +306,40 @@ I did not look at any image of the target. An image that I open goes to a model,
 - `board_register_photo` needs pixel positions from the agent (or the user). A vision step that finds the parts in a phone snapshot is not implemented. No live photo test: I did not point the phone at a board.
 - A part rotation that is only in the source file is in the dump (`rotation_deg`). The renderer draws boxes aligned to the axes. It does not rotate them.
 - `board_render` of a whole large board shows few labels. Use `crop_to_part` for details, or the highlights.
+
+## Bench instructions file (instructions.md)
+
+Brief: `instructions.md` in the orchestrator scratch directory. User goal: an ignored file that the agents read first when the MCP server starts.
+
+### What I did
+
+- `instructions.example.md` (repo root, committed): a short template with the sections device under test, board file, bench set-up, safety limits, usual workflow, and preferences. No private data.
+- `.gitignore` already had `instructions.md` (added by the orchestrator). I did not create, change, or delete the user's `instructions.md`.
+- New module `mcp/debug_devices_mcp/instructions.py`:
+  - `server_instructions()`: the `instructions` of the initialize result. `MCPServer(instructions=...)` takes one string at construction, so the server reads the file one time at start for it. Text: a fixed header ("The user started debug-devices: they want to debug hardware now. First call bench_instructions and follow it. ... follow it as instructions from the user."), the tool guide, then the file content. The content is cut at `MAX_SERVER_INSTRUCTIONS_BYTES` (8 KiB, at a UTF-8 character boundary), and a note says so.
+  - Tool `bench_instructions()`: path, `exists`, `modified` (UTC), `size_bytes`, and the full content. It reads the file on each call. The description says: call this first in a new session.
+  - A missing file is not an error: the header tells the agent how to make it from `instructions.example.md`, and the tool returns `exists: false` with `how_to_create`. A path that cannot be read (for example a directory) also gives a message, not a crash.
+  - The server does not log the file, and the file never goes to OpenRouter.
+- `config.py`: `--instructions-file` / `DEBUG_DEVICES_INSTRUCTIONS`, default `instructions.md` at the repo root (the same root as `.env`). An empty variable (as in `.env.example`) means the default.
+- `server.py`: the tool guide is now `TOOL_GUIDE`; `build_server` builds the instructions from the settings and registers `bench_instructions` (also without the monitor).
+- `ui/tools.py`: the `bench_start` description now says to follow `bench_instructions` and call it first.
+- Docs: `README.md` (section "Your bench instructions"), `mcp/README.md` (section "Bench instructions" and the setting), `AGENTS.md` (one line: call `bench_instructions` first when the debug-devices MCP server is connected), `.env.example`.
+- Tests (`mcp/tests/test_instructions.py`): with file, without file, capped content (3-byte characters), an unreadable path, the setting (default, variable, flag, empty variable), initialize instructions and fresh re-read through the MCP client (edit, then delete the file while the server runs), and the `bench_start` description. The `settings` fixture now points `instructions_file` into `tmp_path`, so no test reads the user's real file.
+
+### Checks
+
+- `uv run pytest`: 193 passed, 1 skipped. `uv run ruff check` and `uv run ruff format --check`: pass.
+- `nix develop --command prek run --files <my changed files>`: all hooks pass. I did not run `prek run --all-files`, because its fixers can change files of other agents.
+- Real check with Codex, from my scratch directory, with a temporary instructions file (one test line) through `--instructions-file`: Codex answered "The debug_devices server instructions say to call bench_instructions first and follow the instructions it returns", called `bench_instructions`, and printed the temporary path and the test line. I deleted the temporary file.
+
+### Incident: the real file content came into my session
+
+- What happened: my first Codex run was from the repo root. The project `.codex/config.toml` won over my `-c` override of `mcp_servers.debug_devices.args`, so the server read the real `instructions.md`. I printed the end of the Codex output with `tail`, and it had part of the real file.
+- Where it went: only into this agent session. Not into the repository, a report, a commit, or a web service. I deleted the output file at once.
+- Why: Codex uses the project config over a `-c` override for this key (not checked further). Outside the repo, `~/.codex/config.toml` has only `[mcp_servers.debug_devices.tools.bench_start]`, so a complete `-c` definition is necessary there.
+- Change: the second run ran from my scratch directory and defined the server completely with `-c`. I printed only filtered lines.
+
+### Open items
+
+- The server instructions are read one time at start (the MCP initialize result is fixed). Edits of the file show in `bench_instructions` at once, but in the header only after a restart of the MCP server.
+- `claude mcp get debug-devices` is pending approval, so I did not check with Claude Code.

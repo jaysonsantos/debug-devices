@@ -19,6 +19,7 @@ from debug_devices_mcp.board.tools import BoardSession, register_board_tools
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
 from debug_devices_mcp.images import downscale_jpeg
+from debug_devices_mcp.instructions import register_instructions_tool, server_instructions
 from debug_devices_mcp.multimeter import MeterSource, MultimeterReading, VisionClient, VisionError
 from debug_devices_mcp.phone_api import (
     ApiErrorCode,
@@ -42,7 +43,7 @@ from debug_devices_mcp.ui.tools import register_monitor_tools
 from debug_devices_mcp.webcam import Webcam, WebcamError, WebcamOptions
 from debug_devices_mcp.webcam_stream import FrameSource
 
-INSTRUCTIONS = (
+TOOL_GUIDE = (
     "Tools to see and measure real hardware. Call phone_connect once before the other phone_* tools. "
     "phone_snapshot and webcam_snapshot return a JPEG. multimeter_read returns the value, unit, and mode "
     "that a vision model reads from the webcam that points at the multimeter. "
@@ -358,10 +359,13 @@ def build_server(
             if after_stop is not None:
                 after_stop()
 
-    server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan)
+    instructions_file = services.settings.instructions_file
+    instructions = server_instructions(instructions_file, TOOL_GUIDE)
+    server = MCPServer(SERVER_NAME, instructions=instructions, lifespan=lifespan)
     if monitor is not None:
         monitor.instrument(server)
 
+    register_instructions_tool(server, instructions_file)
     register_phone_tools(server, services)
     register_webcam_tools(server, services)
     register_board_tools(server, services.board)

@@ -44,6 +44,7 @@ python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict   # ph
 - C++: only in `boardview/`. Do not edit the OpenBoardView sources. Put changes in `boardview/patches/`.
 - Config through CLI flags and environment variables with defaults. `.env.example` lists every variable.
 - Commits: Conventional Commits.
+- When the debug-devices MCP server is connected, call `bench_instructions` first and follow it. It is the user's `instructions.md` (git-ignored; template `instructions.example.md`).
 
 ## Safety
 

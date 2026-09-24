@@ -3,6 +3,7 @@
 import io
 from collections.abc import Callable, Sequence
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -45,8 +46,23 @@ def failed(stderr: bytes, returncode: int = 1) -> CommandResult:
 
 
 @pytest.fixture
-def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    """Defaults only: no .env file and no variables from the shell."""
-    for name in (env.OPENROUTER_API_KEY, env.VISION_MODEL, env.WEBCAM, env.ADB_SERIAL, env.METER_MODEL):
+def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
+    """Defaults only: no .env file and no variables from the shell.
+
+    The instructions file points into tmp_path, so no test reads the user's real instructions.md.
+    """
+    for name in (
+        env.OPENROUTER_API_KEY,
+        env.VISION_MODEL,
+        env.WEBCAM,
+        env.ADB_SERIAL,
+        env.METER_MODEL,
+        env.INSTRUCTIONS,
+    ):
         monkeypatch.delenv(name, raising=False)
-    return Settings(_env_file=None, poll_interval=timedelta(milliseconds=1), app_start_timeout=timedelta(seconds=1))
+    return Settings(
+        _env_file=None,
+        poll_interval=timedelta(milliseconds=1),
+        app_start_timeout=timedelta(seconds=1),
+        instructions_file=tmp_path / "instructions.md",
+    )

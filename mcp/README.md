@@ -51,6 +51,13 @@ Call `phone_connect` before the other `phone_*` tools. The HTTP contract with th
 
 If `--webcam-crop` is set, ffmpeg crops the frame on the PC. Only the cropped part goes to OpenRouter and to the model. The crop also applies to `webcam_snapshot`.
 
+## Bench instructions
+
+- `instructions.md` (git-ignored, template `instructions.example.md` at the repo root) is the user's text for the agent: device, board file, bench set-up, safety limits, workflow, and preferences.
+- Server instructions (the `instructions` of the MCP initialize result): a fixed header ("The user started debug-devices: they want to debug hardware now. First call bench_instructions and follow it."), the tool guide, then the file content. The content is cut at 8 KiB (`MAX_SERVER_INSTRUCTIONS_BYTES`), and a note says so. The server reads the file once at start for this text.
+- Tool `bench_instructions()`: the full content, the path, the modification time, and the size. It reads the file on each call. Without the file, it returns `exists: false` and `how_to_create`.
+- The server treats the file as user instructions. It does not log the file, and it never sends it to OpenRouter.
+
 ## Boardview tools
 
 The board tools read boardview files with `obv-dump` (the OpenBoardView parsers as a command line tool, `boardview/`, `nix build .#obv-dump`, on `PATH` in the dev shell). The contract is `docs/boardview-json.md`. The server keeps the last opened board in memory. It caches each board by the SHA-256 of the file.
@@ -158,6 +165,7 @@ Each setting has a CLI flag, an environment variable, and a default. The server 
 | `--openrouter-api-key` | `OPENROUTER_API_KEY` | none |
 | `--vision-model` | `DEBUG_DEVICES_VISION_MODEL` | `openai/gpt-6-luna` |
 | `--meter-model` | `DEBUG_DEVICES_METER_MODEL` | empty. Make and model of the meter, for example `PROSTER T21D`. The prompt names it. |
+| `--instructions-file` | `DEBUG_DEVICES_INSTRUCTIONS` | `instructions.md` at the repo root. A missing file is not an error. |
 | `--webcam` | `DEBUG_DEVICES_WEBCAM` | `/dev/video0` |
 | `--webcam-crop` | `DEBUG_DEVICES_WEBCAM_CROP` | none. Format `x,y,w,h` in pixels, for example `640,0,640,540` |
 | `--webcam-warmup-frames` | `DEBUG_DEVICES_WEBCAM_WARMUP_FRAMES` | `10` |
