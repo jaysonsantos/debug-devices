@@ -15,3 +15,5 @@ local.properties
 *.iml
 # Local Codex config (absolute paths)
 .codex/
+# Local Claude Code MCP config (absolute paths). See .mcp.json.example.
+.mcp.json
