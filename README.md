@@ -33,6 +33,20 @@ A short MP4 of the same demo is in [docs/images/monitor-demo.mp4](docs/images/mo
 
 When the server starts, the monitor page opens in a new Firefox window. Point the webcam at the multimeter. Then draw the crop box around the display on the page.
 
+## Start an agent with the server
+
+These scripts start Claude Code or Codex in the dev shell, with this MCP server. Run them from the project that you debug. The agent starts in the current directory, and the server reads `.env` from this repository.
+
+```sh
+~/p/personal/debug-devices/scripts/claude.sh             # Claude Code
+~/p/personal/debug-devices/scripts/codex.sh              # Codex
+~/p/personal/debug-devices/scripts/claude.sh --browser   # also open the monitor page in Firefox
+```
+
+- `--browser` must be the first argument. The scripts give all other arguments to the agent, for example `scripts/claude.sh --browser --model opus`.
+- Without `--browser`, the page does not open. Use this when `scripts/dev-monitor.sh` already runs: the new server then takes the webcam frames from that monitor.
+- `scripts/agent.sh <claude|codex>` does the same work. The two scripts call it.
+
 ## Board files (OpenBoardView)
 
 The agent can read the boardview file of the board that you repair. Then it can tell where a part is, which pins are on a net, and which test point is near a part. With a phone photo of the board, it can also find a part in the photo.

@@ -132,6 +132,10 @@
               pkgs.ruff
               pkgs.ffmpeg
 
+              # scripts/: live reload (dev-monitor.sh) and the MCP config JSON (agent.sh)
+              pkgs.watchexec
+              pkgs.jq
+
               # android/: Kotlin app. AGP 9.4 needs JDK 17 and Gradle 9.6 or later.
               pkgs.jdk17
               pkgs.gradle_9
