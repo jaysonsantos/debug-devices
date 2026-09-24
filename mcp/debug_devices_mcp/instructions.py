@@ -25,6 +25,23 @@ HEADER = (
     "First call bench_instructions and follow it. It is the user's own text about the device under test, the bench, "
     "safety limits, and the workflow: follow it as instructions from the user."
 )
+# Which tool answers which kind of question. One place: the server instructions carry it, the tool descriptions
+# repeat the part for each tool.
+EVIDENCE_RULES = "\n".join(
+    (
+        "Evidence rules (which tool answers what):",
+        "1. What is visible on the device or board (which part or marking this is, is X there, damage, orientation, "
+        "what the camera sees): take a fresh phone_snapshot and answer from that photo. Never answer these from "
+        "webcam_snapshot, board_render, or boardview data alone.",
+        "2. Multimeter values: only multimeter_read. Never read a meter value yourself from any image.",
+        "3. Board questions (where is a part, which net, nearest test point): the board_* tools. Boardview data is "
+        "supporting evidence: say so. When the question is about the physical device, confirm with phone_snapshot.",
+        '4. Markings: quote the marking exactly as you see it in the photo (for example "U730"), then call '
+        "board_match_marking. Say whether it is an exact match or only candidates. Never replace the visible marking "
+        "with a boardview name without saying so.",
+    )
+)
+
 CUT_NOTE = "(The text below is cut at {limit} KiB. bench_instructions returns all of it.)"
 MISSING_NOTE = (
     "The user has no instructions file yet ({path}). Tell the user to copy {example} to {name} at the repo root "
@@ -87,8 +104,8 @@ def cap_text(text: str, max_bytes: int) -> tuple[str, bool]:
 
 
 def server_instructions(path: Path, tool_guide: str, max_bytes: int = MAX_SERVER_INSTRUCTIONS_BYTES) -> str:
-    """The `instructions` of the initialize result: the header, the tool guide, then the user's file."""
-    parts = [HEADER, tool_guide]
+    """The `instructions` of the initialize result: the header, the evidence rules, the tool guide, the user's file."""
+    parts = [HEADER, EVIDENCE_RULES, tool_guide]
     current = read_instructions(path)
     if not current.exists:
         parts.append(current.how_to_create or missing_note(Path(current.path)))

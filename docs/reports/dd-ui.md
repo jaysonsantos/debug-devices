@@ -315,3 +315,41 @@ The orchestrator stopped this task before the recording, because the room light 
 - `bench_stop` removes the shared camera forward `tcp:18765`. Another session that uses the phone at the same time must call `phone_connect` again.
 - Codex sometimes starts the MCP server in its sandbox (run 1 above). Then no hardware tool works. I did not find what decides this; the project config sets no sandbox for the server. The orchestrator can check the Codex sandbox options for MCP servers. I did not edit `.codex/config.toml`.
 - I did not commit.
+
+## Round 9: full screen for the camera views
+
+### What I did
+
+- Page (`ui/static/`):
+  - Three views are in `.view` boxes (`tabindex="0"`): the webcam (`#webcam-view` around `#stage`), the phone screen (`#phone-view` around the canvas), and the last snapshot (`#snapshot-view`).
+  - Each box has a full screen button: top right, SVG icon, `aria-label` "Full screen: …", reachable with Tab.
+  - A double-click on a view, or the key `f` on the focused view, turns full screen on or off (Fullscreen API on the box). `f` does nothing in form fields. `Esc` leaves full screen (browser default).
+  - In full screen: black background, aspect ratio kept (`object-fit: contain` for the canvas and the snapshot). The webcam frame keeps its ratio (`--frame-ratio` from the frame size, and `aspect-ratio`), so the crop box stays on the same part of the image.
+  - The phone screen keeps its rotation (the canvas already has the turned picture). A small bar with zoom out, zoom in, and torch shows only in full screen.
+  - The webcam view shows the crop box in full screen, but a drag there does nothing. A pointer down in the webcam view now focuses the view, so `f` works after a click there too.
+  - The snapshot image is no longer inside a link, because a single click on the link opened a new tab before a double-click could come. A separate link "Open the full-size snapshot" replaces it.
+- Full-resolution snapshot: the tool result has only the scaled image (long edge 1568), so the monitor keeps the full JPEG of the same call. `Monitor.phone_snapshot_recorder()` wraps `services.phone.snapshot` in `ui/setup.py`. The full image of each call is kept only while that call runs, and the `finally` in `_record_call` removes it. `GET /api/phone/snapshot.jpg?full=true` returns the full image, or the scaled one when there is no full one. Without `full`, the route returns the scaled image for the panel, as before. A bad value returns 400.
+- `scripts/record_demo.py`: the snapshot selector is now `#snapshot-view`.
+- `mcp/README.md`: "Full screen" in the monitor page section.
+
+### Tests
+
+- Route tests in `test_ui_app.py`:
+  - With a 3000x2000 fake snapshot, the panel image has a long edge of 1568, and `?full=true` returns the original bytes. Before a snapshot: 404. `full=maybe`: 400. No full image stays behind.
+  - The fallback to the scaled image without the recorder.
+- Playwright check (headless Firefox) against a separate eager server with the fake phone and fake adb. The flags were `--ui-start eager --ui-port 18890 --no-ui-open-browser --no-phone-screen --webcam /dev/video99`, so the check never used the real camera. It checked `document.fullscreenElement`:
+  - Webcam: a double-click enters, `f` leaves, the button enters, and a double-click leaves.
+  - A crop drag still sets a crop (`575,317,575,432`). A drag in full screen does not change it, and a double-click does not change it. The saved crop is the same.
+  - Snapshot: a double-click enters, and the image then loads `?full=true`. `f` leaves, and the image loads the panel URL.
+  - Phone screen (a test picture on the canvas, because the fake phone has no stream): the button enters, and the bar shows (`display: flex`). The bar's zoom-in set the zoom to 1.50. `f` leaves, and the bar hides.
+- The screenshots stay in my scratch folder. They show only the fake phone picture, my test canvas, and the webcam error text, no camera frame.
+- `uv run pytest`: 209 passed, 1 skipped. `uv run ruff check`, `uv run ruff format --check`, and `prek run --all-files`: pass.
+
+### Bug found in the check, and fix
+
+- In full screen, the webcam `#stage` had no height when there was no frame (`min-height: 0` and an image with no size). Then the error text was not visible, and Playwright could not click the view. Fix: `aspect-ratio: var(--frame-ratio)` on the stage in full screen.
+
+### Open items
+
+- In headless Firefox, the full screen size is 1366x768, so the screenshots show the page around it. A real screen fills completely.
+- The `f` key needs the focus on a view. A click on the phone canvas or the snapshot focuses the view (`tabindex`). The webcam view gets the focus in its pointer handler.

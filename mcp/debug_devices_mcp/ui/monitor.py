@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import anyio
 import uvicorn
@@ -50,6 +51,7 @@ type StatusReader = Callable[[], Awaitable[CameraStatus]]
 # Removes the adb forward of the camera API for this serial (bench_stop).
 type ForwardRemover = Callable[[str], Awaitable[None]]
 type Clock = Callable[[], float]
+type SnapshotReader = Callable[[], Awaitable[bytes]]
 
 
 class ConnectedPhone(BaseModel):
@@ -193,6 +195,9 @@ class Monitor:
         self.closing = asyncio.Event()
         self.url: str | None = None
         self.last_snapshot: bytes | None = None
+        self.last_snapshot_full: bytes | None = None
+        # Full phone snapshots by tool call, until the call ends (the tool result has only the scaled image).
+        self._full_snapshots: dict[UUID, bytes] = {}
 
     # region: tool calls
 
@@ -219,9 +224,24 @@ class Monitor:
             # monitor_open and bench_start open the browser themselves, when the caller asks.
             await self._ensure_page_quietly(auto_open=name not in {tools.MONITOR_OPEN, tools.BENCH_START})
         async with self.bus.record(name, arguments, source) as call:
-            result = await self._call_tool(name, arguments, context)
-            await self._after_call(call, result)
+            try:
+                result = await self._call_tool(name, arguments, context)
+                await self._after_call(call, result)
+            finally:
+                self._full_snapshots.pop(call.id, None)
         return call, result
+
+    def phone_snapshot_recorder(self, snapshot: SnapshotReader) -> SnapshotReader:
+        """Wrap the phone client snapshot: keep the full JPEG of the running tool call for the full screen view."""
+
+        async def recorded() -> bytes:
+            jpeg = await snapshot()
+            call = current_call()
+            if call is not None:
+                self._full_snapshots[call.id] = jpeg
+            return jpeg
+
+        return recorded
 
     def frame_source(self, inner: FrameSource) -> FrameSource:
         return RecordingFrameSource(OnDemandFrameSource(inner, self))
@@ -255,6 +275,8 @@ class Monitor:
             self._phone_status(structured)
         elif call.tool == tools.PHONE_SNAPSHOT and result_images:
             self.last_snapshot = result_images[0]
+            # The full image of the same call, for the full screen view. Without it, the scaled one.
+            self.last_snapshot_full = self._full_snapshots.pop(call.id, None) or result_images[0]
             self.bus.update_phone(has_snapshot=True)
 
     def _phone_status(self, structured: dict[str, Any]) -> None:

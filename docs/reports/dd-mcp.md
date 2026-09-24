@@ -343,3 +343,40 @@ Brief: `instructions.md` in the orchestrator scratch directory. User goal: an ig
 
 - The server instructions are read one time at start (the MCP initialize result is fixed). Edits of the file show in `bench_instructions` at once, but in the header only after a restart of the MCP server.
 - `claude mcp get debug-devices` is pending approval, so I did not check with Claude Code.
+
+## Evidence routing and visible markings
+
+Brief: `evidence.md`. Problem: the phone showed the silkscreen marking "U730", the boardview had U7301 and U7302, and the agent used a boardview name without saying so. Agents also mixed the evidence sources.
+
+### What I did
+
+- **Evidence rules, one place.** `EVIDENCE_RULES` in `mcp/debug_devices_mcp/instructions.py`, one line per rule. `server_instructions()` puts it after the header and before the tool guide. The 8 KiB cap applies only to the user's file, so the rules are always complete.
+  1. Visible things: a fresh `phone_snapshot`, never `webcam_snapshot`, `board_render`, or boardview data alone.
+  2. Meter values: only `multimeter_read`.
+  3. Board questions: the board tools; boardview data is supporting evidence; confirm on the device with `phone_snapshot`.
+  4. Markings: quote as seen, then `board_match_marking`; say exact or candidates.
+- **Tool descriptions:**
+  - `phone_snapshot`: use it for every question about what is visible on the device.
+  - `webcam_snapshot`: only for the meter framing and crop; not for the device and not to read the meter.
+  - `board_render`: a drawing from the boardview file, not a photo, never proof of what is physically visible.
+  - `multimeter_read`: the only tool for meter values. `source: phone` only when the phone points at the meter, never at the board (the image goes to the vision model).
+  - `board_find_part`: boardview data is supporting evidence; for a visible marking, use `board_match_marking`.
+- **New tool `board_match_marking(marking, side, registration_id, x_px, y_px)`** (new module `board/marking.py`, tool in `board/tools.py`):
+  - The matcher ignores case, spaces, dashes, and underscores. Order: exact, prefix (cut-off or hidden silkscreen), contains, OCR confusion (O/0, I/l/1, S/5, B/8, Z/2, G/6), none. The first level with a match wins.
+  - Result: `visible_marking` (as given), `resolution`, candidates (refdes, side, center, box, pin count, mfgcode, up to 5 nets), `total_candidates`, `best_candidate`, and `message`. Example: `Visible marking "U730" has no exact boardview part. Candidates: U7301, U7302. The silkscreen can be cut off or hidden. Tell them apart by position (board_register_photo, then x_px/y_px of the marking) or by their neighbours.`
+  - With `registration_id` and `x_px`/`y_px`: each candidate gets its photo position and distance. They are sorted by distance. `best_candidate` is set only when the next candidate is at least `BEST_DISTANCE_RATIO` (2.0) times farther. An exact match is always the best candidate. `x_px`/`y_px` without a registration, or only one of them, is a tool error.
+- **`board_find_part` fallback:** a new `match` field (`name_or_mfgcode`, `prefix`, `none`) and a `note`. Without a name, glob, or mfgcode match, it returns the prefix candidates with a note that points to `board_match_marking`.
+- **Synthetic fixture** `mcp/tests/fixtures/boardview/markings.json`: all names and nets are invented (U7301, U7302, U7303 on the bottom, Q12, C8850, R10, J4, TP9). The fixture README lists it.
+- **Tests** `mcp/tests/test_board_marking.py`: normalization and confusion, every resolution (also with the side filter and an empty marking), the tool without a position (message, candidate fields, errors), ranking by photo position (clearly near gives `best_candidate`, halfway gives none), the `board_find_part` fallback, and the evidence rules in the server instructions and in the tool descriptions.
+- **Docs:** `README.md` (tool table, a short evidence paragraph), `mcp/README.md` (section "Evidence rules", `board_match_marking` in the table and its rules, `board_find_part` `match`), `AGENTS.md` (one evidence line).
+
+### Checks
+
+- `uv run pytest`: 209 passed, 1 skipped (includes new dd-ui tests). `uv run ruff check` and `uv run ruff format --check`: pass.
+- `nix develop --command prek run --files <my files>`: all hooks pass. I did not run `prek run --all-files`.
+- No live test: no board file and no photo. The tests use the synthetic fixture only. No board data and no photo went to OpenRouter or anywhere else.
+
+### Open items
+
+- The evidence rules are instructions and descriptions. The server cannot force an agent to follow them.
+- `board_match_marking` does not read the photo itself. The agent must read the marking from `phone_snapshot` and give its pixel position.

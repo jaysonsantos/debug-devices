@@ -58,6 +58,17 @@ If `--webcam-crop` is set, ffmpeg crops the frame on the PC. Only the cropped pa
 - Tool `bench_instructions()`: the full content, the path, the modification time, and the size. It reads the file on each call. Without the file, it returns `exists: false` and `how_to_create`.
 - The server treats the file as user instructions. It does not log the file, and it never sends it to OpenRouter.
 
+## Evidence rules
+
+The server instructions carry these rules (`EVIDENCE_RULES` in `instructions.py`), and the tool descriptions repeat them:
+
+1. What is visible on the device or board: a fresh `phone_snapshot`. Not `webcam_snapshot`, `board_render`, or boardview data alone.
+2. Meter values: only `multimeter_read`. The agent never reads a meter from an image itself.
+3. Board questions (part position, net, test point): the board tools. Boardview data is supporting evidence. For the physical device, confirm with `phone_snapshot`.
+4. Markings: quote the marking as seen, then `board_match_marking`. Say if it is an exact match or only candidates.
+
+`multimeter_read` with `source: phone` sends the phone photo to the vision model. Use it only when the phone points at the meter, never at the board.
+
 ## Boardview tools
 
 The board tools read boardview files with `obv-dump` (the OpenBoardView parsers as a command line tool, `boardview/`, `nix build .#obv-dump`, on `PATH` in the dev shell). The contract is `docs/boardview-json.md`. The server keeps the last opened board in memory. It caches each board by the SHA-256 of the file.
@@ -65,7 +76,8 @@ The board tools read boardview files with `obv-dump` (the OpenBoardView parsers 
 | Tool | Arguments | Result |
 |---|---|---|
 | `board_open` | `path` | Format, SHA-256, counts (parts, pins, nets, nails, test points), board size in mm, parts per side, load time |
-| `board_find_part` | `query` (refdes, glob such as `C1*`, or mfgcode text), `limit` | Parts with side, center, box, rotation, mfgcode, pin count, and nets |
+| `board_find_part` | `query` (refdes, glob such as `C1*`, or mfgcode text), `limit` | Parts with side, center, box, rotation, mfgcode, pin count, and nets. `match`: `name_or_mfgcode`, `prefix` (no match, so the parts whose name starts with the query, with a `note`), or `none`. |
+| `board_match_marking` | `marking` (as seen in the photo), `side`, optional `registration_id` + `x_px` + `y_px` | `visible_marking`, `resolution` (`exact`, `prefix_candidates`, `contains_candidates`, `confusion_candidates`, `none`), candidates (refdes, side, center, box, pin count, mfgcode, up to 5 nets, and with a position: photo position and distance), `best_candidate`, and a plain `message` |
 | `board_part_pins` | `refdes` | All pins: number, name, net, position, side |
 | `board_find_net` | `query` (net name or glob), `limit` | Per net: the parts and pin numbers, the test points (nails and `TP*` parts), and the nearest test point to each part |
 | `board_parts_near` | `refdes` or `x_mm` + `y_mm`, `radius_mm` (default 5), `side`, `limit` | Parts within the radius, sorted by distance |
@@ -78,6 +90,7 @@ Rules:
 - Positions are in mm, in board coordinates (y up). `obv-dump` gives mil. The server converts them at one place (`board/units.py`).
 - A part center is the center of the part box. When the file has no box (or a box with zero size), the box is the box around the pins plus 0.3 mm.
 - `board_render` draws the bottom side mirrored in X, as seen from below. With `crop_to_part` and no `side`, it uses the side of that part.
+- `board_match_marking` ignores case, spaces, dashes, and underscores. The order is: exact, then names that start with the marking, then names that contain it, then names that match when O/0, I/l/1, S/5, B/8, Z/2, G/6 are read wrong. With a photo position, `best_candidate` is set only when the nearest candidate is at least 2 times nearer than the next one (`BEST_DISTANCE_RATIO`). An exact match is always the best candidate.
 - Photo mapping: a homography from 4 or more part centers. With 5 or more pairs, the server checks the error (limit: 2 % of the photo point spread). With 6 or more pairs, it also names the most likely wrong pair. Use large parts far apart, and a phone zoom of 1.5-2x (less lens distortion). Each side of the board needs its own registration.
 
 Settings:
@@ -121,6 +134,7 @@ The page has these parts:
 - **Phone**: the live phone screen, the serial, the screen state, the zoom, and the torch. The buttons run the same MCP tools as the agent: connect, refresh status, zoom in and out, zoom slider, torch, and snapshot. The page shows the last snapshot.
 - **Read multimeter**: the button under the crop preview runs `multimeter_read`. The page shows the reading. The activity log shows the image that went to the model.
 - **Settings**: the vision model and the webcam warm-up frames. An empty field uses the value from the CLI flag or the environment.
+- **Full screen**: the live webcam view, the phone screen, and the last phone snapshot each have a full screen button (top right). A double-click on the view, or the key `f` on the focused view, also turns full screen on and off. `Esc` leaves full screen. The view fills the screen with its aspect ratio kept, on black. The phone screen keeps its rotation and shows a small bar with zoom out, zoom in, and torch. The snapshot loads the full-resolution image in full screen (`/api/phone/snapshot.jpg?full=true`); the panel keeps the scaled one. The webcam view shows the crop box in full screen, but you cannot change it there. A double-click on the webcam view does not change the crop box.
 - **Activity**: each tool call, live. A row shows the time, the source (`mcp` for the agent, `ui` for the page), the tool, the arguments, the duration, the result, and a short summary. Open a row to see the images. For `multimeter_read`, the row shows the exact image that went to the model and the reading.
 
 The server stores the page settings (crop, vision model, warm-up) in `$XDG_STATE_HOME/debug-devices/ui-settings.json`. The default path is `~/.local/state/debug-devices/ui-settings.json`. The saved values replace the CLI and environment values. "Clear crop" and "Reset to start values" go back to the CLI and environment values.

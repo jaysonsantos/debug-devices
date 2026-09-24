@@ -2,9 +2,11 @@
 
 import asyncio
 import io
+import math
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +21,16 @@ from debug_devices_mcp.board.constants import defaults
 from debug_devices_mcp.board.dump import BoardFormat, Side
 from debug_devices_mcp.board.homography import Fit, HomographyError, fit_homography, likely_outlier, map_points
 from debug_devices_mcp.board.loader import BoardLoadError, BoardviewLoader, LoaderOptions
+from debug_devices_mcp.board.marking import (
+    MAX_CANDIDATES,
+    MarkingMatch,
+    PixelPosition,
+    Resolution,
+    best_by_distance,
+    candidate,
+    find_marking_parts,
+    message,
+)
 from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, TestPoint, on_side
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
 from debug_devices_mcp.process import CommandRunner
@@ -58,11 +70,21 @@ class BoardSummary(BaseModel):
     part_sides: SideCounts
 
 
+class FindMatch(StrEnum):
+    # Refdes (exact or glob) or mfgcode text.
+    NAME_OR_MFGCODE = "name_or_mfgcode"
+    # No such part: parts whose name starts with the query (a cut-off or hidden silkscreen marking).
+    PREFIX = "prefix"
+    NONE = "none"
+
+
 class PartMatches(BaseModel):
     query: str
+    match: FindMatch
     total: int
     parts: list[Part]
     truncated: bool
+    note: str | None = None
 
 
 class PartPins(BaseModel):
@@ -384,10 +406,26 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
     async def board_find_part(query: str, limit: Limit = defaults.FIND_LIMIT) -> PartMatches:
         """Find parts by refdes ("U1", case does not matter), glob ("C1*", "U?"), or mfgcode/value text.
 
-        Name matches come first, then mfgcode matches. Each part has its side, center, box, pin count, and nets.
+        Name matches come first, then mfgcode matches. Without a match, the parts whose name starts with the query
+        (`match: "prefix"`, with a note). Each part has its side, center, box, pin count, and nets. Boardview data is
+        supporting evidence: for a marking that you see on the board, use board_match_marking.
         """
-        parts = session.current().find_parts(query)
-        return PartMatches(query=query, total=len(parts), parts=parts[:limit], truncated=len(parts) > limit)
+        board = session.current()
+        parts = board.find_parts(query)
+        match, note = FindMatch.NAME_OR_MFGCODE, None
+        if not parts:
+            resolution, parts = find_marking_parts(board, query, None)
+            if resolution is Resolution.PREFIX_CANDIDATES:
+                match = FindMatch.PREFIX
+                note = (
+                    f"No part is named {query!r}. These parts start with it. If {query!r} is a marking that you see "
+                    "on the board, call board_match_marking."
+                )
+            else:
+                match, parts = FindMatch.NONE, []
+        return PartMatches(
+            query=query, match=match, total=len(parts), parts=parts[:limit], truncated=len(parts) > limit, note=note
+        )
 
     @server.tool()
     async def board_part_pins(refdes: str) -> PartPins:
@@ -445,6 +483,9 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
     ) -> Annotated[CallToolResult, RenderLegend]:
         """Draw one side of the board as a PNG: outline, part boxes, pins, and highlighted parts and nets.
 
+        This is a drawing from the boardview file, not a photo. It is never proof of what is physically visible:
+        use phone_snapshot for that.
+
         `side` "top" (default) or "bottom" (mirrored in X, as seen from below). With `crop_to_part` and no `side`,
         the side of that part. Nets accept globs. The legend gives the color of each highlight and the pixel
         position of each highlighted part.
@@ -469,7 +510,63 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
         return CallToolResult(content=content, structured_content=legend.model_dump(mode="json"))
 
 
+def match_marking(
+    session: BoardSession,
+    marking: str,
+    side: Side | None,
+    registration_id: str | None,
+    point: tuple[float, float] | None,
+) -> MarkingMatch:
+    board = session.current()
+    resolution, parts = find_marking_parts(board, marking, side)
+    candidates = [candidate(part) for part in parts]
+    ranked = registration_id is not None and point is not None and bool(candidates)
+    if ranked:
+        registration = session.registration(registration_id)
+        pixels = map_points(registration.fit.matrix, [(item.center.x, item.center.y) for item in candidates])
+        for item, (x, y) in zip(candidates, pixels, strict=True):
+            item.photo_position = PixelPosition(x_px=round(x, 1), y_px=round(y, 1))
+            item.distance_px = math.hypot(x - point[0], y - point[1])
+        candidates.sort(key=lambda item: item.distance_px or 0.0)
+    best = candidates[0].refdes if resolution is Resolution.EXACT else None
+    if ranked and resolution is not Resolution.EXACT:
+        best = best_by_distance(candidates)
+    names = [item.refdes for item in candidates[:MAX_CANDIDATES]]
+    return MarkingMatch(
+        visible_marking=marking,
+        resolution=resolution,
+        candidates=candidates[:MAX_CANDIDATES],
+        total_candidates=len(candidates),
+        best_candidate=best,
+        message=message(marking, resolution, names, best, ranked),
+    )
+
+
 def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
+    @server.tool()
+    async def board_match_marking(
+        marking: str,
+        side: Side | None = None,
+        registration_id: str | None = None,
+        x_px: float | None = None,
+        y_px: float | None = None,
+    ) -> MarkingMatch:
+        """Match a marking that you see on the board (silkscreen, from phone_snapshot) to boardview parts.
+
+        Quote the marking exactly as you see it. The result says if it is an exact boardview part or only
+        candidates: a start of a name ("U730" for U7301, U7302: cut-off or hidden silkscreen), a part of a name, or
+        a match with O/0, I/1, S/5, B/8, Z/2, G/6 read wrong. Tell the user which one it is, and never replace the
+        visible marking with a boardview name without saying so. With `registration_id` (board_register_photo) and
+        `x_px`/`y_px` of the marking in that photo, the candidates are sorted by distance, and `best_candidate` is
+        set only when one is clearly nearest.
+        """
+        if (x_px is None) != (y_px is None):
+            raise ToolError("give both `x_px` and `y_px`, or neither")
+        point = (x_px, y_px) if x_px is not None and y_px is not None else None
+        if point is not None and registration_id is None:
+            raise ToolError("`x_px`/`y_px` need a `registration_id` from board_register_photo")
+        return match_marking(session, marking, side, registration_id, point)
+
     @server.tool()
     async def board_register_photo(
         side: Side,

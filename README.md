@@ -84,7 +84,9 @@ A normal session:
 | Bench | `bench_instructions`, `bench_start`, `bench_stop`, `monitor_open` |
 | Phone camera | `phone_connect`, `phone_status`, `phone_zoom`, `phone_torch`, `phone_rotation`, `phone_snapshot` |
 | Webcam and multimeter | `webcam_snapshot`, `multimeter_read` (source `webcam` or `phone`) |
-| Board file | `board_open`, `board_find_part`, `board_part_pins`, `board_find_net`, `board_parts_near`, `board_render`, `board_register_photo`, `board_locate_in_photo` |
+| Board file | `board_open`, `board_find_part`, `board_match_marking`, `board_part_pins`, `board_find_net`, `board_parts_near`, `board_render`, `board_register_photo`, `board_locate_in_photo` |
+
+Evidence rules: the agent answers questions about what is visible on the board from a fresh `phone_snapshot`, meter values only from `multimeter_read`, and board questions from the board tools, marked as boardview data. A visible marking stays as it is seen; `board_match_marking` gives the boardview candidates.
 
 Details of each tool: [mcp/README.md](mcp/README.md).
 
@@ -131,11 +133,12 @@ How it works:
 | Tool | What it does |
 |---|---|
 | `board_open` | Loads a file. Gives the format, the counts of parts, pins, nets, and test points, and the board size. |
-| `board_find_part` | Finds parts by reference (`U2`), by glob (`C1*`), or by manufacturer code. |
+| `board_find_part` | Finds parts by reference (`U2`), by glob (`C1*`), or by manufacturer code. Without a match, it gives the parts whose name starts with the query. |
+| `board_match_marking` | Matches a marking that you see on the board (for example `U730`) to boardview parts: exact, start of a name (cut-off or hidden silkscreen), part of a name, or characters read wrong (O/0, I/1). With a registered photo position, it names the nearest part. |
 | `board_part_pins` | Gives each pin of a part: number, name, net, position, and side. |
 | `board_find_net` | Gives the parts and pins on a net, its test points, and the nearest test point to each part. |
 | `board_parts_near` | Gives the parts near a part or a point. |
-| `board_render` | Draws one side of the board as a PNG, with the parts and nets that you ask for marked. |
+| `board_render` | Draws one side of the board as a PNG, with the parts and nets that you ask for marked. It is a drawing from the file, not a photo. |
 | `board_register_photo` | Maps board positions to a phone photo from 4 or more reference parts (homography). |
 | `board_locate_in_photo` | Gives the pixel positions of parts or net pins in that photo, and can mark them on it. |
 

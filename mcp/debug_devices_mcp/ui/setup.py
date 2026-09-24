@@ -78,6 +78,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
     stream.set_crop_provider(monitor.crop)
     shared.set_start_local(monitor.start_stream)
     services.webcam = monitor.frame_source(shared)
+    services.phone.snapshot = monitor.phone_snapshot_recorder(services.phone.snapshot)  # type: ignore[method-assign]
 
     def use_model(effective: EffectiveSettings) -> None:
         services.vision.model = effective.vision_model

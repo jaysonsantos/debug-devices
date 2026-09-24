@@ -69,8 +69,18 @@ async def post_snapshot(request: Request) -> JSONResponse:
     return await run_tool(request, tools.PHONE_SNAPSHOT, {})
 
 
+class SnapshotQuery(BaseModel):
+    # True: the full-resolution image for the full screen view. False: the scaled image for the panel.
+    full: bool = False
+
+
 async def get_last_snapshot(request: Request) -> Response:
-    snapshot = monitor_of(request).last_snapshot
+    monitor = monitor_of(request)
+    try:
+        query = SnapshotQuery.model_validate(dict(request.query_params))
+    except ValidationError as exc:
+        return error_response(str(exc), BAD_REQUEST)
+    snapshot = monitor.last_snapshot_full if query.full else monitor.last_snapshot
     if snapshot is None:
         return error_response("no phone snapshot yet", NOT_FOUND)
     return Response(snapshot, media_type=http.JPEG_MEDIA_TYPE, headers=http.NO_CACHE)

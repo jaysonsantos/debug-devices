@@ -393,3 +393,30 @@ def test_second_monitor_page_shows_the_webcam_of_the_owner(tmp_path: Path) -> No
     client = TestClient(create_app(monitor), base_url=BASE_URL)
     assert client.get("/api/webcam/info").json() == owner_info
     assert client.get("/api/webcam/stream.mjpg").content == mjpeg
+
+
+def test_full_screen_snapshot_is_the_full_image(settings: Settings, tmp_path: Path) -> None:
+    fake_phone = FakePhone()
+    fake_phone.snapshot = make_jpeg(3000, 2000)
+    services = make_services(settings, fake_phone, no_vision())
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
+    services.phone.snapshot = monitor.phone_snapshot_recorder(services.phone.snapshot)  # type: ignore[method-assign]
+    monitor.instrument(build_server(services))
+    client = TestClient(create_app(monitor), base_url=BASE_URL)
+    assert client.get("/api/phone/snapshot.jpg", params={"full": "true"}).status_code == 404
+
+    assert client.post("/api/phone/snapshot").json()["has_snapshot"] is True
+    panel = client.get("/api/phone/snapshot.jpg").content
+    full = client.get("/api/phone/snapshot.jpg", params={"full": "true"}).content
+    assert full == fake_phone.snapshot
+    with Image.open(io.BytesIO(panel)) as image:
+        assert max(image.size) == 1568  # the scaled tool result
+    assert client.get("/api/phone/snapshot.jpg", params={"full": "maybe"}).status_code == 400
+    # Only the running call keeps its full image; nothing stays behind.
+    assert monitor._full_snapshots == {}
+
+
+def test_full_screen_snapshot_falls_back_to_the_scaled_image(client: TestClient) -> None:
+    # Without the recorder (for example a --no-ui style setup), the full view gets the tool result image.
+    client.post("/api/phone/snapshot")
+    assert client.get("/api/phone/snapshot.jpg", params={"full": "true"}).content == JPEG

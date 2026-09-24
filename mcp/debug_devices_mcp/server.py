@@ -291,6 +291,8 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
     ) -> list[TextContent | Image]:
         """Take one full still with the phone back camera and return it as a JPEG.
 
+        Use it for every question about what is visible on the device (parts, markings, damage, orientation). Take a
+        fresh one for each such question. For a visible marking, quote it exactly, then call board_match_marking.
         The returned image has its long edge scaled to `max_side` pixels (0 = full size). `save_path` writes the
         full-resolution JPEG to disk.
         """
@@ -311,6 +313,8 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
     ) -> list[TextContent | Image]:
         """Grab one frame from the PC webcam (cropped when --webcam-crop is set) and return it as a JPEG.
 
+        Use it only to check the multimeter framing and the crop. Not for questions about the device (use
+        phone_snapshot), and not to read the meter (use multimeter_read).
         The returned image has its long edge scaled to `max_side` pixels (0 = full size). `save_path` writes the
         full-resolution JPEG to disk.
         """
@@ -324,8 +328,10 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
     ) -> Annotated[CallToolResult, MultimeterReading]:
         """Read the multimeter: value, unit, display text, mode, range, and flags.
 
+        This is the only tool for meter values. Never read a meter value yourself from an image.
         `source` "webcam" (default) uses the PC webcam with its crop. "phone" uses a phone snapshot (call
-        phone_connect first, and point the phone at the meter). A vision model reads the display, so check
+        phone_connect first). The image goes to the vision model, so use "phone" only when the phone points at the
+        meter, never when it points at the board. A vision model reads the display, so check
         `readable` and `confidence`. `include_image` also returns the image that the model saw.
         """
         with tool_errors():

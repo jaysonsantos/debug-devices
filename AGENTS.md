@@ -45,6 +45,7 @@ python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict   # ph
 - Config through CLI flags and environment variables with defaults. `.env.example` lists every variable.
 - Commits: Conventional Commits.
 - When the debug-devices MCP server is connected, call `bench_instructions` first and follow it. It is the user's `instructions.md` (git-ignored; template `instructions.example.md`).
+- Evidence: answer what is visible on the board from a fresh `phone_snapshot`, meter values only from `multimeter_read`, and label boardview data as supporting evidence. Quote a visible marking as seen, then use `board_match_marking` (see `EVIDENCE_RULES` in `mcp/debug_devices_mcp/instructions.py`).
 
 ## Safety
 

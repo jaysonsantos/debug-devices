@@ -19,15 +19,18 @@
   <main>
     <section id="webcam-panel" class="panel">
       <h2>Webcam <small id="webcam-info"></small></h2>
-      <div id="stage">
-        <img id="webcam" alt="Live webcam view" draggable="false">
-        <div id="crop" hidden>
-          <span class="handle" data-corner="nw"></span>
-          <span class="handle" data-corner="ne"></span>
-          <span class="handle" data-corner="sw"></span>
-          <span class="handle" data-corner="se"></span>
+      <div id="webcam-view" class="view" tabindex="0" aria-label="Webcam view">
+        <div id="stage">
+          <img id="webcam" alt="Live webcam view" draggable="false">
+          <div id="crop" hidden>
+            <span class="handle" data-corner="nw"></span>
+            <span class="handle" data-corner="ne"></span>
+            <span class="handle" data-corner="sw"></span>
+            <span class="handle" data-corner="se"></span>
+          </div>
+          <p id="webcam-off" class="overlay-message" hidden></p>
         </div>
-        <p id="webcam-off" class="overlay-message" hidden></p>
+        <button type="button" class="fs-button" aria-label="Full screen: webcam" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
       </div>
       <div class="row">
         <span>Crop: <code id="crop-text">none</code></span>
@@ -90,9 +93,21 @@
         </select>
       </div>
       <p id="phone-error" class="error" hidden></p>
-      <canvas id="phone-screen" width="1" height="1" hidden></canvas>
+      <div id="phone-view" class="view" tabindex="0" aria-label="Phone screen">
+        <canvas id="phone-screen" width="1" height="1" hidden></canvas>
+        <button type="button" class="fs-button" aria-label="Full screen: phone screen" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+        <div class="fs-controls" role="toolbar" aria-label="Phone controls">
+          <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
+          <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
+          <button type="button" data-torch aria-label="Torch on or off">Torch</button>
+        </div>
+      </div>
       <p id="phone-screen-note" class="hint">The phone screen shows here after Connect.</p>
-      <a id="snapshot-link" target="_blank" hidden><img id="snapshot" alt="Last phone snapshot"></a>
+      <div id="snapshot-view" class="view" tabindex="0" aria-label="Last phone snapshot" hidden>
+        <img id="snapshot" alt="Last phone snapshot">
+        <button type="button" class="fs-button" aria-label="Full screen: phone snapshot" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+      </div>
+      <a id="snapshot-full" target="_blank" hidden>Open the full-size snapshot</a>
     </section>
 
     <section id="settings-panel" class="panel">

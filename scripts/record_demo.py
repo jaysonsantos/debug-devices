@@ -262,7 +262,7 @@ def run_scenario(page: Page, url: str, fake_phone: bool) -> None:
 
     if fake_phone:
         page.click("#phone-snapshot")
-        page.locator("#snapshot-link:not([hidden])").wait_for(timeout=PHONE_TIMEOUT * MS_PER_SECOND)
+        page.locator("#snapshot-view:not([hidden])").wait_for(timeout=PHONE_TIMEOUT * MS_PER_SECOND)
         pause(PAUSE_LONG)
 
     smooth_scroll_to(page, "#log-panel")

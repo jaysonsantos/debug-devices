@@ -35,6 +35,9 @@ const SCREEN_HEADER_BYTES = 5;
 const SCREEN_KIND = { config: 0, key: 1, delta: 2 };
 const SCREEN_RECONNECT_MS = 2000;
 const MICROSECONDS_PER_FRAME = 16666;
+const FULLSCREEN_KEY = "f";
+const FULL_SNAPSHOT_QUERY = "full=true";
+const FORM_FIELDS = "input, select, textarea";
 const FULL_TURN = 360;
 const QUARTER_TURN = 90;
 const HALF_TURN = 180;
@@ -96,6 +99,7 @@ function drawCrop() {
     return;
   }
   box.hidden = false;
+  $("stage").style.setProperty("--frame-ratio", String(size.width / size.height));
   box.style.left = `${(crop.x / size.width) * 100}%`;
   box.style.top = `${(crop.y / size.height) * 100}%`;
   box.style.width = `${(crop.width / size.width) * 100}%`;
@@ -116,7 +120,10 @@ function setupCropEditor() {
   let drag = null;
 
   stage.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || !frameSize().width) return;
+    // The crop box is read-only in full screen.
+    if (event.button !== 0 || !frameSize().width || document.fullscreenElement) return;
+    // preventDefault below stops the focus change, so focus the view here: the key "f" needs it.
+    $("webcam-view").focus({ preventScroll: true });
     const point = toFrame(event);
     const corner = event.target.dataset?.corner;
     const crop = state.crop;
@@ -276,10 +283,11 @@ function applyPhone(phone) {
   }
   showViewRotation();
   if (phone.has_snapshot) {
-    const url = `${API.phoneSnapshotImage}?t=${Date.now()}`;
-    $("snapshot").src = url;
-    $("snapshot-link").href = url;
-    $("snapshot-link").hidden = false;
+    const stamp = Date.now();
+    $("snapshot").src = snapshotUrl(document.fullscreenElement === $("snapshot-view"), stamp);
+    $("snapshot-full").href = snapshotUrl(true, stamp);
+    $("snapshot-view").hidden = false;
+    $("snapshot-full").hidden = false;
   }
 }
 
@@ -591,6 +599,55 @@ function renderCall(call) {
 
 // endregion: activity log
 
+// region: full screen
+
+// The panel shows the scaled snapshot; the full screen view loads the full-resolution one.
+function snapshotUrl(full, stamp) {
+  return `${API.phoneSnapshotImage}?${full ? `${FULL_SNAPSHOT_QUERY}&` : ""}t=${stamp}`;
+}
+
+function toggleFullscreen(view) {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+    return;
+  }
+  view.requestFullscreen().catch((error) => console.warn("full screen refused:", error.message));
+}
+
+function setupFullscreen() {
+  for (const view of document.querySelectorAll(".view")) {
+    view.addEventListener("dblclick", (event) => {
+      if (event.target.closest("button")) return;
+      toggleFullscreen(view);
+    });
+    view.querySelector(".fs-button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleFullscreen(view);
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== FULLSCREEN_KEY || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.target.closest?.(FORM_FIELDS)) return;
+    const view = document.fullscreenElement ?? document.activeElement?.closest?.(".view");
+    if (!view) return;
+    event.preventDefault();
+    toggleFullscreen(view);
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if ($("snapshot-view").hidden) return;
+    $("snapshot").src = snapshotUrl(document.fullscreenElement === $("snapshot-view"), Date.now());
+  });
+  const controls = document.querySelector("#phone-view .fs-controls");
+  for (const button of controls.querySelectorAll("[data-zoom]")) {
+    button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
+  }
+  controls.querySelector("[data-torch]").addEventListener("click", () =>
+    phoneAction(API.phoneTorch, { enabled: !state.phone?.status?.torch_enabled }),
+  );
+}
+
+// endregion: full screen
+
 // region: bench
 
 function benchSummary(result) {
@@ -654,6 +711,7 @@ async function main() {
   setupPhone();
   setupSettings();
   setupBench();
+  setupFullscreen();
   try {
     await loadState();
   } catch (error) {
