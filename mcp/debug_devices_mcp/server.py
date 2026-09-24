@@ -259,7 +259,11 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
 
     @server.tool()
     async def phone_zoom(ratio: float | None = None, step: ZoomStep | None = None) -> CameraStatus:
-        """Set the zoom. Give `ratio` (clamped to the camera range) or `step` ("in" x1.5, "out" /1.5), not both."""
+        """Set the zoom. Give `ratio` (clamped to the camera range) or `step` ("in" x1.5, "out" /1.5), not both.
+
+        To locate a part: zoom in to read small markings and check nearby components, zoom out for wider context.
+        Take a fresh phone_snapshot after each zoom change and inspect the relevant area of that photo.
+        """
         if (ratio is None) == (step is None):
             raise ToolError("give exactly one of `ratio` or `step`")
         request = ZoomRatioRequest(ratio=ratio) if ratio is not None else ZoomStepRequest(step=step)
@@ -292,7 +296,10 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         """Take one full still with the phone back camera and return it as a JPEG.
 
         Use it for every question about what is visible on the device (parts, markings, damage, orientation). Take a
-        fresh one for each such question. For a visible marking, quote it exactly, then call board_match_marking.
+        fresh one for each such question and after each phone_zoom change. For a visible marking, quote it exactly,
+        then call board_match_marking. Boardview data tells you where to look, but it does not prove what the photo
+        shows. A part on the other board side cannot be confirmed from this photo: ask the user to isolate the power
+        safely before they turn the board.
         The returned image has its long edge scaled to `max_side` pixels (0 = full size). `save_path` writes the
         full-resolution JPEG to disk.
         """

@@ -165,6 +165,11 @@ async def test_evidence_rules_in_instructions_and_descriptions(settings: Setting
         "supporting evidence",
         "board_match_marking",
         "user's cockpit",
+        "call phone_zoom, then take a fresh",
+        "Zoom out when you need wider context",
+        "not proof of what appears in a physical photo",
+        "current photo cannot confirm it",
+        "isolate the power",
     ):
         assert phrase in EVIDENCE_RULES
 
