@@ -64,7 +64,7 @@ Choose one:
 A normal session:
 
 1. Say **"start the bench"**. The agent runs `bench_start`: it starts the monitor page, the webcam, and the phone, opens the board file when your instructions give its path, and gives you the page URL.
-2. Open the page (default `http://127.0.0.1:18766/`). Draw the crop box around the multimeter display one time. Only this area goes to the vision model.
+2. Open the page (default `http://127.0.0.1:18766/`). Draw the crop box around the multimeter display one time. Only this area goes to the vision model. The page is your cockpit: the agent never reads it. It gets all device data from the MCP tools. For a microscope view, double-click the live phone screen: only that view goes to full screen (`Esc` leaves).
 3. Ask questions. Examples:
    - "Where is U2? Show it on the board."
    - "Which test point is near U2 on the PP3V3 net?"

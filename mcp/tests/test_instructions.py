@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.instructions import (
     DEFAULT_INSTRUCTIONS_FILE,
+    EVIDENCE_RULES,
     EXAMPLE_FILE_NAME,
     HEADER,
     MAX_SERVER_INSTRUCTIONS_BYTES,
@@ -135,3 +136,9 @@ async def test_bench_start_description_points_at_the_instructions() -> None:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
 
     assert "bench_instructions" in (tools["bench_start"].description or "")
+
+
+def test_bench_instructions_carry_the_evidence_rules(tmp_path: Path) -> None:
+    # Codex keeps only the header of the server instructions, so the tool result must carry the rules.
+    assert read_instructions(tmp_path / "missing.md").evidence_rules == EVIDENCE_RULES
+    assert "user's cockpit" in HEADER

@@ -76,6 +76,9 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
 
         Tell the user the URL: the port can differ from 18766 when that port is busy. `open_browser` opens it in a
         new Firefox window. Nothing starts at process start; this tool or any other tool starts the page.
+
+        The page is the user's cockpit. Do not open, fetch, or read it yourself: get device data only from the
+        debug-devices tools.
         """
         url = await monitor.ensure_page(auto_open=False)
         browser = await monitor.open_browser() if open_browser else None

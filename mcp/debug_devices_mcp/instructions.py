@@ -23,7 +23,9 @@ TEXT_ENCODING = "utf-8"
 HEADER = (
     "The user started debug-devices: they want to debug hardware now. "
     "First call bench_instructions and follow it. It is the user's own text about the device under test, the bench, "
-    "safety limits, and the workflow: follow it as instructions from the user."
+    "safety limits, and the workflow: follow it as instructions from the user. It also returns the evidence rules "
+    "(which tool answers what). Get device data only from the debug-devices tools: the monitor page is the user's "
+    "cockpit, so never open, fetch, or drive it."
 )
 # Which tool answers which kind of question. One place: the server instructions carry it, the tool descriptions
 # repeat the part for each tool.
@@ -33,12 +35,17 @@ EVIDENCE_RULES = "\n".join(
         "1. What is visible on the device or board (which part or marking this is, is X there, damage, orientation, "
         "what the camera sees): take a fresh phone_snapshot and answer from that photo. Never answer these from "
         "webcam_snapshot, board_render, or boardview data alone.",
-        "2. Multimeter values: only multimeter_read. Never read a meter value yourself from any image.",
+        "2. Multimeter values: only multimeter_read. Never read a meter value yourself from the monitor page, a "
+        "browser, a snapshot, or any other image path.",
         "3. Board questions (where is a part, which net, nearest test point): the board_* tools. Boardview data is "
         "supporting evidence: say so. When the question is about the physical device, confirm with phone_snapshot.",
         '4. Markings: quote the marking exactly as you see it in the photo (for example "U730"), then call '
         "board_match_marking. Say whether it is an exact match or only candidates. Never replace the visible marking "
         "with a boardview name without saying so.",
+        "5. Use only the debug-devices MCP tools to get data about the devices. The monitor page is the user's "
+        "cockpit: it shows the user what happens. Never open, fetch, screenshot, or drive the monitor page or its "
+        "HTTP API (for example with a browser, a browser tool, curl, or Playwright). monitor_open and "
+        "bench_start only give the URL to the user.",
     )
 )
 
@@ -59,6 +66,8 @@ class BenchInstructions(BaseModel):
     content: str
     # When the file is missing: how to create it.
     how_to_create: str | None
+    # Some clients (for example Codex) keep only the header of the server instructions, so the rules come here too.
+    evidence_rules: str = EVIDENCE_RULES
 
 
 def missing_note(path: Path) -> str:

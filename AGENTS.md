@@ -55,3 +55,4 @@ python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict   # ph
 - Test fixtures come only from open sources, with a license note next to them. Hooks must not change them.
 - Webcam frames can show people. Only the crop box goes to the vision model. Mask the area outside the crop in recordings.
 - The monitor and the phone app listen on `127.0.0.1` only.
+- The monitor page is the user's cockpit. Agents get device data only from the MCP tools. They never open, fetch, or drive the page or its HTTP API.

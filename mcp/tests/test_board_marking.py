@@ -159,7 +159,13 @@ async def test_find_part_falls_back_to_prefix(settings: Settings, marking_file: 
 async def test_evidence_rules_in_instructions_and_descriptions(settings: Settings, tmp_path: Path) -> None:
     text_with_rules = server_instructions(tmp_path / "missing.md", "Tool guide.")
     assert EVIDENCE_RULES in text_with_rules
-    for phrase in ("fresh phone_snapshot", "only multimeter_read", "supporting evidence", "board_match_marking"):
+    for phrase in (
+        "fresh phone_snapshot",
+        "only multimeter_read",
+        "supporting evidence",
+        "board_match_marking",
+        "user's cockpit",
+    ):
         assert phrase in EVIDENCE_RULES
 
     server, _ = server_with(settings, fixture("markings.json"))
