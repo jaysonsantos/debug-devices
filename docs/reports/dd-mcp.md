@@ -380,3 +380,35 @@ Brief: `evidence.md`. Problem: the phone showed the silkscreen marking "U730", t
 
 - The evidence rules are instructions and descriptions. The server cannot force an agent to follow them.
 - `board_match_marking` does not read the photo itself. The agent must read the marking from `phone_snapshot` and give its pixel position.
+
+## Hot reload proxy for local development
+
+Brief: `reload.md`. Goal: the MCP server that Claude Code or ChatGPT desktop (Codex) uses runs the new code after a change, without a restart of the app.
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/devreload.py` and entry point `debug-devices-mcp-dev` (`pyproject.toml`). No new dependency (`watchfiles` is not in `uv.lock`): the proxy polls the modification times.
+  - Child: `python -m debug_devices_mcp <same arguments>`, from the same virtual environment (the project is installed as editable, so a new child imports the new code). The child runs in its own process group. Its stderr goes to the proxy's stderr. The proxy's stdout carries only JSON-RPC.
+  - Watch: `.py`, `.html`, `.js`, `.css` under `mcp/debug_devices_mcp/` (not `__pycache__`), poll every 1 s, debounce 300 ms (`ReloadOptions`).
+  - It keeps the client's `initialize` and `notifications/initialized`, and sets `capabilities.tools.listChanged = true` in the `initialize` answer to the client.
+  - Reload: stop the child, start a new child, replay `initialize` with its own id (the answer does not go to the client) and `initialized`, then send `notifications/tools/list_changed`. Log: `[devreload] reloaded (N files changed)`.
+  - Queue: client messages during a reload wait and go to the new child. Requests that the old child did not answer get JSON-RPC error -32001 "debug-devices reloaded its code; call the tool again".
+  - Broken code: when the new child exits or does not answer `initialize` within 30 s, the proxy logs the problem, and requests get error -32002 "debug-devices cannot start after a code change: <problem>. Fix the code; it retries then." It tries again at the next change. A child that stops by itself (a crash) is handled the same way.
+  - Client EOF: stop the child, exit.
+- **SIGTERM finding.** The server has no SIGTERM handler: the default action ends Python without the lifespan cleanup, so the webcam ffmpeg stream and scrcpy can stay behind. So the proxy stops a child like this: close its stdin first (the server cleans up; the exit watchdog ends it within 2 s), SIGTERM after `stop_timeout` (5 s), then SIGKILL, both to the child's process group so that ffmpeg and scrcpy also stop. Proposal for the server owner: a SIGTERM handler that runs the same cleanup as a stdin EOF.
+- `scripts/mcp-server.sh`: `--dev-reload` as the first argument, or `DEBUG_DEVICES_DEV_RELOAD=1`, runs `debug-devices-mcp-dev`. The cached dev-shell environment stays the same. The script header documents it.
+- Tests `mcp/tests/test_devreload.py` (7): a fake child script in `tmp_path` answers `initialize` and a tool with a version from a file. Covered: the file snapshot, forward and `listChanged`, the initialize replay (checked in the child's log: our id, then `initialized`), the queue during a slow restart, the in-flight error (also covers the SIGTERM step: the fake tool sleeps 60 s), a broken child then recovery, and client EOF. They passed 3 times in a row (about 2.5 s). No fake child stays behind.
+- Docs: `README.md` ("Reload inside an MCP client"), `mcp/README.md` ("Reload proxy"), `AGENTS.md` (commands line), `.env.example` (a comment line: the script reads `DEBUG_DEVICES_DEV_RELOAD` from its own environment, not from `.env`).
+
+### Checks
+
+- `uv run pytest`: 217 passed, 1 skipped. `uv run ruff check` and `uv run ruff format --check`: pass.
+- `nix develop --command prek run --files <my files>`: all hooks pass, shellcheck included.
+- Real check: `mcp.Client` over stdio with `scripts/mcp-server.sh --dev-reload --no-ui-open-browser --instructions-file <temporary file>`. I used a temporary instructions file, so that the user's real `instructions.md` did not come into the output. Call 1 of `bench_instructions` answered. Then I changed only the modification time of `mcp/debug_devices_mcp/instructions.py`. Stderr: `[devreload] reloaded (1 files changed)`. Call 2 answered from the new server. `git diff HEAD -- mcp/debug_devices_mcp/instructions.py` is empty: no source change stays. I deleted the temporary files.
+- The first real run found a bug: at client EOF, the proxy logged "the server exited with code 0" as a crash. Fixed with a `closing` flag. A test checks it.
+
+### Open items
+
+- The old server's monitor page logs "timeout graceful shutdown exceeded" from uvicorn at each reload (open page connections). The stop still ends within the timeout. The dd-ui owner can shorten the uvicorn graceful timeout.
+- A code change in the proxy itself (`devreload.py`) reloads the child, not the proxy. A change of the proxy needs a restart of the MCP client.
+- Clients must support `notifications/tools/list_changed` to see new or changed tools. Changed code of existing tools works also without it.

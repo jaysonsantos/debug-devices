@@ -216,4 +216,15 @@ uv run ruff check
 uv run ruff format --check
 ```
 
+### Reload proxy (`debug-devices-mcp-dev`)
+
+`debug-devices-mcp-dev [server arguments...]` (module `devreload.py`, started by `scripts/mcp-server.sh --dev-reload`) runs `python -m debug_devices_mcp` with the same arguments as a child, and forwards the newline-delimited JSON-RPC of the stdio transport in both directions. Stdout carries only JSON-RPC. The proxy and the child write their logs to stderr.
+
+- Watch: the proxy polls the modification times of `.py`, `.html`, `.js`, and `.css` files under `mcp/debug_devices_mcp/` every second (`poll_interval`). After a change, it waits 300 ms for more changes (`debounce`).
+- Initialize: it keeps the client's `initialize` request and `notifications/initialized`. In the `initialize` answer to the client, it sets `capabilities.tools.listChanged` to `true`.
+- Reload: it closes the child's stdin, so the server stops the webcam stream, scrcpy, and the adb forward. After 5 s (`stop_timeout`) it sends SIGTERM, then SIGKILL, to the child's process group. The server has no SIGTERM handler, so only the stdin close gives a clean stop. Then it starts a new child, sends it the kept `initialize` (the proxy takes the answer) and `initialized`, and sends `notifications/tools/list_changed` to the client. The log line is `[devreload] reloaded (N files changed)`.
+- Messages from the client during a reload wait in a queue and go to the new child. Requests that the old child did not answer get the JSON-RPC error -32001 "debug-devices reloaded its code; call the tool again".
+- If the new child exits or does not answer `initialize` (30 s), requests get the error -32002 with the problem. The proxy tries again at the next change. The same happens when the server stops by itself.
+- Client EOF: the proxy stops the child and exits.
+
 The tests do not need a phone, a webcam, or an API key. They use `httpx.MockTransport` for the phone and OpenRouter, and a fake command runner for `adb` and `ffmpeg`.

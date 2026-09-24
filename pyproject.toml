@@ -17,6 +17,8 @@ dependencies = [
 
 [project.scripts]
 debug-devices-mcp = "debug_devices_mcp.__main__:main"
+# Development: a stdio proxy that restarts the server when its code changes (see devreload.py).
+debug-devices-mcp-dev = "debug_devices_mcp.devreload:main"
 
 [build-system]
 requires = ["uv_build>=0.9,<0.13"]

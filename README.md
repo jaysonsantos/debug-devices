@@ -168,6 +168,21 @@ Open http://127.0.0.1:18766/ one time. The page connects again after each restar
 
 Only one process can read the webcam. When this monitor runs, other MCP servers (for example Claude Code sessions) take their webcam frames from it. See "More than one MCP server" in [mcp/README.md](mcp/README.md).
 
+### Reload inside an MCP client
+
+To work on the MCP code while Claude Code or Codex uses the server, start it with `--dev-reload` (first argument), or set `DEBUG_DEVICES_DEV_RELOAD=1`:
+
+```sh
+scripts/mcp-server.sh --dev-reload --no-ui-open-browser
+```
+
+- The script runs `debug-devices-mcp-dev`: a stdio proxy between the client and the real server.
+- When a file in `mcp/debug_devices_mcp/` changes (`.py`, `.html`, `.js`, `.css`), the proxy stops the server and starts a new one with the new code. The client keeps its session, and the app needs no restart.
+- The proxy sends the client's `initialize` again and tells the client that the tool list can change (`notifications/tools/list_changed`).
+- A tool call that runs during a reload gets the error "debug-devices reloaded its code; call the tool again".
+- If the new code does not start (for example a syntax error), each tool call gets an error that names the problem. The proxy tries again at the next change.
+- For development only.
+
 ## Record the demo
 
 `scripts/record_demo.py` records the page of a running monitor with Playwright (Firefox, for the WebCodecs H.264 phone screen). It then writes `docs/images/monitor-demo.webp` and `docs/images/monitor-demo.mp4`:
