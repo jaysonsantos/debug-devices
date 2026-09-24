@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, JsonValue
 
+from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.phone_api import CameraStatus
 from debug_devices_mcp.ui.constants import defaults
 
@@ -77,6 +78,10 @@ class PhoneState(BaseModel):
     status: CameraStatus | None = None
     scrcpy_running: bool = False
     has_snapshot: bool = False
+    # Counts the phone snapshots. The page reloads the image (and resets its zoom) only when it changes.
+    snapshot_seq: int = 0
+    # The flips of the phone snapshots. The page shows the buttons and turns the live view the same way.
+    orientation: SnapshotOrientation = SnapshotOrientation()
     # The phone screen stream in the page: off, starting, streaming, or error.
     screen: str = "off"
     screen_error: str | None = None

@@ -1,7 +1,7 @@
 """The live webcam view: an MJPEG stream from the shared capture, and its size."""
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -12,7 +12,7 @@ from starlette.routing import Route
 
 from debug_devices_mcp.remote_webcam import RemoteUnavailableError
 from debug_devices_mcp.ui.constants import http
-from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
+from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of, until_closing
 from debug_devices_mcp.webcam import WebcamError
 from debug_devices_mcp.webcam_stream import StreamInfo, WebcamStream
 
@@ -37,7 +37,7 @@ async def mjpeg_body(stream: WebcamStream) -> AsyncIterator[bytes]:
         yield mjpeg_part(frame.jpeg)
 
 
-async def viewer_body(monitor: Monitor, stream: WebcamStream) -> AsyncIterator[bytes]:
+async def viewer_body(monitor: Monitor, stream: WebcamStream) -> AsyncGenerator[bytes]:
     """A page watches: the webcam starts, and it stays on while the page reads. Another owner: its stream."""
     async with monitor.webcam_viewer():
         if monitor.webcam_owner is not None and monitor.shared is not None:
@@ -53,7 +53,7 @@ async def get_stream(request: Request) -> Response:
     monitor = monitor_of(request)
     if monitor.stream is None:
         return error_response(NO_STREAM, NOT_FOUND)
-    body = viewer_body(monitor, monitor.stream)
+    body = until_closing(viewer_body(monitor, monitor.stream), monitor.closing)
     return StreamingResponse(body, media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
 
 

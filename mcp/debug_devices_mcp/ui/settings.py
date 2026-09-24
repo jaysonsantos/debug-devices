@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.ui.constants import SETTINGS_FILE_NAME, STATE_DIR_NAME, defaults, env
 from debug_devices_mcp.webcam import Crop
 
@@ -35,6 +36,8 @@ class UiSettings(BaseModel):
     webcam_warmup_frames: int | None = Field(default=None, ge=0)
     webcam_crop: Crop | None = None
     screen_rotation: ScreenRotation | None = None
+    # The flips of the phone snapshot. `OrientationState` owns this value; the other settings keep it as it is.
+    snapshot_orientation: SnapshotOrientation | None = None
 
 
 class EffectiveSettings(BaseModel):

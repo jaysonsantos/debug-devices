@@ -148,6 +148,7 @@ class tools:
     PHONE_TORCH = "phone_torch"
     PHONE_SNAPSHOT = "phone_snapshot"
     PHONE_ROTATION = "phone_rotation"
+    PHONE_SNAPSHOT_ORIENTATION = "phone_snapshot_orientation"
     BOARD_OPEN = "board_open"
     MONITOR_OPEN = "monitor_open"
     BENCH_START = "bench_start"

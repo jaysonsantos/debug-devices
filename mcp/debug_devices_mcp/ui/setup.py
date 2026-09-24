@@ -59,8 +59,11 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             shared=shared,
             status_reader=services.phone.status,
             forward_remover=remove_forward,
+            orientation=services.orientation,
         ),
     )
+    monitor.bus.update_phone(orientation=services.orientation.current)
+    services.orientation.add_listener(monitor.orientation_changed)
     if settings.phone_screen:
         monitor.screen = PhoneScreen(
             PhoneScreenOptions(

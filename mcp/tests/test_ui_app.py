@@ -420,3 +420,11 @@ def test_full_screen_snapshot_falls_back_to_the_scaled_image(client: TestClient)
     # Without the recorder (for example a --no-ui style setup), the full view gets the tool result image.
     client.post("/api/phone/snapshot")
     assert client.get("/api/phone/snapshot.jpg", params={"full": "true"}).content == JPEG
+
+
+def test_each_phone_snapshot_gets_a_new_number(client: TestClient) -> None:
+    assert client.get("/api/state").json()["phone"]["snapshot_seq"] == 0
+    assert client.post("/api/phone/snapshot").json()["snapshot_seq"] == 1
+    # A status update keeps the number, so the page does not reload the image (and keeps its zoom).
+    assert client.post("/api/phone/status").json()["snapshot_seq"] == 1
+    assert client.post("/api/phone/snapshot").json()["snapshot_seq"] == 2

@@ -5,7 +5,7 @@ Wire format of each message: 4-byte big-endian payload length, 1 kind byte (0 co
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import timedelta
 
 from starlette.requests import Request
@@ -14,20 +14,20 @@ from starlette.routing import Route
 
 from debug_devices_mcp.phone_screen import PhoneScreen
 from debug_devices_mcp.ui.constants import http, screen
-from debug_devices_mcp.ui.routes import error_response, monitor_of
+from debug_devices_mcp.ui.routes import error_response, monitor_of, until_closing
 
 NOT_FOUND = 404
-# How often the stream loop checks that the monitor still runs.
-CLOSING_CHECK = timedelta(seconds=1)
+# How often the stream loop checks for a resync when no frame comes.
+RESYNC_CHECK = timedelta(seconds=1)
 
 
-async def screen_body(phone_screen: PhoneScreen, closing: asyncio.Event) -> AsyncIterator[bytes]:
+async def screen_body(phone_screen: PhoneScreen) -> AsyncGenerator[bytes]:
     with phone_screen.subscribe() as subscriber:
-        while not closing.is_set():
+        while True:
             if subscriber.resync:
                 phone_screen.resync(subscriber)
             try:
-                yield await asyncio.wait_for(subscriber.queue.get(), CLOSING_CHECK.total_seconds())
+                yield await asyncio.wait_for(subscriber.queue.get(), RESYNC_CHECK.total_seconds())
             except TimeoutError:
                 continue
 
@@ -37,7 +37,7 @@ async def get_screen(request: Request) -> Response:
     if monitor.screen is None:
         return error_response("the phone screen is off (--no-phone-screen)", NOT_FOUND)
     return StreamingResponse(
-        screen_body(monitor.screen, monitor.closing), media_type=screen.MEDIA_TYPE, headers=http.NO_CACHE
+        until_closing(screen_body(monitor.screen), monitor.closing), media_type=screen.MEDIA_TYPE, headers=http.NO_CACHE
     )
 
 

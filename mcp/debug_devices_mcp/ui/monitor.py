@@ -21,6 +21,9 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
+from debug_devices_mcp.constants import images
+from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
+from debug_devices_mcp.orientation import OrientationState
 from debug_devices_mcp.phone_api import CameraStatus, PhoneError
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
@@ -86,6 +89,8 @@ class MonitorParts:
     # Reads the camera status without a tool call. The page turns the phone screen with `rotation_degrees`.
     status_reader: StatusReader | None = None
     forward_remover: ForwardRemover | None = None
+    # The flips of the phone snapshots (shared with the tools). The page shows the snapshot in this orientation.
+    orientation: OrientationState | None = None
     clock: Clock = field(default=time.monotonic)
 
 
@@ -171,6 +176,9 @@ class Monitor:
         self.shared = parts.shared
         self.screen = parts.screen
         self.status_reader = parts.status_reader
+        self.orientation = parts.orientation
+        # Rendered page images of the raw snapshot: (snapshot number, orientation, full size) -> JPEG.
+        self._rendered: dict[tuple[int, SnapshotOrientation, bool], bytes] = {}
         self._forward_remover = parts.forward_remover
         self._clock = parts.clock
         self._page_lock = asyncio.Lock()
@@ -195,7 +203,8 @@ class Monitor:
         self.closing = asyncio.Event()
         self.url: str | None = None
         self.last_snapshot: bytes | None = None
-        self.last_snapshot_full: bytes | None = None
+        # The raw still from the phone (true orientation, full size). The page gets it through `render_snapshot`.
+        self.last_snapshot_raw: bytes | None = None
         # Full phone snapshots by tool call, until the call ends (the tool result has only the scaled image).
         self._full_snapshots: dict[UUID, bytes] = {}
 
@@ -230,6 +239,28 @@ class Monitor:
             finally:
                 self._full_snapshots.pop(call.id, None)
         return call, result
+
+    def orientation_changed(self, orientation: SnapshotOrientation) -> None:
+        """Listener for `OrientationState`: the page updates its buttons and reloads the snapshot."""
+        self.saved = self.saved.model_copy(update={"snapshot_orientation": orientation})
+        self.bus.update_phone(orientation=orientation)
+
+    async def render_snapshot(self, full: bool) -> bytes | None:
+        """The last snapshot for the page, in the current orientation: full size, or scaled for the panel.
+
+        Without the raw still (no recorder), the scaled tool result as it was taken.
+        """
+        raw = self.last_snapshot_raw
+        if raw is None:
+            return self.last_snapshot
+        orientation = self.orientation.current if self.orientation is not None else SnapshotOrientation()
+        key = (self.bus.phone.snapshot_seq, orientation, full)
+        if key not in self._rendered:
+            oriented = await asyncio.to_thread(orient_jpeg, raw, orientation)
+            if not full:
+                oriented = (await asyncio.to_thread(downscale_jpeg, oriented, images.DEFAULT_MAX_SIDE)).data
+            self._rendered[key] = oriented
+        return self._rendered[key]
 
     def phone_snapshot_recorder(self, snapshot: SnapshotReader) -> SnapshotReader:
         """Wrap the phone client snapshot: keep the full JPEG of the running tool call for the full screen view."""
@@ -276,8 +307,9 @@ class Monitor:
         elif call.tool == tools.PHONE_SNAPSHOT and result_images:
             self.last_snapshot = result_images[0]
             # The full image of the same call, for the full screen view. Without it, the scaled one.
-            self.last_snapshot_full = self._full_snapshots.pop(call.id, None) or result_images[0]
-            self.bus.update_phone(has_snapshot=True)
+            self.last_snapshot_raw = self._full_snapshots.pop(call.id, None)
+            self._rendered.clear()
+            self.bus.update_phone(has_snapshot=True, snapshot_seq=self.bus.phone.snapshot_seq + 1)
 
     def _phone_status(self, structured: dict[str, Any]) -> None:
         try:
@@ -318,6 +350,9 @@ class Monitor:
         return self.effective.webcam_crop
 
     def update_settings(self, saved: UiSettings) -> EffectiveSettings:
+        if self.orientation is not None:
+            # OrientationState owns the flips: a page that saves other settings must not change them.
+            saved = saved.model_copy(update={"snapshot_orientation": self.orientation.current})
         old = self.effective
         self._store.save(saved)
         self.saved = saved

@@ -1,6 +1,7 @@
 """The whole page state, loaded once when the page opens, and the SSE stream of changes."""
 
 import asyncio
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
@@ -9,7 +10,7 @@ from starlette.routing import Route
 
 from debug_devices_mcp.ui.constants import defaults, http
 from debug_devices_mcp.ui.events import BusMessage
-from debug_devices_mcp.ui.routes import json_response, monitor_of
+from debug_devices_mcp.ui.routes import json_response, monitor_of, until_closing
 from debug_devices_mcp.ui.routes.settings import settings_view
 from debug_devices_mcp.ui.views import StateView
 
@@ -39,10 +40,10 @@ def sse_message(message: BusMessage) -> str:
 async def get_events(request: Request) -> StreamingResponse:
     monitor = monitor_of(request)
 
-    async def body():
+    async def body() -> AsyncGenerator[str]:
         with monitor.bus.subscribe() as queue:
             yield SSE_KEEPALIVE
-            while not monitor.closing.is_set():
+            while True:
                 try:
                     message = await asyncio.wait_for(queue.get(), defaults.SSE_KEEPALIVE.total_seconds())
                 except TimeoutError:
@@ -50,7 +51,8 @@ async def get_events(request: Request) -> StreamingResponse:
                     continue
                 yield sse_message(message)
 
-    return StreamingResponse(body(), media_type=http.SSE_MEDIA_TYPE, headers=http.NO_CACHE)
+    stream = until_closing(body(), monitor.closing)
+    return StreamingResponse(stream, media_type=http.SSE_MEDIA_TYPE, headers=http.NO_CACHE)
 
 
 async def get_whoami(request: Request) -> JSONResponse:

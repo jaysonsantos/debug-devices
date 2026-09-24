@@ -20,6 +20,7 @@ const API = {
   benchStop: "/api/bench/stop",
   phoneScreen: "/api/phone/screen",
   phoneRotation: "/api/phone/rotation",
+  phoneOrientation: "/api/phone/orientation",
   callImage: (id, index) => `/api/calls/${id}/images/${index}`,
 };
 const MAX_LOG_ROWS = 200;
@@ -38,6 +39,16 @@ const MICROSECONDS_PER_FRAME = 16666;
 const FULLSCREEN_KEY = "f";
 const FULL_SNAPSHOT_QUERY = "full=true";
 const FORM_FIELDS = "input, select, textarea";
+// Digital zoom of the full-screen phone snapshot (a still image: the phone camera zoom does not change it).
+const SNAPSHOT_ZOOM_STEP = 1.25;
+const SNAPSHOT_ZOOM_MIN = 1;
+const SNAPSHOT_ZOOM_MAX = 8;
+const SNAPSHOT_ZOOM_RESET_KEY = "0";
+// The snapshot flips: the server applies them to the snapshot. The page only flips the live view with CSS.
+const FLIP_KEYS = { h: "horizontal", v: "vertical" };
+const FLIP_FIELDS = { horizontal: "flip_horizontal", vertical: "flip_vertical" };
+const MIRRORED = -1;
+const ZOOM_LABEL_DECIMALS = 2;
 const FULL_TURN = 360;
 const QUARTER_TURN = 90;
 const HALF_TURN = 180;
@@ -52,6 +63,8 @@ const state = {
   frame: { width: 0, height: 0 }, // webcam frame size in pixels
   crop: null, // {x, y, width, height} in frame pixels
   phone: null, // PhoneState
+  snapshotSeq: 0, // the phone snapshot that the page shows
+  orientationKey: "", // the flips of the snapshot that the page shows
 };
 
 async function api(method, url, body) {
@@ -282,7 +295,13 @@ function applyPhone(phone) {
     snapshotRotation.disabled = false;
   }
   showViewRotation();
-  if (phone.has_snapshot) {
+  const orientationKey = applyOrientation(phone.orientation);
+  const newOrientation = orientationKey !== state.orientationKey;
+  state.orientationKey = orientationKey;
+  if (phone.has_snapshot && (phone.snapshot_seq !== state.snapshotSeq || newOrientation)) {
+    // Only a new snapshot or new flips reload the image: the status poll also sends phone updates.
+    state.snapshotSeq = phone.snapshot_seq;
+    resetSnapshotZoom();
     const stamp = Date.now();
     $("snapshot").src = snapshotUrl(document.fullscreenElement === $("snapshot-view"), stamp);
     $("snapshot-full").href = snapshotUrl(true, stamp);
@@ -634,9 +653,12 @@ function setupFullscreen() {
     toggleFullscreen(view);
   });
   document.addEventListener("fullscreenchange", () => {
+    resetSnapshotZoom();
     if ($("snapshot-view").hidden) return;
     $("snapshot").src = snapshotUrl(document.fullscreenElement === $("snapshot-view"), Date.now());
   });
+  setupSnapshotZoom();
+  setupFlips();
   const controls = document.querySelector("#phone-view .fs-controls");
   for (const button of controls.querySelectorAll("[data-zoom]")) {
     button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
@@ -647,6 +669,128 @@ function setupFullscreen() {
 }
 
 // endregion: full screen
+
+// region: snapshot flips
+
+// Show the flips on the buttons, and flip the live phone view the same way. Return a key of the flips.
+function applyOrientation(orientation) {
+  const flips = orientation ?? { flip_horizontal: false, flip_vertical: false };
+  for (const button of document.querySelectorAll("[data-flip]")) {
+    button.setAttribute("aria-pressed", String(Boolean(flips[FLIP_FIELDS[button.dataset.flip]])));
+  }
+  const scaleX = flips.flip_horizontal ? MIRRORED : 1;
+  const scaleY = flips.flip_vertical ? MIRRORED : 1;
+  $("phone-screen").style.transform = scaleX === 1 && scaleY === 1 ? "" : `scale(${scaleX}, ${scaleY})`;
+  return `${flips.flip_horizontal}/${flips.flip_vertical}`;
+}
+
+function toggleFlip(direction) {
+  const field = FLIP_FIELDS[direction];
+  const current = Boolean(state.phone?.orientation?.[field]);
+  phoneAction(API.phoneOrientation, { [field]: !current });
+}
+
+function setupFlips() {
+  for (const button of document.querySelectorAll("[data-flip]")) {
+    button.addEventListener("click", () => toggleFlip(button.dataset.flip));
+  }
+  document.addEventListener("keydown", (event) => {
+    const direction = FLIP_KEYS[event.key];
+    if (!direction || event.ctrlKey || event.metaKey || event.altKey || event.target.closest?.(FORM_FIELDS)) return;
+    const view = document.fullscreenElement ?? document.activeElement?.closest?.(".view");
+    if (view !== $("snapshot-view")) return;
+    event.preventDefault();
+    toggleFlip(direction);
+  });
+}
+
+// endregion: snapshot flips
+
+// region: snapshot zoom
+
+// The full-screen image box covers the screen from (0, 0). transform = translate(x, y) scale(scale), origin 0 0.
+const snapshotZoom = { scale: SNAPSHOT_ZOOM_MIN, x: 0, y: 0, pan: null };
+
+function snapshotZoomActive() {
+  return document.fullscreenElement === $("snapshot-view");
+}
+
+function applySnapshotZoom() {
+  const img = $("snapshot");
+  const { scale, x, y } = snapshotZoom;
+  img.style.transform = scale === SNAPSHOT_ZOOM_MIN ? "" : `translate(${x}px, ${y}px) scale(${scale})`;
+  img.classList.toggle("zoomed", scale > SNAPSHOT_ZOOM_MIN);
+  $("snapshot-zoom").textContent = `${Number(scale.toFixed(ZOOM_LABEL_DECIMALS))}x`;
+}
+
+// Keep the image inside the screen: no empty band at an edge when zoomed in.
+function clampSnapshotPan() {
+  // The layout size, without the transform: the full-screen box.
+  const width = $("snapshot").offsetWidth;
+  const height = $("snapshot").offsetHeight;
+  snapshotZoom.x = Math.min(0, Math.max(width - width * snapshotZoom.scale, snapshotZoom.x));
+  snapshotZoom.y = Math.min(0, Math.max(height - height * snapshotZoom.scale, snapshotZoom.y));
+}
+
+function resetSnapshotZoom() {
+  Object.assign(snapshotZoom, { scale: SNAPSHOT_ZOOM_MIN, x: 0, y: 0, pan: null });
+  $("snapshot").classList.remove("panning");
+  applySnapshotZoom();
+}
+
+// Zoom around the mouse: the image point under the pointer stays under it.
+function zoomSnapshotAt(clientX, clientY, factor) {
+  const next = Math.min(SNAPSHOT_ZOOM_MAX, Math.max(SNAPSHOT_ZOOM_MIN, snapshotZoom.scale * factor));
+  const localX = (clientX - snapshotZoom.x) / snapshotZoom.scale;
+  const localY = (clientY - snapshotZoom.y) / snapshotZoom.scale;
+  snapshotZoom.x = clientX - localX * next;
+  snapshotZoom.y = clientY - localY * next;
+  snapshotZoom.scale = next;
+  clampSnapshotPan();
+  applySnapshotZoom();
+}
+
+function setupSnapshotZoom() {
+  const view = $("snapshot-view");
+  const img = $("snapshot");
+  // Only here, and only in full screen, the wheel zooms instead of scrolling the page.
+  view.addEventListener(
+    "wheel",
+    (event) => {
+      if (!snapshotZoomActive()) return;
+      event.preventDefault();
+      zoomSnapshotAt(event.clientX, event.clientY, event.deltaY < 0 ? SNAPSHOT_ZOOM_STEP : 1 / SNAPSHOT_ZOOM_STEP);
+    },
+    { passive: false },
+  );
+  img.addEventListener("pointerdown", (event) => {
+    if (!snapshotZoomActive() || event.button !== 0 || snapshotZoom.scale === SNAPSHOT_ZOOM_MIN) return;
+    snapshotZoom.pan = { pointerX: event.clientX, pointerY: event.clientY, x: snapshotZoom.x, y: snapshotZoom.y };
+    img.setPointerCapture(event.pointerId);
+    img.classList.add("panning");
+  });
+  img.addEventListener("pointermove", (event) => {
+    const pan = snapshotZoom.pan;
+    if (!pan) return;
+    snapshotZoom.x = pan.x + event.clientX - pan.pointerX;
+    snapshotZoom.y = pan.y + event.clientY - pan.pointerY;
+    clampSnapshotPan();
+    applySnapshotZoom();
+  });
+  const endPan = () => {
+    snapshotZoom.pan = null;
+    img.classList.remove("panning");
+  };
+  img.addEventListener("pointerup", endPan);
+  img.addEventListener("pointercancel", endPan);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== SNAPSHOT_ZOOM_RESET_KEY || !snapshotZoomActive()) return;
+    event.preventDefault();
+    resetSnapshotZoom();
+  });
+}
+
+// endregion: snapshot zoom
 
 // region: bench
 

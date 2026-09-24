@@ -18,9 +18,10 @@ from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
 from debug_devices_mcp.board.tools import BoardSession, register_board_tools
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
-from debug_devices_mcp.images import downscale_jpeg
+from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.instructions import register_instructions_tool, server_instructions
 from debug_devices_mcp.multimeter import MeterSource, MultimeterReading, VisionClient, VisionError
+from debug_devices_mcp.orientation import OrientationState
 from debug_devices_mcp.phone_api import (
     ApiErrorCode,
     CameraStatus,
@@ -39,6 +40,7 @@ from debug_devices_mcp.phone_api import (
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.ui.monitor import Monitor
+from debug_devices_mcp.ui.settings import SettingsStore, state_dir
 from debug_devices_mcp.ui.tools import register_monitor_tools
 from debug_devices_mcp.webcam import Webcam, WebcamError, WebcamOptions
 from debug_devices_mcp.webcam_stream import FrameSource
@@ -77,6 +79,8 @@ class SnapshotInfo(BaseModel):
     original_height: int
     original_size_bytes: int
     saved_to: str | None
+    # Phone only: the flips that the user chose (phone_snapshot_orientation). Positions refer to this photo.
+    orientation: str | None = None
 
 
 # endregion: results
@@ -94,6 +98,17 @@ class Services:
             SubprocessRunner(), LoaderOptions(dump_bin=board_defaults.DUMP_BIN, timeout=board_defaults.DUMP_TIMEOUT)
         )
     )
+    # The flips of every phone snapshot: the tools, the saved files, and the monitor page use them.
+    orientation: OrientationState = field(default_factory=OrientationState)
+
+    async def phone_snapshot(self) -> bytes:
+        """One phone still in the orientation that the user chose (the true bytes when there is no flip)."""
+        jpeg = await self.phone.snapshot()
+        orientation = self.orientation.current
+        try:
+            return await asyncio.to_thread(orient_jpeg, jpeg, orientation)
+        except (OSError, ValueError) as exc:
+            raise ToolError(f"{PHONE_SOURCE} returned an image that cannot be decoded: {exc}") from exc
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Services:
@@ -123,6 +138,7 @@ class Services:
                 RemoteMonitor(settings.ui_port, settings.webcam_timeout),
             ),
             vision=vision,
+            orientation=OrientationState(SettingsStore.in_dir(state_dir())),
             board=BoardSession.create(
                 runner,
                 LoaderOptions(
@@ -160,7 +176,9 @@ def save_jpeg(jpeg: bytes, save_path: str | None) -> Path | None:
     return path
 
 
-async def image_result(jpeg: bytes, source: str, max_side: int, save_path: str | None) -> list[TextContent | Image]:
+async def image_result(
+    jpeg: bytes, source: str, max_side: int, save_path: str | None, orientation: str | None = None
+) -> list[TextContent | Image]:
     """Save the full image when asked, and return a copy with the long edge at most `max_side`."""
     saved_to = await asyncio.to_thread(save_jpeg, jpeg, save_path)
     try:
@@ -176,6 +194,7 @@ async def image_result(jpeg: bytes, source: str, max_side: int, save_path: str |
         original_height=scaled.original_height,
         original_size_bytes=len(jpeg),
         saved_to=str(saved_to) if saved_to else None,
+        orientation=orientation,
     )
     return [TextContent(type="text", text=info.model_dump_json()), Image(data=scaled.data, format=JPEG_FORMAT)]
 
@@ -187,7 +206,7 @@ async def capture_meter_frame(services: Services, source: MeterSource) -> bytes:
     """
     if source is MeterSource.WEBCAM:
         return await services.webcam.capture_jpeg()
-    jpeg = await services.phone.snapshot()
+    jpeg = await services.phone_snapshot()
     try:
         scaled = await asyncio.to_thread(downscale_jpeg, jpeg, images.DEFAULT_MAX_SIDE)
     except (OSError, ValueError) as exc:
@@ -302,10 +321,26 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         safely before they turn the board.
         The returned image has its long edge scaled to `max_side` pixels (0 = full size). `save_path` writes the
         full-resolution JPEG to disk.
+        The user can flip the photo horizontally and vertically (phone_snapshot_orientation, or the monitor page).
+        The photo comes in that orientation, the same as the user sees it; the text part says which. Pixel positions
+        (board_register_photo, board_match_marking x_px/y_px) refer to this oriented photo.
         """
+        orientation = services.orientation.current.describe()
         with tool_errors():
-            jpeg = await services.phone.snapshot()
-        return await image_result(jpeg, PHONE_SOURCE, max_side, save_path)
+            jpeg = await services.phone_snapshot()
+        return await image_result(jpeg, PHONE_SOURCE, max_side, save_path, orientation)
+
+    @server.tool()
+    async def phone_snapshot_orientation(
+        flip_horizontal: bool | None = None, flip_vertical: bool | None = None
+    ) -> SnapshotOrientation:
+        """Read or set the flips of the phone snapshots. No argument: only read. A value sets that flip.
+
+        Use it when the user says the photo is mirrored (left-right: flip_horizontal) or upside down
+        (flip_vertical). The setting persists and applies to phone_snapshot, multimeter_read with the phone, and
+        the monitor page. It does not change the phone camera.
+        """
+        return services.orientation.update(flip_horizontal, flip_vertical)
 
 
 # endregion: phone tools

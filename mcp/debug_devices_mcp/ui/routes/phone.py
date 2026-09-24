@@ -10,7 +10,7 @@ from starlette.routing import Route
 
 from debug_devices_mcp.ui.constants import http, tools
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
-from debug_devices_mcp.ui.views import RotationBody, TorchBody, ZoomBody
+from debug_devices_mcp.ui.views import OrientationBody, RotationBody, TorchBody, ZoomBody
 
 BAD_REQUEST = 400
 NOT_FOUND = 404
@@ -65,6 +65,13 @@ async def post_rotation(request: Request) -> JSONResponse:
     return await run_tool(request, tools.PHONE_ROTATION, body.model_dump(mode="json", exclude_defaults=True))
 
 
+async def post_orientation(request: Request) -> JSONResponse:
+    body = await parse(request, OrientationBody)
+    if isinstance(body, JSONResponse):
+        return body
+    return await run_tool(request, tools.PHONE_SNAPSHOT_ORIENTATION, body.model_dump(mode="json", exclude_none=True))
+
+
 async def post_snapshot(request: Request) -> JSONResponse:
     return await run_tool(request, tools.PHONE_SNAPSHOT, {})
 
@@ -80,7 +87,7 @@ async def get_last_snapshot(request: Request) -> Response:
         query = SnapshotQuery.model_validate(dict(request.query_params))
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
-    snapshot = monitor.last_snapshot_full if query.full else monitor.last_snapshot
+    snapshot = await monitor.render_snapshot(query.full)
     if snapshot is None:
         return error_response("no phone snapshot yet", NOT_FOUND)
     return Response(snapshot, media_type=http.JPEG_MEDIA_TYPE, headers=http.NO_CACHE)
@@ -92,6 +99,7 @@ routes = [
     Route("/api/phone/zoom", post_zoom, methods=["POST"]),
     Route("/api/phone/torch", post_torch, methods=["POST"]),
     Route("/api/phone/rotation", post_rotation, methods=["POST"]),
+    Route("/api/phone/orientation", post_orientation, methods=["POST"]),
     Route("/api/phone/snapshot", post_snapshot, methods=["POST"]),
     Route("/api/phone/snapshot.jpg", get_last_snapshot, methods=["GET"]),
 ]

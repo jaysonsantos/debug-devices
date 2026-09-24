@@ -35,6 +35,13 @@ class TorchBody(BaseModel):
     enabled: bool
 
 
+class OrientationBody(BaseModel):
+    """The snapshot flips. A missing field keeps that flip."""
+
+    flip_horizontal: bool | None = None
+    flip_vertical: bool | None = None
+
+
 class RotationBody(BaseModel):
     """The snapshot rotation lock: `degrees` locks it, `auto: true` follows the phone again."""
 

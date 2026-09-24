@@ -47,7 +47,7 @@ EVIDENCE_RULES = "\n".join(
         "HTTP API (for example with a browser, a browser tool, curl, or Playwright). monitor_open and "
         "bench_start only give the URL to the user.",
         "6. Locate a part on the physical board with the phone camera: call phone_zoom, then take a fresh "
-        "phone_snapshot and inspect the relevant area of that photo. Zoom in (step \"in\" or a higher ratio) to read "
+        'phone_snapshot and inspect the relevant area of that photo. Zoom in (step "in" or a higher ratio) to read '
         "small markings and to check the nearby components. Zoom out when you need wider context, for example to find "
         "the area or reference parts. Take a new phone_snapshot after each zoom change: an older photo does not show "
         "the new view. Boardview (board_find_part, board_parts_near, board_render) tells you where to look: it is "

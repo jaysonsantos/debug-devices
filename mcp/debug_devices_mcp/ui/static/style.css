@@ -98,7 +98,7 @@ button {
 }
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: default; }
-button.active { border-color: var(--accent); color: var(--accent); }
+button.active, button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 
 select {
   font: inherit;
@@ -190,7 +190,8 @@ form label { display: block; margin-bottom: 8px; }
 
 /* region: full screen */
 
-.view { position: relative; }
+/* No text selection: a double-click (full screen) would select the image and tint it blue. */
+.view { position: relative; user-select: none; }
 .view:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .fs-button {
   position: absolute;
@@ -229,8 +230,24 @@ form label { display: block; margin-bottom: 8px; }
   border-radius: 0;
   object-fit: contain;
 }
+/* Digital zoom of the full-screen snapshot: the transform comes from app.js. */
+#snapshot-view:fullscreen #snapshot { transform-origin: 0 0; }
+#snapshot-view:fullscreen #snapshot.zoomed { cursor: grab; }
+#snapshot-view:fullscreen #snapshot.panning { cursor: grabbing; }
+.zoom-badge { display: none; }
+#snapshot-view:fullscreen .zoom-badge {
+  display: block;
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  font-variant-numeric: tabular-nums;
+}
 .fs-controls { display: none; }
-#phone-view:fullscreen .fs-controls {
+.view:fullscreen .fs-controls {
   display: flex;
   gap: 8px;
   position: absolute;

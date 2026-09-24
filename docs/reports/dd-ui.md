@@ -353,3 +353,103 @@ The orchestrator stopped this task before the recording, because the room light 
 
 - In headless Firefox, the full screen size is 1366x768, so the screenshots show the page around it. A real screen fills completely.
 - The `f` key needs the focus on a view. A click on the phone canvas or the snapshot focuses the view (`tabindex`). The webcam view gets the focus in its pointer handler.
+
+## Round 10: clean page stop with open streams
+
+### Problem
+
+At each reload, the dev proxy (`devreload.py`) closes stdin of the server. The lifespan cleanup then calls `Monitor.stop_page()`, which sets `monitor.closing` and asks uvicorn to stop. An open Firefox page holds the SSE stream `/api/events`, and often the MJPEG stream `/api/webcam/stream.mjpg`:
+- The SSE loop checked `closing` only after `queue.get()` returned, which can take up to 15 s (the keepalive time).
+- The MJPEG loop did not check it at all.
+
+uvicorn waited its graceful time (1 s), then cancelled the tasks. It logged "ERROR: Cancel N running task(s), timeout graceful shutdown exceeded" and an ASGI traceback.
+
+### Fix
+
+- `until_closing(source, closing)` in `ui/routes/__init__.py` passes on the items of a stream. It races each next item against the closing event. When the page stops, it cancels the waiting read, closes the source generator (its `finally` and context managers run: the bus subscription, the webcam viewer count), and ends the response.
+- It wraps the three long streams: SSE (`routes/state.py`), MJPEG and the owner proxy stream (`routes/webcam.py`), and the phone screen (`routes/screen.py`). The phone screen loop no longer polls `closing`. Its 1 s wait is now only for the resync check.
+
+### Tests
+
+- `mcp/tests/test_ui_shutdown.py`:
+  - `until_closing` ends a stream that waits forever, and it closes the source. A finite stream passes through unchanged.
+  - A real in-process uvicorn page, with one open SSE client and one open MJPEG client (a fake webcam that never sends a frame). `stop_page()` must take less than half the graceful time, with no ERROR record and no "graceful shutdown" message in the logs.
+- Without the fix (`until_closing` patched out in a temporary test, deleted after), the same test fails: "stop took 1.13 s", and the log has "ERROR: Cancel 2 running task(s), timeout graceful shutdown exceeded". This is the reported error.
+- Real reload check: `debug-devices-mcp-dev --ui-start eager --ui-port 18891 --no-ui-open-browser --no-phone-screen --webcam /dev/video99` (the real camera is not used), with two `curl -N` clients on `/api/events` and `/api/webcam/stream.mjpg`. Then a new mtime on `ui/static/style.css`. The proxy reloaded the server in 2.2 s. The server ended both curl streams, and stderr had no "Traceback", "ERROR", "graceful shutdown", or "CancelledError". No process stayed after the proxy stdin closed.
+- `uv run pytest`: 220 passed, 1 skipped. `uv run ruff check` and `uv run ruff format --check`: pass.
+
+### Open items
+
+- A page that reads the stream reconnects after the reload by itself (EventSource, and the MJPEG image `error` handler), as before.
+
+## Round 11: mouse-wheel zoom on the full-screen phone snapshot
+
+### What I did
+
+- Only in the full-screen snapshot (`document.fullscreenElement === #snapshot-view`), the mouse wheel zooms the photo. It is a digital zoom of the full-resolution still (the phone camera zoom does not change a still image). Region `snapshot zoom` in `app.js`.
+  - Constants: `SNAPSHOT_ZOOM_STEP = 1.25`, `SNAPSHOT_ZOOM_MIN = 1` (fit), `SNAPSHOT_ZOOM_MAX = 8`, reset key `0`.
+  - The zoom keeps the image point under the mouse pointer in place: `transform: translate(x, y) scale(s)` with `transform-origin: 0 0`. The movement is limited, so no empty band shows at an edge.
+  - The wheel listener is on `#snapshot-view` with `{ passive: false }`. It calls `preventDefault()` only in that full-screen view. Everywhere else the wheel scrolls as before. The live phone view, the webcam view, and the panel snapshot do not change.
+  - When zoomed in, a drag with the left mouse button moves the photo (pointer capture, grab cursor). A double-click still leaves full screen.
+  - Reset: the key `0`, leaving or entering full screen, and a new snapshot.
+  - A small label at the bottom left shows the factor ("1.25x", "8x").
+- New `PhoneState.snapshot_seq`: the monitor counts the snapshots. Before, the page reloaded the snapshot image at every phone update, and the status poll sends updates. Now it reloads (and resets the zoom) only when a new snapshot comes.
+- **Bug found and fixed:** the double-click that enters full screen also selected the image. Firefox then painted the blue selection color over the whole view (also before this change). Fix: `user-select: none` on `.view`.
+- `mcp/README.md`: the full screen section describes the wheel zoom.
+
+### Tests
+
+- `test_ui_app.py`: `snapshot_seq` goes up with each snapshot and stays the same after a status call.
+- Playwright check (headless Firefox, 1440x600 viewport) against a separate eager server with the fake phone (snapshot `docs/images/demo-meter.jpg`) and fake adb (`--ui-port 18890 --webcam /dev/video99 --no-phone-screen`). The real camera and the real phone were not used.
+  - Outside full screen, the wheel over the panel snapshot scrolled the page, and the transform stayed empty.
+  - In full screen: the label shows "1x". A wheel up at (400, 300) gave `translate(-100px, -75px) scale(1.25)`, "1.25x" (the point under the mouse stays in place). A wheel down went back to fit ("1x", no transform). 15 wheel ups stopped at "8x".
+  - A drag moved the photo (`translate(-1648px, -1236px)` to `translate(-1748px, -1286px)` at 5.12x), and the view stayed in full screen.
+  - The key `0` reset to "1x". Leaving full screen with a double-click reset to "1x".
+  - A screenshot after the fix shows the photo in true colors on black. Before the fix, the whole view was blue.
+- `uv run pytest`: 221 passed, 1 skipped. `uv run ruff check`: pass. `uv run ruff format --check` passes for `ui/`, `mcp/tests/`, and `scripts/`. It fails only in `mcp/debug_devices_mcp/instructions.py` (dd-mcp edits it now, not my file): one string wants single quotes.
+
+## Round 12: horizontal and vertical flip of the phone snapshot (server-side)
+
+The earlier display-only mirror plan was replaced before I built it. The one setting field that I had added for it is removed.
+
+### What I did
+
+- **One helper** (`images.py`):
+  - `SnapshotOrientation` holds `flip_horizontal` and `flip_vertical`. It is frozen, so it can be a cache key, and it has `describe()`.
+  - `orient_jpeg()` applies the EXIF rotation first, then `ImageOps.mirror` and `ImageOps.flip`. It re-encodes with the quality steps of `downscale_jpeg`, so the result is never larger than the source. With no flip, it returns the same bytes object.
+- **One state** (`orientation.py`): `OrientationState` reads `snapshot_orientation` from the UI settings file at start. `update()` changes the flips (None keeps a flip), saves them into the same file, and calls the listeners. The other settings stay. It works with `--no-ui` and in lazy mode: `Services.from_settings` creates it, and it only reads a small JSON file.
+- **One place for the transform** (`server.py`): `Services.phone_snapshot()` takes the phone still and applies the orientation. `phone_snapshot` (result and `save_path` file) and `multimeter_read(source=phone)` use it. `bench_start` takes no snapshot. The downscale comes after the flip. `SnapshotInfo.orientation` states the orientation (for example "flipped horizontally"), and the `phone_snapshot` description says that pixel positions refer to the oriented photo.
+- **New tool** `phone_snapshot_orientation(flip_horizontal=None, flip_vertical=None)`: no argument only reads. It uses the same state, the same file, and the same page.
+- **Monitor**:
+  - The monitor keeps the raw still of the last snapshot (true orientation, full size). `render_snapshot()` makes the page images from it in the current orientation: full size for `?full=true`, scaled for the panel. It caches them per snapshot number, orientation, and size. A new flip therefore shows on the existing snapshot at once. Without the raw still, the page gets the scaled tool result as taken.
+  - `PhoneState.orientation` carries the flips to the page (SSE). An agent change shows at once.
+  - `update_settings()` keeps the flips of `OrientationState`, so a page save of other settings cannot overwrite them.
+  - The tool log keeps each image as it was taken.
+- **Page**:
+  - "Flip H" and "Flip V" toggles (`aria-pressed`) in the phone panel, next to the snapshot, and in a bar in the full-screen snapshot. The keys `h` and `v` work when the snapshot view has the focus or is full screen.
+  - A toggle calls `POST /api/phone/orientation`, which runs the tool with source `ui`, so the log shows it. The page then reloads the snapshot from the server; there is no CSS flip on the snapshot.
+  - The live phone view gets the same flips as a CSS `scale()` on the canvas, after the rotation that the canvas draws (the same order as on the server).
+  - The wheel zoom works on the flipped image.
+- `docs/phone-api.md` is not changed: the phone app is not involved.
+- Docs: `mcp/README.md` (tools table and "Snapshot flips"), `README.md` (tool list).
+
+### Tests
+
+- `mcp/tests/test_orientation.py` (9 tests):
+  - A pixel test on a four-color image for H, V, and both, with the result not larger than the source.
+  - With no flip, the same bytes.
+  - The EXIF rotation (orientation 6) comes before the flip, and the result has no EXIF orientation.
+  - The descriptions.
+  - Persistence: the other settings stay, and a new state reads the saved flips.
+  - The tool result states the orientation, and its image and `save_path` file are flipped.
+  - The page and the tool show the same orientation: the panel, full size, and tool log images. A new flip re-renders the existing snapshot. A stale page save keeps the flips.
+- Playwright check (headless Firefox) against a separate eager server with the fake phone (a four-color photo), port 18890, `--webcam /dev/video99`, and its own state folder:
+  - As taken, the top left is red. The panel "Flip H" gives green, `aria-pressed` true, and the live view CSS `scale(-1, 1)`.
+  - The key `v` gives white, and the live view CSS `scale(-1)` (that is, -1, -1).
+  - In full screen, the bar shows. Its "Flip H" gives blue, the image stays full size, and the wheel zoom still works (`translate(-75px, -75px) scale(1.25)`).
+  - The server orientation matches the page. The log has three `phone_snapshot_orientation:ui` calls.
+- `uv run pytest`: 230 passed, 1 skipped. `uv run ruff check`: pass. `ruff format --check` on my files: pass. `prek run --files` on my files: pass.
+
+### Open items
+
+- The live view flip is CSS only (the phone screen stream is video). The snapshot is the evidence image: the server makes it, and the agent gets the same image.
