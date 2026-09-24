@@ -62,6 +62,7 @@ class adb:
     AM_ERROR_MARKER = "Error"
     AM_MISSING_MARKER = "does not exist"
     FORWARD = "forward"
+    REMOVE_FLAG = "--remove"
     SERIAL_FLAG = "-s"
     SHELL = "shell"
     TCP_PREFIX = "tcp:"

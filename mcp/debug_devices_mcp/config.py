@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, CliApp, NoDecode, SettingsConfigDict
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.constants import env as board_env
 from debug_devices_mcp.constants import ENV_FILE, PROGRAM_NAME, defaults, env
+from debug_devices_mcp.ui.constants import UiStart
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
 from debug_devices_mcp.webcam import Crop
@@ -82,6 +83,15 @@ class Settings(BaseSettings):
         default=True,
         description="Monitor window: a local web page with the webcam, the phone, and the tool calls. "
         "--no-ui also turns off the phone screen, scrcpy, and the shared webcam stream.",
+    )
+    ui_start: UiStart = Field(
+        default=UiStart.LAZY,
+        description="lazy: start the page at the first tool call and the webcam at its first use. "
+        "eager: start both at process start (dev monitor).",
+    )
+    webcam_idle_timeout: Seconds = Field(
+        default=ui_defaults.WEBCAM_IDLE_TIMEOUT,
+        description="Lazy mode: stop the webcam stream after this many seconds without users. 0 keeps it on.",
     )
     ui_port: int = Field(
         default=ui_defaults.PORT, ge=0, le=defaults.MAX_PORT, description="Port on 127.0.0.1. Busy: a free port."

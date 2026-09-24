@@ -265,3 +265,53 @@ The orchestrator stopped this task before the recording, because the room light 
   2. Run `uv run --with playwright python scripts/record_demo.py --fake-phone docs/images/demo-meter.jpg`.
   3. Extract frames and check the blur on the left side before you publish.
 - After the new recording, add one line under the demo image in `README.md`: "The recording uses a fake phone with a composed photo of the meter." The current `monitor-demo.webp` is still the old recording (real phone, black mask, "not readable"), so I did not add the line yet.
+
+## Round 8: lazy MCP server, monitor_open, bench_start, and bench_stop
+
+### What I did
+
+- New setting `--ui-start lazy|eager` (`DEBUG_DEVICES_UI_START`, default `lazy`). `scripts/dev-monitor.sh` passes `--ui-start eager`.
+- Lazy mode (`ui/monitor.py`):
+  - `Monitor.start()` (the lifespan hook) does nothing. At process start there is no port, no web server, no ffmpeg, no adb, no scrcpy, and no browser. The event bus exists from the start, so the page shows the early calls.
+  - The first MCP tool call starts the page (`ensure_page`). A page failure is logged and does not fail the tool. With `--ui-open-browser`, Firefox opens one time, at the first page start, but not when another debug-devices monitor answers on the port (new `RemoteMonitor.find_monitor()`).
+  - The webcam starts on the first use (`ensure_webcam`): `OnDemandFrameSource` for `webcam_snapshot` and `multimeter_read`, a page that reads the MJPEG stream (`webcam_viewer`), or another process that asks for a cropped frame (`webcam_user`). If another monitor owns the webcam, the frames come from it, as before.
+  - Idle release: `--webcam-idle-timeout` (`DEBUG_DEVICES_WEBCAM_IDLE_TIMEOUT`, default 300 seconds, 0 = never). A watch task stops the stream when it has no frame users, no page viewers, and no use for that time. The next use starts it again. The monitor takes a clock, so the tests use a fake clock.
+  - I checked: adb runs only in the phone tools (`phone_connect` and after it). `obv-dump` runs only in `board_open`. `Services.from_settings` makes only httpx clients, and they open no socket.
+- New tools (`ui/tools.py`, registered in `build_server` when the monitor is on):
+  - `monitor_open(open_browser=true)` returns the real `url`, `opened_browser`, and `browser`.
+  - `bench_start(open_browser=true, phone=true, webcam=true, board_path=None)` has the steps page, webcam (waits for the first frame), phone (`phone_connect` as a nested recorded call, so the phone screen starts as usual), and board (`board_open`). Each step runs even when another one fails. The result has the URL and `ok`/`error`/`skipped` with a detail for each step.
+  - `bench_stop()` stops the webcam stream, stops the phone screen, scrcpy, and the status poll, removes the adb forward of the camera API (new `Adb.remove_forward`), and stops the page 0.5 s after it answers. The event log stays.
+  - The tool descriptions and the server instructions say "start the bench" and "stop the bench", and tell the agent to give the user the URL.
+- Page: "Start all" (`POST /api/bench/start`, `bench_start` without a new browser window) and "Stop all" (`POST /api/bench/stop`) in the header. Both run through the instrumented `call_tool` with source `ui`.
+- `MonitorOptions.open_browser` now defaults to False (the settings still default to True). Then no test can open a browser window.
+- Docs: `mcp/README.md` ("Lazy start", the tools table, the flags), `README.md` (lazy start and ChatGPT desktop / Codex note, live reload), `AGENTS.md` (one line), `.env.example` (the two new variables, as AGENTS.md asks), and the `--browser` comment in `scripts/agent.sh`.
+
+### Tests
+
+`mcp/tests/test_lazy.py` (6 tests, fake ffmpeg spawner, fake adb runner, fake opener, fake clock):
+
+- In lazy mode, `list_tools` runs no subprocess (no ffmpeg start, no runner call), serves no page, and opens no browser. The first tool call serves the page (HTTP 200) and opens the browser one time.
+- The webcam starts at the first `webcam_snapshot`. It does not stop before the timeout, and it does not stop while a page watches. It stops after the timeout, and the next use starts it again.
+- `monitor_open` returns the real URL and opens the browser only when asked.
+- `bench_start` runs every step. A bad `board_path` is an error step, and the other steps are ok. The log has `bench_start`, `phone_connect`, and `board_open`. `bench_stop` stops the stream, removes the forward for the serial, and stops the page. The next tool starts the page again, and the log stays.
+- `bench_start` with `phone` and `webcam` off skips those steps.
+- Eager mode starts the page and ffmpeg at the lifespan start, and it does no idle stop.
+
+`uv run pytest`: 185 passed, 1 skipped. `uv run ruff check`, `uv run ruff format --check`, and `prek run --all-files` (in `nix develop`): pass.
+
+### Real checks with `codex exec` (from the repository root, `.codex/config.toml` not changed)
+
+- `codex exec --skip-git-repo-check "say hi"`: Codex answered before the MCP server finished its start (only the `nix develop` wrapper showed). This run proves little.
+- `codex exec ... "List the tool names of the debug_devices MCP server. Do not call any tool."`: the new server process (pid 1965072) ran on the host. During the run, no new listening port, no ffmpeg, no Firefox, no adb, and no scrcpy appeared (polled `ps` and `ss` every 0.3 s against a baseline).
+- `codex exec ... monitor_open with open_browser false`: the call completed and returned `http://127.0.0.1:18766/`. The only new thing was the listening port 18766; no ffmpeg, no Firefox.
+- `codex exec ... bench_start (open_browser false), then bench_stop`, two runs:
+  - Run 1: Codex ran the MCP server in its sandbox (`sandbox: workspace-write`). The server PID was not visible on the host, the page bind failed with `[Errno 1] Operation not permitted`, `/dev/video0` did not exist, and adb could not reach its server ("ADB server didn't ACK", server pid 23). Each step still reported its error, and `bench_stop` answered ok. The before and after state of the host processes and the phone forwards was the same.
+  - Run 2 (the prompt said "do not run shell commands"): the server ran on the host. `bench_start`: page ok (`http://127.0.0.1:18766/`), phone ok ("Phone connected; app health ok"), webcam error "Device or resource busy". The webcam was not free: an older MCP process of another session (pid 1946087, old code, no page) held it with its ffmpeg (pid 1963099). `bench_stop`: webcam, phone, and page ok. After it, my phone screen server (`adb shell ... app_process`, pid 1987011) was gone, no ffmpeg of mine stayed, and the forward `tcp:18765` was removed. The ffmpeg, the scrcpy server, and the three older `scrcpy_*` forwards that stayed all belong to pid 1946087.
+- No test and no check opened a Firefox window. The Firefox processes in the lists were an older window (pid 1851592).
+
+### Open items
+
+- The watchexec dev monitor did not run during my checks. Start `scripts/dev-monitor.sh` again: it now passes `--ui-start eager`. Running MCP processes of other sessions (for example pid 1946087) still run the old code until they restart.
+- `bench_stop` removes the shared camera forward `tcp:18765`. Another session that uses the phone at the same time must call `phone_connect` again.
+- Codex sometimes starts the MCP server in its sandbox (run 1 above). Then no hardware tool works. I did not find what decides this; the project config sets no sandbox for the server. The orchestrator can check the Codex sandbox options for MCP servers. I did not edit `.codex/config.toml`.
+- I did not commit.

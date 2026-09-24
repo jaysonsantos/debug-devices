@@ -13,7 +13,10 @@ from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
 
 
 def build_monitor(settings: Settings, services: Services) -> Monitor:
-    """The monitor owns the webcam from now on: the webcam tools take their frames from its stream."""
+    """The monitor owns the webcam from now on: the webcam tools take their frames from its stream.
+
+    Nothing starts here. The server start hook (`Monitor.start`) and the first tool calls start the parts.
+    """
     directory = state_dir()
     start = EffectiveSettings(
         vision_model=settings.vision_model,
@@ -36,12 +39,27 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
         timeout=settings.webcam_timeout,
     )
     stream = WebcamStream(stream_options)
+
+    async def remove_forward(serial: str) -> None:
+        await services.adb.remove_forward(serial, settings.local_forward_port)
+
     shared = SharedWebcam(stream, RemoteMonitor(settings.ui_port, settings.webcam_timeout))
     monitor = Monitor(
         start,
         SettingsStore.in_dir(directory),
-        MonitorOptions(port=settings.ui_port, open_browser=settings.ui_open_browser),
-        MonitorParts(stream=stream, scrcpy=scrcpy, shared=shared, status_reader=services.phone.status),
+        MonitorOptions(
+            port=settings.ui_port,
+            open_browser=settings.ui_open_browser,
+            start=settings.ui_start,
+            webcam_idle_timeout=settings.webcam_idle_timeout,
+        ),
+        MonitorParts(
+            stream=stream,
+            scrcpy=scrcpy,
+            shared=shared,
+            status_reader=services.phone.status,
+            forward_remover=remove_forward,
+        ),
     )
     if settings.phone_screen:
         monitor.screen = PhoneScreen(

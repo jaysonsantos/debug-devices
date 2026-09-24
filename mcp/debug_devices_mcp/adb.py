@@ -69,6 +69,9 @@ class Adb:
             adb.SERIAL_FLAG, serial, adb.FORWARD, f"{adb.TCP_PREFIX}{local_port}", f"{adb.TCP_PREFIX}{device_port}"
         )
 
+    async def remove_forward(self, serial: str, local_port: int) -> None:
+        await self._run(adb.SERIAL_FLAG, serial, adb.FORWARD, adb.REMOVE_FLAG, f"{adb.TCP_PREFIX}{local_port}")
+
     async def start_app(self, serial: str) -> None:
         try:
             result = await self._run(adb.SERIAL_FLAG, serial, adb.SHELL, *adb.AM_START, phone.COMPONENT)

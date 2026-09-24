@@ -3,7 +3,7 @@
 #
 # Usage: scripts/agent.sh <claude|codex> [--browser] [agent arguments...]
 #
-#   --browser   Open the monitor page in a new Firefox window when the server starts.
+#   --browser   Open the monitor page in a new Firefox window at the first tool call (the server starts lazily).
 #               Without it, the page does not open. Use it when no monitor runs yet.
 #
 # Run it from the project that you debug: the agent starts in the current directory.

@@ -283,6 +283,15 @@ class WebcamStream:
 
     # region: process
 
+    @property
+    def timeout(self) -> timedelta:
+        return self._options.timeout
+
+    @property
+    def active(self) -> bool:
+        """True between `start()` and `stop()`, also while ffmpeg restarts."""
+        return self._task is not None and not self._task.done()
+
     def set_crop_provider(self, crop: CropProvider) -> None:
         self._crop = crop
 

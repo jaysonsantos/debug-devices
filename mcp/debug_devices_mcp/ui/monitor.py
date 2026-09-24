@@ -7,8 +7,10 @@ import contextlib
 import logging
 import os
 import socket
-from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,7 @@ from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
 from debug_devices_mcp.ui.app import create_app
-from debug_devices_mcp.ui.constants import APP_NAME, defaults, details, http, labels, tools
+from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details, http, labels, tools
 from debug_devices_mcp.ui.desktop import BrowserOpener
 from debug_devices_mcp.ui.events import CallSource, CallStatus, EventBus, ToolCall, current_call, truncate
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
@@ -45,6 +47,9 @@ PHONE_STATUS_TOOLS = frozenset({tools.PHONE_STATUS, tools.PHONE_ZOOM, tools.PHON
 type ToolCaller = Callable[..., Awaitable[Any]]
 type SettingsListener = Callable[[EffectiveSettings], None]
 type StatusReader = Callable[[], Awaitable[CameraStatus]]
+# Removes the adb forward of the camera API for this serial (bench_stop).
+type ForwardRemover = Callable[[str], Awaitable[None]]
+type Clock = Callable[[], float]
 
 
 class ConnectedPhone(BaseModel):
@@ -57,7 +62,12 @@ class ConnectedPhone(BaseModel):
 class MonitorOptions(BaseModel):
     host: str = defaults.HOST
     port: int = defaults.PORT
-    open_browser: bool = True
+    # Off unless the settings turn it on, so a test never opens a browser window.
+    open_browser: bool = False
+    # The settings default is lazy. Eager here keeps the page and the stream at `start()`, like a dev monitor.
+    start: UiStart = UiStart.EAGER
+    # Lazy mode only. Zero keeps the stream on.
+    webcam_idle_timeout: timedelta = defaults.WEBCAM_IDLE_TIMEOUT
 
 
 @dataclass
@@ -73,6 +83,8 @@ class MonitorParts:
     screen: PhoneScreen | None = None
     # Reads the camera status without a tool call. The page turns the phone screen with `rotation_degrees`.
     status_reader: StatusReader | None = None
+    forward_remover: ForwardRemover | None = None
+    clock: Clock = field(default=time.monotonic)
 
 
 class _EmbeddedServer(uvicorn.Server):
@@ -121,6 +133,26 @@ class RecordingFrameSource:
         return jpeg
 
 
+class OnDemandFrameSource:
+    """Starts the webcam on the first frame request, and counts the frame users for the idle release."""
+
+    def __init__(self, inner: FrameSource, monitor: Monitor) -> None:
+        self.inner = inner
+        self._monitor = monitor
+
+    @property
+    def device(self) -> Path:
+        return self.inner.device
+
+    @property
+    def crop(self) -> Crop | None:
+        return self.inner.crop
+
+    async def capture_jpeg(self) -> bytes:
+        async with self._monitor.webcam_user():
+            return await self.inner.capture_jpeg()
+
+
 class Monitor:
     def __init__(
         self,
@@ -137,6 +169,15 @@ class Monitor:
         self.shared = parts.shared
         self.screen = parts.screen
         self.status_reader = parts.status_reader
+        self._forward_remover = parts.forward_remover
+        self._clock = parts.clock
+        self._page_lock = asyncio.Lock()
+        self._webcam_lock = asyncio.Lock()
+        self._webcam_users = 0
+        self._webcam_viewers = 0
+        self._last_webcam_use = self._clock()
+        self._idle_task: asyncio.Task[None] | None = None
+        self._page_stop_task: asyncio.Task[None] | None = None
         self._status_task: asyncio.Task[None] | None = None
         # The URL of the other monitor that owns the webcam, when there is one.
         self.webcam_owner: str | None = None
@@ -174,13 +215,21 @@ class Monitor:
     ) -> tuple[ToolCall, Any]:
         if self._call_tool is None:
             raise RuntimeError("the monitor is not attached to an MCP server")
+        if source is CallSource.MCP:
+            # monitor_open and bench_start open the browser themselves, when the caller asks.
+            await self._ensure_page_quietly(auto_open=name not in {tools.MONITOR_OPEN, tools.BENCH_START})
         async with self.bus.record(name, arguments, source) as call:
             result = await self._call_tool(name, arguments, context)
             await self._after_call(call, result)
         return call, result
 
     def frame_source(self, inner: FrameSource) -> FrameSource:
-        return RecordingFrameSource(inner)
+        return RecordingFrameSource(OnDemandFrameSource(inner, self))
+
+    async def call_nested(self, name: str, arguments: dict[str, Any]) -> tuple[ToolCall, Any]:
+        """Run a tool inside another tool (bench_start). It gets its own log row with the same source."""
+        outer = current_call()
+        return await self._record_call(name, arguments, outer.source if outer is not None else CallSource.MCP)
 
     async def _after_call(self, call: ToolCall, result: Any) -> None:
         if not isinstance(result, CallToolResult):
@@ -271,12 +320,50 @@ class Monitor:
     # region: lifecycle
 
     async def start(self) -> None:
-        """Serve the page. If another monitor owns the webcam, use its frames and do not open a browser."""
-        if self.shared is not None and await self.shared.use_remote_if_present():
-            assert self.shared.remote_identity is not None
-            self.webcam_owner = self.shared.remote_identity.url
-        elif self.stream is not None:
-            self.start_stream()
+        """The server start hook. Eager: the webcam stream and the page now. Lazy: nothing, until a tool needs it."""
+        if self.options.start is UiStart.LAZY:
+            return
+        await self.ensure_webcam()
+        await self.ensure_page(auto_open=True)
+
+    # region: page
+
+    async def ensure_page(self, auto_open: bool) -> str:
+        """Serve the page, if it does not run yet, and return its URL.
+
+        With `auto_open`, the first start opens the browser when the options say so, but not when another monitor
+        runs (that monitor has the window already).
+        """
+        async with self._page_lock:
+            if self._page_stop_task is not None:
+                await self._page_stop_task
+            if self._server is not None and self.url is not None:
+                return self.url
+            await self._serve()
+            assert self.url is not None
+            url = self.url
+        if auto_open and self.options.open_browser and not await self._other_monitor_runs():
+            await self.open_browser()
+        return url
+
+    async def _ensure_page_quietly(self, auto_open: bool) -> None:
+        """A page failure must not fail the tool call."""
+        try:
+            await self.ensure_page(auto_open)
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            logger.warning("the monitor page did not start: %s", exc)
+
+    async def _other_monitor_runs(self) -> bool:
+        return self.shared is not None and await self.shared.remote.find_monitor() is not None
+
+    async def open_browser(self) -> str | None:
+        """Open the page in a new browser window. Return the program, or None when none started."""
+        if self.url is None:
+            return None
+        return await self._opener.open(self.url)
+
+    async def _serve(self) -> None:
+        self.closing = asyncio.Event()
         sock = bind_socket(self.options.host, self.options.port)
         host, port = sock.getsockname()[:2]
         self.url = f"{http.SCHEME}://{host}:{port}/"
@@ -292,11 +379,142 @@ class Monitor:
             while not self._server.started:
                 if self._serve_task.done():
                     await self._serve_task
+                    self._server, self.url = None, None
                     raise RuntimeError("the monitor web server stopped at start")
                 await asyncio.sleep(STARTUP_POLL_SECONDS)
         logger.warning("monitor window: %s", self.url)
-        if self.options.open_browser and self.webcam_owner is None:
-            await self._opener.open(self.url)
+
+    async def stop_page(self) -> None:
+        """Stop the web server. The event log stays in memory; the next page start shows it again."""
+        self.closing.set()
+        server, task = self._server, self._serve_task
+        self._server, self._serve_task, self.url = None, None, None
+        if server is not None:
+            server.should_exit = True
+        if task is not None:
+            with contextlib.suppress(Exception):
+                await task
+
+    def stop_page_soon(self) -> None:
+        """Stop the page after a short delay, so the request that asked for the stop gets its answer."""
+
+        async def later() -> None:
+            await asyncio.sleep(defaults.PAGE_STOP_DELAY.total_seconds())
+            await self.stop_page()
+
+        self._page_stop_task = asyncio.create_task(later(), name="monitor-page-stop")
+
+    # endregion: page
+
+    # region: webcam
+
+    async def ensure_webcam(self) -> None:
+        """Start the webcam stream, or use the stream of another monitor that owns the webcam."""
+        self._last_webcam_use = self._clock()
+        async with self._webcam_lock:
+            if self.stream is None or self.stream.active or self.webcam_owner is not None:
+                return
+            if self.shared is not None and await self.shared.use_remote_if_present():
+                assert self.shared.remote_identity is not None
+                self.webcam_owner = self.shared.remote_identity.url
+                return
+            self.start_stream()
+
+    @contextlib.asynccontextmanager
+    async def webcam_user(self) -> AsyncIterator[None]:
+        """A tool or another process takes a frame: start the webcam, and keep it on while the frame comes."""
+        await self.ensure_webcam()
+        self._webcam_users += 1
+        try:
+            yield
+        finally:
+            self._webcam_users -= 1
+            self._last_webcam_use = self._clock()
+
+    @contextlib.asynccontextmanager
+    async def webcam_viewer(self) -> AsyncIterator[None]:
+        """A page shows the live view: start the webcam, and keep it on while the page watches."""
+        await self.ensure_webcam()
+        self._webcam_viewers += 1
+        try:
+            yield
+        finally:
+            self._webcam_viewers -= 1
+            self._last_webcam_use = self._clock()
+
+    async def start_webcam_now(self) -> str:
+        """Start the webcam and wait for the first frame (bench_start). Return a short status."""
+        async with self.webcam_user():
+            if self.webcam_owner is not None:
+                return f"frames from the monitor at {self.webcam_owner}"
+            assert self.stream is not None
+            latest = self.stream.latest
+            await self.stream.next_frame(latest.seq if latest is not None else 0, self.stream.timeout)
+            info = self.stream.info()
+            return f"{info.device} {info.width}x{info.height}"
+
+    def webcam_idle(self) -> bool:
+        timeout = self.options.webcam_idle_timeout
+        return (
+            self.options.start is UiStart.LAZY
+            and timeout > timedelta(0)
+            and self.stream is not None
+            and self.stream.active
+            and self._webcam_users == 0
+            and self._webcam_viewers == 0
+            and self._clock() - self._last_webcam_use >= timeout.total_seconds()
+        )
+
+    async def release_idle_webcam(self) -> bool:
+        """Stop the stream when nobody used it for the idle timeout, so other programs can use the camera."""
+        if not self.webcam_idle():
+            return False
+        assert self.stream is not None
+        await self.stream.stop()
+        logger.warning("webcam %s: stopped after %s without use", self.stream.device, self.options.webcam_idle_timeout)
+        return True
+
+    def _start_idle_watch(self) -> None:
+        if self.options.start is not UiStart.LAZY or self.options.webcam_idle_timeout <= timedelta(0):
+            return
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._idle_watch(), name="webcam-idle")
+
+    async def _idle_watch(self) -> None:
+        check = min(self.options.webcam_idle_timeout, defaults.WEBCAM_IDLE_CHECK).total_seconds()
+        while self.stream is not None and self.stream.active:
+            await asyncio.sleep(check)
+            if await self.release_idle_webcam():
+                return
+
+    async def stop_webcam(self) -> None:
+        self.webcam_owner = None
+        if self.shared is not None:
+            self.shared.remote_identity = None
+        if self.stream is not None:
+            await self.stream.stop()
+
+    # endregion: webcam
+
+    # region: phone
+
+    async def stop_phone(self) -> None:
+        """Stop the phone screen, scrcpy, and the status poll, and remove the adb forward of the camera API."""
+        if self.screen is not None:
+            await self.screen.stop()
+        if self.scrcpy is not None:
+            await self.scrcpy.stop()
+        if self._status_task is not None:
+            self._status_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._status_task
+            self._status_task = None
+        serial = self.bus.phone.serial
+        self.bus.update_phone(scrcpy_running=False)
+        if serial is not None and self._forward_remover is not None:
+            await self._forward_remover(serial)
+
+    # endregion: phone
 
     def _start_status_poll(self) -> None:
         if self.status_reader is None or (self._status_task is not None and not self._status_task.done()):
@@ -324,6 +542,8 @@ class Monitor:
         if self.stream is not None:
             self.stream.set_warmup_frames(self.effective.webcam_warmup_frames)
             self.stream.start()
+            self._last_webcam_use = self._clock()
+            self._start_idle_watch()
 
     def identity(self) -> MonitorIdentity:
         info = self.stream.info() if self.stream is not None else None
@@ -342,12 +562,14 @@ class Monitor:
             await self._stop()
 
     async def _stop(self) -> None:
-        self.closing.set()
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._serve_task is not None:
+        if self._page_stop_task is not None:
             with contextlib.suppress(Exception):
-                await self._serve_task
+                await self._page_stop_task
+        await self.stop_page()
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._idle_task
         if self.stream is not None:
             await self.stream.stop()
         if self.scrcpy is not None:

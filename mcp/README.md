@@ -39,6 +39,9 @@ Alternative: copy `.mcp.json.example` to `.mcp.json` at the repo root. Then star
 | `phone_snapshot` | `save_path` (optional), `max_side` (default `1568`, `0` = full size) | JPEG image with the long edge at most `max_side`, and a JSON line with the sizes and the saved path |
 | `webcam_snapshot` | `save_path` (optional), `max_side` (default `1568`, `0` = full size) | JPEG image with the long edge at most `max_side`, and a JSON line with the sizes and the saved path |
 | `multimeter_read` | `include_image` (default `false`), `source` (`webcam` default, or `phone`) | `MultimeterReading`: `readable`, `value`, `unit`, `display_text`, `mode`, `range`, `flags`, `confidence`, `notes` |
+| `monitor_open` | `open_browser` (default `true`) | `url` of the monitor page (the real port), `opened_browser`, `browser` |
+| `bench_start` | `open_browser` (default `true`), `phone` (default `true`), `webcam` (default `true`), `board_path` (optional) | `url`, `opened_browser`, and `steps`: `page`, `webcam`, `phone`, `board`, each with `status` (`ok`, `error`, `skipped`) and `detail` |
+| `bench_stop` | none | `url` and `steps`: `webcam`, `phone`, `page` |
 
 Call `phone_connect` before the other `phone_*` tools. The HTTP contract with the app is in `docs/phone-api.md`.
 
@@ -88,7 +91,22 @@ BOARDVIEW_TARGET=/path/to/board.cad uv run pytest mcp/tests/test_board_target.py
 
 ## Monitor window
 
-When the server starts, it opens a local web page in a new Firefox window. If Firefox does not start, the server uses `xdg-open`. The page shows what the server does. You can also change the devices and the settings on the page.
+The server has a local web page (the monitor). The page shows what the server does, and you can change the devices and the settings on it. With `--ui-open-browser`, the page opens in a new Firefox window. If Firefox does not start, the server uses `xdg-open`.
+
+### Lazy start
+
+With `--ui-start lazy` (the default), the server costs nothing until a tool needs hardware. MCP clients that start the server in every session (ChatGPT desktop, Codex, Claude Code) can keep it in their configuration.
+
+- At process start: no port, no web server, no webcam, no ffmpeg, no adb, no scrcpy, no browser. The tool log is in memory from the start, so the page shows the early calls too.
+- The first tool call (any tool) starts the page. With `--ui-open-browser`, Firefox opens then, one time.
+- The first `webcam_snapshot`, the first `multimeter_read` with the webcam, a page that shows the live view, or another MCP process that asks for frames starts the webcam stream. If another monitor owns the webcam, the server uses its frames.
+- After `--webcam-idle-timeout` (default 300 seconds) without frame users and page viewers, the stream stops, so other programs can use the camera. The next use starts it again.
+- `phone_connect` starts adb, the phone screen, and scrcpy. `board_open` runs `obv-dump`.
+- `monitor_open` starts the page and returns its URL. The port can differ from 18766 when that port is busy, so the agent tells you the URL.
+- `bench_start` starts the page, the webcam, `phone_connect`, and `board_open` (with `board_path`) in one call. Each step runs even when another one fails. The result has the page URL and the status of each step. `bench_stop` stops the webcam stream, the phone screen and scrcpy, removes the adb forward of the phone camera, and stops the page. The tool log stays. You can say "start the bench" and "stop the bench" to the agent.
+- The page has the buttons "Start all" (`bench_start` without a new browser window) and "Stop all" (`bench_stop`; the page then stops).
+
+`--ui-start eager` starts the page and the webcam stream at process start, with no idle stop. `scripts/dev-monitor.sh` uses it.
 
 The page has these parts:
 
@@ -153,6 +171,8 @@ Each setting has a CLI flag, an environment variable, and a default. The server 
 | `--webcam-timeout` | `DEBUG_DEVICES_WEBCAM_TIMEOUT` | `20` |
 | `--vision-timeout` | `DEBUG_DEVICES_VISION_TIMEOUT` | `90` |
 | `--ui`, `--no-ui` | `DEBUG_DEVICES_UI` | on |
+| `--ui-start` | `DEBUG_DEVICES_UI_START` | `lazy`. `eager` starts the page and the webcam at process start. |
+| `--webcam-idle-timeout` | `DEBUG_DEVICES_WEBCAM_IDLE_TIMEOUT` | `300`. Lazy mode: seconds without users before the webcam stream stops. `0` keeps it on. |
 | `--ui-port` | `DEBUG_DEVICES_UI_PORT` | `18766`. If the port is busy, the server takes a free port. |
 | `--ui-open-browser`, `--no-ui-open-browser` | `DEBUG_DEVICES_UI_OPEN_BROWSER` | on |
 | `--phone-screen`, `--no-phone-screen` | `DEBUG_DEVICES_PHONE_SCREEN` | on |

@@ -1,6 +1,7 @@
 """Names, defaults, and limits of the monitor window, the webcam stream, and scrcpy."""
 
 from datetime import timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar
 
@@ -11,6 +12,15 @@ SETTINGS_FILE_NAME = "ui-settings.json"
 SCRCPY_LOG_FILE_NAME = "scrcpy.log"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_FILE = "index.html"
+
+
+class UiStart(StrEnum):
+    """When the monitor starts its page and the webcam stream."""
+
+    # At the first tool call (page) and the first webcam use (stream). Nothing at process start.
+    LAZY = "lazy"
+    # At process start, like a dev monitor.
+    EAGER = "eager"
 
 
 class env:
@@ -34,6 +44,11 @@ class defaults:
     STREAM_FPS = 10
     STREAM_QUALITY = 2
     STREAM_RESTART_DELAY = timedelta(seconds=2)
+    # Lazy mode: stop the webcam stream after this time without frame users and page viewers.
+    WEBCAM_IDLE_TIMEOUT = timedelta(minutes=5)
+    WEBCAM_IDLE_CHECK = timedelta(seconds=5)
+    # bench_stop answers first, then stops the page, so the page request that asked for it can end.
+    PAGE_STOP_DELAY = timedelta(milliseconds=500)
     PROCESS_STOP_TIMEOUT = timedelta(seconds=5)
     CROP_JPEG_QUALITY = 95
     HISTORY_SIZE = 200
@@ -133,6 +148,10 @@ class tools:
     PHONE_TORCH = "phone_torch"
     PHONE_SNAPSHOT = "phone_snapshot"
     PHONE_ROTATION = "phone_rotation"
+    BOARD_OPEN = "board_open"
+    MONITOR_OPEN = "monitor_open"
+    BENCH_START = "bench_start"
+    BENCH_STOP = "bench_stop"
     MULTIMETER_READ = "multimeter_read"
 
 

@@ -47,6 +47,16 @@ These scripts start Claude Code or Codex in the dev shell, with this MCP server.
 - Without `--browser`, the page does not open. Use this when `scripts/dev-monitor.sh` already runs: the new server then takes the webcam frames from that monitor.
 - `scripts/agent.sh <claude|codex>` does the same work. The two scripts call it.
 
+The server starts lazily, so an agent session that never uses the hardware costs nothing:
+
+- At process start, the server opens no port and starts no ffmpeg, adb, scrcpy, or browser.
+- The first tool call starts the monitor page. With `--browser`, Firefox opens then, one time.
+- The first webcam use starts the webcam stream. After 5 minutes without use, the stream stops and the camera is free again.
+- `phone_connect` starts adb and the phone screen. `board_open` starts `obv-dump`.
+- Say "start the bench" to the agent: `bench_start` starts the page, the webcam, and the phone, and it shows the status of each step. "Stop the bench" (`bench_stop`) stops them again. `monitor_open` gives the page URL.
+
+ChatGPT desktop and the Codex CLI start the MCP servers of a project in every session. For this repository, the server is in `.codex/config.toml` (git-ignored) with `--no-ui-open-browser`. Ask the agent for `monitor_open` or "start the bench" to get the page URL.
+
 ## Board files (OpenBoardView)
 
 The agent can read the boardview file of the board that you repair. Then it can tell where a part is, which pins are on a net, and which test point is near a part. With a phone photo of the board, it can also find a part in the photo.
@@ -79,6 +89,8 @@ Limits:
 For boards that you designed in KiCad, the design files have better data (exact rotation and part boxes). See the research in [docs/research/boardview-claude.md](docs/research/boardview-claude.md).
 
 ## Live reload
+
+`scripts/dev-monitor.sh` uses `--ui-start eager`: the page and the webcam stream start at once, like before the lazy start.
 
 `scripts/dev-monitor.sh` runs the MCP server with the monitor page and no MCP client. It uses `watchexec` to restart the server when a file in `mcp/debug_devices_mcp` changes (`.py`, `.html`, `.js`, `.css`). Stdin stays open with no input, so the stdio server does not stop.
 

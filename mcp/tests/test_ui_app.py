@@ -37,7 +37,7 @@ START = EffectiveSettings(vision_model="openai/gpt-6-luna", webcam_warmup_frames
 @pytest.fixture
 def server_and_monitor(settings: Settings, tmp_path: Path) -> tuple[MCPServer, Monitor]:
     services = make_services(settings, FakePhone(), no_vision())
-    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False))
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
     services.webcam = monitor.frame_source(services.webcam)
     server = build_server(services)
     monitor.instrument(server)
@@ -189,7 +189,7 @@ def test_read_multimeter_button(client: TestClient, monitor: Monitor) -> None:
 def test_read_multimeter_button_error_is_502(settings: Settings, tmp_path: Path) -> None:
     services = make_services(settings, FakePhone(), no_vision())
     services.vision = VisionClient(None, "m", "https://openrouter.test/api/v1", timedelta(seconds=1))
-    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False))
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
     monitor.instrument(build_server(services))
     response = TestClient(create_app(monitor), base_url=BASE_URL).post("/api/multimeter/read")
     assert response.status_code == 502
@@ -268,7 +268,7 @@ async def test_second_monitor_uses_the_owner_and_opens_no_browser(tmp_path: Path
     monitor = Monitor(
         START,
         SettingsStore.in_dir(tmp_path),
-        MonitorOptions(port=0),
+        MonitorOptions(port=0, open_browser=True),
         MonitorParts(stream=stream, opener=opener, shared=SharedWebcam(stream, remote)),
     )
     await monitor.start()
@@ -299,7 +299,7 @@ async def test_first_monitor_owns_the_webcam_and_opens_the_browser(tmp_path: Pat
     monitor = Monitor(
         START,
         SettingsStore.in_dir(tmp_path),
-        MonitorOptions(port=0),
+        MonitorOptions(port=0, open_browser=True),
         MonitorParts(stream=stream, opener=opener, shared=SharedWebcam(stream, remote)),
     )
     await monitor.start()
@@ -349,7 +349,7 @@ async def test_status_poll_follows_the_phone_without_log_rows(
     monitor = Monitor(
         START,
         SettingsStore.in_dir(tmp_path),
-        MonitorOptions(open_browser=False),
+        MonitorOptions(open_browser=False, port=0),
         MonitorParts(status_reader=services.phone.status),
     )
     monitor.instrument(build_server(services))

@@ -3,6 +3,7 @@
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
@@ -14,6 +15,9 @@ from debug_devices_mcp.ui.constants import http
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
 from debug_devices_mcp.webcam import WebcamError
 from debug_devices_mcp.webcam_stream import StreamInfo, WebcamStream
+
+if TYPE_CHECKING:
+    from debug_devices_mcp.ui.monitor import Monitor
 
 BAD_REQUEST = 400
 NOT_FOUND = 404
@@ -33,15 +37,24 @@ async def mjpeg_body(stream: WebcamStream) -> AsyncIterator[bytes]:
         yield mjpeg_part(frame.jpeg)
 
 
+async def viewer_body(monitor: Monitor, stream: WebcamStream) -> AsyncIterator[bytes]:
+    """A page watches: the webcam starts, and it stays on while the page reads. Another owner: its stream."""
+    async with monitor.webcam_viewer():
+        if monitor.webcam_owner is not None and monitor.shared is not None:
+            async for chunk in monitor.shared.remote.stream():
+                yield chunk
+            return
+        async for part in mjpeg_body(stream):
+            yield part
+
+
 async def get_stream(request: Request) -> Response:
     """The live view. When another monitor owns the webcam, this page shows the stream of that monitor."""
     monitor = monitor_of(request)
-    if monitor.webcam_owner is not None and monitor.shared is not None:
-        body = monitor.shared.remote.stream()
-        return StreamingResponse(body, media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
     if monitor.stream is None:
         return error_response(NO_STREAM, NOT_FOUND)
-    return StreamingResponse(mjpeg_body(monitor.stream), media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
+    body = viewer_body(monitor, monitor.stream)
+    return StreamingResponse(body, media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
 
 
 class FrameQuery(BaseModel):
@@ -55,13 +68,22 @@ async def get_frame(request: Request) -> Response:
     stream = monitor.stream
     if stream is None:
         return error_response(NO_STREAM, NOT_FOUND)
-    if monitor.webcam_owner is not None:
-        return error_response(f"the monitor at {monitor.webcam_owner} owns the webcam", SERVICE_UNAVAILABLE)
     try:
         query = FrameQuery.model_validate(dict(request.query_params))
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
-    return await cropped_frame(stream) if query.cropped else latest_frame(stream)
+    if not query.cropped:
+        return owned_elsewhere(monitor) or latest_frame(stream)
+    # Another MCP process takes a frame: this counts as a use, so the stream starts and stays on.
+    async with monitor.webcam_user():
+        return owned_elsewhere(monitor) or await cropped_frame(stream)
+
+
+def owned_elsewhere(monitor: Monitor) -> Response | None:
+    """Never pass frames on from a third monitor: the caller must ask the owner."""
+    if monitor.webcam_owner is None:
+        return None
+    return error_response(f"the monitor at {monitor.webcam_owner} owns the webcam", SERVICE_UNAVAILABLE)
 
 
 async def cropped_frame(stream: WebcamStream) -> Response:

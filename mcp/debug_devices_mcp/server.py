@@ -38,13 +38,17 @@ from debug_devices_mcp.phone_api import (
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.ui.monitor import Monitor
+from debug_devices_mcp.ui.tools import register_monitor_tools
 from debug_devices_mcp.webcam import Webcam, WebcamError, WebcamOptions
 from debug_devices_mcp.webcam_stream import FrameSource
 
 INSTRUCTIONS = (
     "Tools to see and measure real hardware. Call phone_connect once before the other phone_* tools. "
     "phone_snapshot and webcam_snapshot return a JPEG. multimeter_read returns the value, unit, and mode "
-    "that a vision model reads from the webcam that points at the multimeter."
+    "that a vision model reads from the webcam that points at the multimeter. "
+    "The local monitor page shows the webcam, the phone screen, and every tool call: monitor_open starts it and "
+    'returns its URL; tell the user the URL. bench_start starts everything in one call ("start the bench"), '
+    'bench_stop stops it and frees the camera ("stop the bench").'
 )
 
 
@@ -361,4 +365,6 @@ def build_server(
     register_phone_tools(server, services)
     register_webcam_tools(server, services)
     register_board_tools(server, services.board)
+    if monitor is not None:
+        register_monitor_tools(server, monitor)
     return server

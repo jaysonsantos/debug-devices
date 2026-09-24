@@ -16,6 +16,8 @@ const API = {
   phoneSnapshot: "/api/phone/snapshot",
   phoneSnapshotImage: "/api/phone/snapshot.jpg",
   multimeterRead: "/api/multimeter/read",
+  benchStart: "/api/bench/start",
+  benchStop: "/api/bench/stop",
   phoneScreen: "/api/phone/screen",
   phoneRotation: "/api/phone/rotation",
   callImage: (id, index) => `/api/calls/${id}/images/${index}`,
@@ -589,6 +591,38 @@ function renderCall(call) {
 
 // endregion: activity log
 
+// region: bench
+
+function benchSummary(result) {
+  return result.steps.map((step) => `${step.name}: ${step.status}`).join(" · ");
+}
+
+async function benchAction(url, button) {
+  const status = $("bench-status");
+  button.disabled = true;
+  status.textContent = "…";
+  try {
+    const result = await api("POST", url);
+    status.textContent = benchSummary(result);
+    status.title = result.steps.map((step) => `${step.name}: ${step.detail}`).join("\n");
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setupBench() {
+  $("bench-start").addEventListener("click", (e) => benchAction(API.benchStart, e.currentTarget));
+  $("bench-stop").addEventListener("click", (e) => {
+    benchAction(API.benchStop, e.currentTarget).then(() => {
+      $("bench-status").textContent += " · the page stops now; say \"start the bench\" to the agent";
+    });
+  });
+}
+
+// endregion: bench
+
 // region: live events
 
 function connectEvents() {
@@ -619,6 +653,7 @@ async function loadState() {
 async function main() {
   setupPhone();
   setupSettings();
+  setupBench();
   try {
     await loadState();
   } catch (error) {

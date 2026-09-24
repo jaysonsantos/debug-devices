@@ -57,8 +57,8 @@ class RemoteMonitor:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def identify(self, device: Path) -> MonitorIdentity | None:
-        """The other monitor, when it is a debug-devices monitor of another process that streams `device`."""
+    async def find_monitor(self) -> MonitorIdentity | None:
+        """The debug-devices monitor of another process on this port, with or without a webcam stream."""
         try:
             response = await self._http.get(remote.WHOAMI_PATH)
             identity = MonitorIdentity.model_validate_json(response.content) if response.status_code == OK else None
@@ -66,7 +66,12 @@ class RemoteMonitor:
             return None
         if identity is None or identity.app != APP_NAME or identity.pid == os.getpid():
             return None
-        if identity.webcam != str(device) or not identity.webcam_running:
+        return identity
+
+    async def identify(self, device: Path) -> MonitorIdentity | None:
+        """The other monitor, when it is a debug-devices monitor of another process that streams `device`."""
+        identity = await self.find_monitor()
+        if identity is None or identity.webcam != str(device) or not identity.webcam_running:
             return None
         return identity
 
