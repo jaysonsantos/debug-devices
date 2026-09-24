@@ -2,16 +2,8 @@
   "mcpServers": {
     "debug-devices": {
       "type": "stdio",
-      "command": "nix",
+      "command": "/abs/path/debug-devices/scripts/mcp-server.sh",
       "args": [
-        "develop",
-        "/abs/path/debug-devices",
-        "--command",
-        "uv",
-        "run",
-        "--directory",
-        "/abs/path/debug-devices",
-        "debug-devices-mcp",
         "--no-ui-open-browser"
       ]
     }

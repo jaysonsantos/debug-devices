@@ -33,6 +33,7 @@ uv run ruff check && uv run ruff format --check        # Python lint
 boardview/tests/run.sh                                 # obv-dump tests
 prek run --all-files                                   # all hooks
 scripts/dev-monitor.sh                                 # MCP + monitor page with live reload
+scripts/mcp-server.sh                                  # MCP server with the cached dev-shell env (for MCP clients)
 python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict   # phone contract
 ```
 

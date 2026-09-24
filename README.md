@@ -44,20 +44,22 @@ Choose one:
 
 - **Claude Code (CLI):** run `scripts/claude.sh` from any folder. Add `--browser` as the first argument to open the monitor page in Firefox.
 - **Codex (CLI):** run `scripts/codex.sh`, with the same `--browser` option.
-- **Claude Code in this folder:** put the server in `.mcp.json` (start from `.mcp.json.example`, with absolute paths and `nix develop`, see below). Start `claude` here and approve `debug-devices` one time.
+- **Claude Code in this folder:** put the server in `.mcp.json` (start from `.mcp.json.example` and set the absolute path). Start `claude` here and approve `debug-devices` one time.
 - **Codex CLI or ChatGPT desktop in this folder:** put the server in `.codex/config.toml`:
 
   ```toml
   [mcp_servers.debug_devices]
-  command = "nix"
-  args = ["develop", "/abs/path/debug-devices", "--command", "uv", "run", "--directory", "/abs/path/debug-devices", "debug-devices-mcp", "--no-ui-open-browser"]
-  startup_timeout_sec = 180
+  command = "/abs/path/debug-devices/scripts/mcp-server.sh"
+  args = ["--no-ui-open-browser"]
+  startup_timeout_sec = 60
   tool_timeout_sec = 120
   ```
 
   Codex loads it only in this folder (the folder must be trusted). In ChatGPT desktop, open this folder in Codex.
 
-`.mcp.json` and `.codex/config.toml` contain absolute paths, so git ignores them. `nix develop` gives the server `obv-dump`, `ffmpeg`, `scrcpy`, and `adb`.
+`.mcp.json` and `.codex/config.toml` contain absolute paths, so git ignores them.
+
+`scripts/mcp-server.sh` starts the server with the dev-shell tools (`obv-dump`, `ffmpeg`, `scrcpy`, `adb`). It caches the dev-shell environment in `~/.cache/debug-devices/` and makes it again only when `flake.nix` or `flake.lock` changes. A start takes about 1 s (about 6 s the first time). A direct `nix develop` takes 5-30 s, and Claude Code stops waiting after 30 s.
 
 ### 4. Debug
 
