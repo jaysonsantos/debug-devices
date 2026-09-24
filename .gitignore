@@ -13,3 +13,5 @@ local.properties
 *.apk
 .idea/
 *.iml
+# Local Codex config (absolute paths)
+.codex/
