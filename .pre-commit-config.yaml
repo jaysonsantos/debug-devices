@@ -1,5 +1,7 @@
 # Run with `prek run --all-files`. Install the git hook with `prek install`.
 # Every tool comes from flake.nix, so the local hooks use `language: system`.
+# Test fixtures are third-party files, and patch files must apply as they are. The hooks must not change them.
+exclude: ^(boardview/(tests/fixtures|patches)|mcp/tests/fixtures/boardview)/
 repos:
   # Basic hygiene hooks. prek has them built in, so they need no download.
   - repo: builtin

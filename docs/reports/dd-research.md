@@ -58,3 +58,82 @@
 - I tested only the `x86_64-linux` shell. I did not build the `aarch64-darwin` and `aarch64-linux` shells.
 - OpenRouter calls were not made (no API key). The model facts come from the public `/api/v1/models` endpoint.
 - The orchestrator's model change (`openai/gpt-6-luna`) is in `docs/research.md`. My paths have no code or tests that name the model.
+
+## Boardview: obv-dump
+
+Date: 2026-09-24. Plan: `docs/research/boardview-claude.md` option A. Contract: `docs/boardview-json.md`.
+
+### What I did
+
+- `boardview/` (new, C++ only, plus the test files):
+  - `src/main.cpp`: `obv-dump`. It selects the parser in the same order as `BoardView::LoadFile`, and it writes `BoardDump` or `DumpError` with nlohmann_json.
+  - `include/SDL.h`: a stub. The parsers use SDL only for log output, which goes to stderr.
+  - `CMakeLists.txt`: compiles only the parsers, `utils.cpp`, `Crypto/des.c`, `mpc.c`, and the generated GenCAD grammar.
+  - `patches/0001-keep-part-rotation.patch` (15 added lines): adds `has_rotation` and `rotation_deg` to `BRDPart`. GenCAD, FZ, and Altium ASCII (`ad`) set them.
+  - `LICENSE.OpenBoardView` (the OBV MIT notice), `README.md`.
+  - `tests/test_obv_dump.py` (pytest, 14 tests), `tests/run.sh`, `tests/fixtures/` with a license note for each file.
+- `flake.nix`: `packages.<system>.obv-dump`. It fetches OBV at tag `10.0.0` (pinned hash), and `mpc` and `utf8.h` at the gitlink revisions of that tag (pinned hashes). It applies `boardview/patches/*.patch` with `applyPatches`, builds with CMake, and installs the license texts in `share/licenses/obv-dump/`. The dev shell has `obv-dump` on `PATH`.
+- `.pre-commit-config.yaml`: one top-level `exclude: ^boardview/(tests/fixtures|patches)/`. Without it, the hygiene hooks changed the fixtures (line endings, final newline) and the patch (trailing white space).
+
+### Target file
+
+The local file (GenCAD 1.4, 90,037 lines, 2.4 MB) parses without a fix:
+
+| Item | Value |
+|---|---|
+| Command | `BOARDVIEW_TARGET=<file> nix develop --command boardview/tests/run.sh` (14 passed) and `obv-dump <file>` |
+| Time | 1.2 s (the whole run of `obv-dump`) |
+| Format | `gencad` |
+| Parts | 2,846 (1,625 top, 1,221 bottom). Names are unique. Examples: `C6312`, `C7160`, `D0701` |
+| Pins | 10,036. Each pin side is the same as its part side. |
+| Nets | 2,109 (example: `R2_OUT_MCU_X1_RSUB`) |
+| Nails | 0 |
+| Outline | none: the file has no `$BOARD` section. `outline` and `outline_segments` are empty. |
+| Rotation | `0.0` on all parts: every `COMPONENT` has `ROTATION 0`. The converter ("XY html to CAD") writes one `SHAPE` per part with the pins already in position. |
+| Part box | `p1 == p2` (the GenCAD `PLACE` point) for 2,845 parts. `null` for `U0301` (placed at 0,0). |
+
+Conclusion for the MCP server: for this file, compute the part box from the pins, and compute the board outline from the pin extent. Pin positions are the reliable data.
+
+### Checks
+
+| Check | Command | Result |
+|---|---|---|
+| Version | `nix develop --command obv-dump --version` | `obv-dump 0.1.0 (OpenBoardView 10.0.0)` |
+| Clean build | `nix build .#obv-dump --rebuild` | about 10 s, no compiler warnings (only the normal nixpkgs CMake "unused-cli" note) |
+| Tests | `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped (the local-only target test) |
+| Hooks | `prek run --files` on all changed files | all pass |
+
+Fixture results (OBV 10.0.0 with the patch):
+
+| Fixture | Format | Parts | Pins | Nails | Outline |
+|---|---|---|---|---|---|
+| `example.brd` (kicad-boardview, 0BSD) | `brd2` | 245 | 1,130 | 19 | 73 points |
+| `example.bvr` (kicad-boardview, 0BSD) | `bvr3` | 272 | 1,149 | 0 | 73 points |
+| `rotation.cad` (written for this repository) | `gencad` | 2 | 4 | 0 | 4 segments |
+
+The tests also check `unknown_format`, `io_error`, `key_required` (`.fz` without a key), `key_invalid` (the output does not contain the key), and exit 2 for a bad key flag.
+
+I did not add the GenCAD 1.4 specification example. The only copy that I found is in `cyrozap/gencad-rs`, which is GPL-3.0. `rotation.cad` is our own file and tests the GenCAD path (rotation, bottom side, mirrored X).
+
+### License of `Crypto/des.c`
+
+`github.com/dhuertas/DES` has an MIT license: "MIT License, Copyright (c) 2020 Dani Huertas" (file `LICENSE`, added 2020-07-21). The other parts: OpenBoardView MIT, `mpc` BSD 2-Clause (Daniel Holden, 2013), `utf8.h` public domain (Unlicense text). All are compatible with each other and with the repository.
+
+### Contract proposals for `docs/boardview-json.md`
+
+`obv-dump` does these things now. Please add them to the contract, or tell me to change the code:
+
+1. **Test-pad parts.** OBV adds parts named `...` for test pads (`BRDFileBase::AddNailsAsPins`, `BRDBoard::kComponentDummyName`). `obv-dump` does not write these parts. It writes their pins as `nails`, and it removes duplicate nails (same x, y, side, net). Without this, part names are not unique (`...` exists once for each side).
+2. **Repeated part names.** Real files repeat names. The KiCad example has seven mounting holes named `REF**`. The second and later ones get a suffix: `REF**#2` ... `REF**#7`. The suffix never collides with an existing name.
+3. **`first_pin`** is `null` when `pin_count` is 0. The contract example shows only an integer.
+4. **`p1 == p2`.** GenCAD gives only the placement point, so `p1` and `p2` are the same point. Add the rule: when `p1 == p2`, the MCP server computes the box from the pins, as for `null`.
+5. **`rotation_deg`** is the value from the file, in degrees, without a change for the bottom side. It is set for `gencad` (0 when the component has no `ROTATION`), `ad`, and `fz` (only when the field is a number). All other formats give `null`. A real value of `0.0` can also mean "the converter put the rotation into the shape" (see the target file).
+6. **Key flags.** `--fz-key` and `--cae-key`: 44 hex words (0x prefix optional), separated by commas or spaces, as in `obv.conf`. `--xzz-key`: one 64-bit hex value.
+7. **Exit 2** for a bad command line (usage text on stderr, no JSON). The contract has only 0 and 1.
+8. **Allegro binary `.brd`**: `unknown_format` with `format: null` and the message "Allegro binary .brd files are not supported". Add `allegro` to the format list if the MCP server must show a better message.
+
+### Open
+
+- The FZ and Altium ASCII rotation lines are not tested: no open sample files exist. The FZ change only reads a field that OBV already skipped.
+- XZZ, CAE, and FZ with real keys are not tested (no open samples, no keys).
+- `.pre-commit-config.yaml` was not in the path list of this brief. I created that file in task 1, and the change is one `exclude` line.

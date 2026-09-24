@@ -48,6 +48,44 @@ Call `phone_connect` before the other `phone_*` tools. The HTTP contract with th
 
 If `--webcam-crop` is set, ffmpeg crops the frame on the PC. Only the cropped part goes to OpenRouter and to the model. The crop also applies to `webcam_snapshot`.
 
+## Boardview tools
+
+The board tools read boardview files with `obv-dump` (the OpenBoardView parsers as a command line tool, `boardview/`, `nix build .#obv-dump`, on `PATH` in the dev shell). The contract is `docs/boardview-json.md`. The server keeps the last opened board in memory. It caches each board by the SHA-256 of the file.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `board_open` | `path` | Format, SHA-256, counts (parts, pins, nets, nails, test points), board size in mm, parts per side, load time |
+| `board_find_part` | `query` (refdes, glob such as `C1*`, or mfgcode text), `limit` | Parts with side, center, box, rotation, mfgcode, pin count, and nets |
+| `board_part_pins` | `refdes` | All pins: number, name, net, position, side |
+| `board_find_net` | `query` (net name or glob), `limit` | Per net: the parts and pin numbers, the test points (nails and `TP*` parts), and the nearest test point to each part |
+| `board_parts_near` | `refdes` or `x_mm` + `y_mm`, `radius_mm` (default 5), `side`, `limit` | Parts within the radius, sorted by distance |
+| `board_render` | `side`, `highlight_parts`, `highlight_nets`, `crop_to_part`, `max_side` (default 1568) | PNG of one side and a JSON legend (colors, pixel positions of the highlighted parts, notes) |
+| `board_register_photo` | `side`, `photo_width_px`, `photo_height_px`, `pairs` (4 or more `{refdes, x_px, y_px}`) | A `registration_id` and the fit errors. The server refuses a fit with a large error. |
+| `board_locate_in_photo` | `registration_id`, `refdes`, `net`, `photo_path` (optional), `max_side` | Pixel positions of the parts and net pins in the photo. With `photo_path`, also the photo with circles on them. |
+
+Rules:
+
+- Positions are in mm, in board coordinates (y up). `obv-dump` gives mil. The server converts them at one place (`board/units.py`).
+- A part center is the center of the part box. When the file has no box (or a box with zero size), the box is the box around the pins plus 0.3 mm.
+- `board_render` draws the bottom side mirrored in X, as seen from below. With `crop_to_part` and no `side`, it uses the side of that part.
+- Photo mapping: a homography from 4 or more part centers. With 5 or more pairs, the server checks the error (limit: 2 % of the photo point spread). With 6 or more pairs, it also names the most likely wrong pair. Use large parts far apart, and a phone zoom of 1.5-2x (less lens distortion). Each side of the board needs its own registration.
+
+Settings:
+
+| Flag | Environment variable | Default |
+|---|---|---|
+| `--obv-dump-path` | `BOARDVIEW_DUMP_BIN` | `obv-dump` |
+| `--boardview-dump-timeout` | `DEBUG_DEVICES_BOARDVIEW_DUMP_TIMEOUT` | `60` (seconds) |
+| `--boardview-fz-key`, `--boardview-cae-key`, `--boardview-xzz-key` | `BOARDVIEW_FZ_KEY`, `BOARDVIEW_CAE_KEY`, `BOARDVIEW_XZZ_KEY` | none |
+
+Put the keys in `.env`, not on the command line: a flag shows in the process list. The server gives the keys only to `obv-dump`. No error message and no log line contains them.
+
+Tests: `mcp/tests/test_board*.py` use only open data (`mcp/tests/fixtures/boardview/`, see its README) and a fake `obv-dump`. `test_board_target.py` loads a real board with the real `obv-dump`. It runs only when `BOARDVIEW_TARGET` is set:
+
+```sh
+BOARDVIEW_TARGET=/path/to/board.cad uv run pytest mcp/tests/test_board_target.py -s
+```
+
 ## Monitor window
 
 When the server starts, it opens a local web page in a new Firefox window. If Firefox does not start, the server uses `xdg-open`. The page shows what the server does. You can also change the devices and the settings on the page.

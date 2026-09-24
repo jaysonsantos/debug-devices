@@ -1,0 +1,60 @@
+diff --git a/src/openboardview/FileFormats/ADFile.cpp b/src/openboardview/FileFormats/ADFile.cpp
+index 941a2f0..8e6c2f3 100644
+--- a/src/openboardview/FileFormats/ADFile.cpp
++++ b/src/openboardview/FileFormats/ADFile.cpp
+@@ -436,6 +436,8 @@ ADFile::ADFile(std::vector<char> &buf) {
+ 			ad_part.name = "UNKNOWN";
+ 		}
+ 		part.name = ad_part.name;
++		part.has_rotation = true;
++		part.rotation_deg = ad_part.orientation;
+ 
+ 		if (!strcmp(ad_part.layer, "TOP")) {
+ 			part.mounting_side = BRDPartMountingSide::Top;
+diff --git a/src/openboardview/FileFormats/BRDFileBase.h b/src/openboardview/FileFormats/BRDFileBase.h
+index 2f96a82..38e26fd 100644
+--- a/src/openboardview/FileFormats/BRDFileBase.h
++++ b/src/openboardview/FileFormats/BRDFileBase.h
+@@ -58,6 +58,9 @@ struct BRDPart {
+ 	unsigned int end_of_pins = 0;
+ 	BRDPoint p1{0, 0};
+ 	BRDPoint p2{0, 0};
++	// Part rotation in degrees as the source file gives it. Only valid when has_rotation is true.
++	bool has_rotation   = false;
++	double rotation_deg = 0.0;
+ };
+ 
+ enum class BRDPinSide { Both, Bottom, Top };
+diff --git a/src/openboardview/FileFormats/FZFile.cpp b/src/openboardview/FileFormats/FZFile.cpp
+index d7ad4f1..b92e56e 100644
+--- a/src/openboardview/FileFormats/FZFile.cpp
++++ b/src/openboardview/FileFormats/FZFile.cpp
+@@ -356,7 +356,13 @@ void FZFile::parse(std::vector<char> &buf, const std::array<uint32_t, 44> &fzkey
+ 				/*char *cic =*/READ_STR();
+ 				/*char *sname =*/READ_STR();
+ 				char *smirror = READ_STR();
+-				/*char *srotate =*/READ_STR();
++				char *srotate = READ_STR();
++				char *rotate_end = nullptr;
++				double rotation = strtod(srotate, &rotate_end);
++				if (rotate_end != srotate && *rotate_end == '\0') {
++					part.has_rotation = true;
++					part.rotation_deg = rotation;
++				}
+ 				part.part_type = BRDPartType::SMD;
+ 				if (!strcmp(smirror, "YES"))
+ 					part.mounting_side = BRDPartMountingSide::Bottom; // SMD part on bottom
+diff --git a/src/openboardview/FileFormats/GenCADFile.cpp b/src/openboardview/FileFormats/GenCADFile.cpp
+index 929ae37..b80e179 100644
+--- a/src/openboardview/FileFormats/GenCADFile.cpp
++++ b/src/openboardview/FileFormats/GenCADFile.cpp
+@@ -191,6 +191,9 @@ bool GenCADFile::parse_components() {
+ 			if (rotation_ast && rotation_value_ast) {
+ 				component_rotation_angle = atof(rotation_value_ast->contents);
+ 			}
++			// GenCAD rotation defaults to 0 when the component has no ROTATION line.
++			brd_part.has_rotation = true;
++			brd_part.rotation_deg = component_rotation_angle;
+ 
+ 			mpc_ast_t *layer_ast = mpc_ast_get_child(component_ast, "named_layer|>");
+ 			if (layer_ast) {

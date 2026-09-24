@@ -16,19 +16,102 @@
       # nixpkgs names platform 37 "37.0" (directory platforms/android-37.0).
       androidPlatformVersion = "37.0";
       androidBuildToolsVersion = "37.0.0";
+
+      pkgsFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          config = {
+            # The Android SDK is unfree and has its own license.
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
+        };
+
+      # boardview/: obv-dump, the OpenBoardView file parsers without the GUI.
+      # OpenBoardView stays pinned to a release tag. Our changes are patch files in boardview/patches/.
+      obvVersion = "10.0.0";
+      obvDumpFor =
+        pkgs:
+        let
+          obvSource = pkgs.applyPatches {
+            name = "openboardview-${obvVersion}-parsers";
+            src = pkgs.fetchFromGitHub {
+              owner = "OpenBoardView";
+              repo = "OpenBoardView";
+              tag = obvVersion;
+              hash = "sha256-KJcMfJMfICDcM4GJiHSAIS00OKDZUTAiCroKIXl7S+I=";
+            };
+            patches = pkgs.lib.fileset.toList (
+              pkgs.lib.fileset.fileFilter (f: f.hasExt "patch") ./boardview/patches
+            );
+            # The parsers need only two of the submodules. The revisions are the gitlinks of the tag.
+            postPatch = ''
+              rm -rf src/mpc src/utf8
+              cp -r ${
+                pkgs.fetchFromGitHub {
+                  owner = "orangeduck";
+                  repo = "mpc";
+                  rev = "65f20a1a0b3249a475efa8ecb7b5ecd2c1c071c4";
+                  hash = "sha256-7kJxk3Z0jgxQo45LalvsDMAikc6+uAzuW0BwYWWMOAE=";
+                }
+              } src/mpc
+              cp -r ${
+                pkgs.fetchFromGitHub {
+                  owner = "sheredom";
+                  repo = "utf8.h";
+                  rev = "3e9e3ec15c7bf129664ab2a113eb03b54ee0b584";
+                  hash = "sha256-2dfHd/C9u1idikOe5P8cl4dr7pPbVqW5+grDoNSJd94=";
+                }
+              } src/utf8
+            '';
+          };
+        in
+        pkgs.stdenv.mkDerivation {
+          pname = "obv-dump";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./boardview;
+            fileset = pkgs.lib.fileset.unions [
+              ./boardview/CMakeLists.txt
+              ./boardview/include
+              ./boardview/src
+            ];
+          };
+          nativeBuildInputs = [
+            pkgs.cmake
+            pkgs.python3
+          ];
+          buildInputs = [
+            pkgs.zlib
+            pkgs.nlohmann_json
+          ];
+          cmakeFlags = [
+            "-DOBV_SOURCE_DIR=${obvSource}"
+            "-DOBV_VERSION=${obvVersion}"
+          ];
+          # The MIT and BSD licenses of the parser code ask for their notices next to the binary.
+          postInstall = ''
+            install -Dm644 ${obvSource}/LICENSE $out/share/licenses/obv-dump/OpenBoardView.txt
+            install -Dm644 ${obvSource}/src/mpc/LICENSE.md $out/share/licenses/obv-dump/mpc.txt
+            install -Dm644 ${obvSource}/src/utf8/LICENSE $out/share/licenses/obv-dump/utf8.txt
+          '';
+          meta = {
+            description = "Dump boardview files as JSON with the OpenBoardView parsers";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "obv-dump";
+          };
+        };
     in
     {
+      packages = forAllSystems (system: {
+        obv-dump = obvDumpFor (pkgsFor system);
+      });
+
       devShells = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs {
-            inherit system;
-            config = {
-              # The Android SDK is unfree and has its own license.
-              allowUnfree = true;
-              android_sdk.accept_license = true;
-            };
-          };
+          pkgs = pkgsFor system;
 
           androidComposition = pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ androidPlatformVersion ];
@@ -55,6 +138,9 @@
               pkgs.android-tools
               pkgs.ktlint
               androidSdk
+
+              # boardview/: the boardview file parser CLI that the MCP server runs
+              (obvDumpFor pkgs)
 
               # Linters for the whole repository, run by prek
               pkgs.prek

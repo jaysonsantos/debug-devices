@@ -247,3 +247,62 @@ DONE (round 2 fixes included). I do not edit `server.py`, `config.py`, `webcam.p
 - `Services.from_settings(settings)` and `build_server(services)` in `server.py`.
 - `services.webcam.crop = Crop(x=..., y=..., width=..., height=...)` changes the crop at run time. `None` removes it.
 - `services.webcam.capture_jpeg()` returns one JPEG. With the monitor stream open, a second process gets "Device or resource busy" (tested in round 2).
+
+## Boardview
+
+Brief: `bv-mcp.md`. Plan: `docs/research/boardview-claude.md` option A. Contract: `docs/boardview-json.md`.
+
+### What I did
+
+- New package `mcp/debug_devices_mcp/board/`:
+  - `dump.py`: pydantic models of the contract (`BoardDump`, `DumpError`, enums for format, side, mounting, error code). Coordinates in mil.
+  - `units.py`: the one helper pair `mil_to_mm` and `mm_to_mil`.
+  - `model.py`: `Board` in mm. Part center and box from `p1`/`p2`, or from the pins (plus 0.3 mm) when the box is missing or has zero size. Indexes by part, net, and test point. Queries: `find_parts` (refdes, glob, mfgcode), `net_names`, `nearest_test_point`, `parts_near`. Test points are nails and parts named `TP*`, `PT*`, `TEST*`.
+  - `loader.py`: `BoardviewLoader` runs `obv-dump` through the command runner with a timeout, parses exit 0 (`BoardDump`), exit 1 (`DumpError`), and crashes. It caches boards in memory by SHA-256. Keys go only to the `obv-dump` command line. A runner error (its text has the full command line) is not chained and not repeated.
+  - `render.py`: Pillow PNG of one side: outline, part boxes, pins, labels that fit (font 16, then 11), highlighted parts and nets. Bottom is mirrored in X. `crop_to_part` makes a view of at least 15 mm around the part.
+  - `homography.py`: DLT with Hartley normalization and SVD (numpy). Error check with 5+ pairs (limit 2 % of the photo point spread). `likely_outlier` names the wrong pair with 6+ pairs.
+  - `tools.py`: `BoardSession` and the tools `board_open`, `board_find_part`, `board_part_pins`, `board_find_net`, `board_parts_near`, `board_render`, `board_register_photo`, `board_locate_in_photo`.
+- `server.py` (small edits): `Services.board` (a default value, so other code that makes `Services` still works), set from the settings in `from_settings`, and `register_board_tools(server, services.board)` in `build_server`.
+- `config.py`: `--obv-dump-path` (`BOARDVIEW_DUMP_BIN`), `--boardview-dump-timeout`, and the three keys (`BOARDVIEW_FZ_KEY`, `BOARDVIEW_CAE_KEY`, `BOARDVIEW_XZZ_KEY`). The environment names have no `DEBUG_DEVICES_` prefix, as in `.env.example`.
+- `pyproject.toml`: new dependency `numpy`. Ruff `PLR0913`/`PLR0917` are off for `board/tools.py` only, with a comment: the arguments of a tool function are the tool API.
+- Fixtures in `mcp/tests/fixtures/boardview/` (README with sources and licenses): `example.brd` (whitequark/kicad-boardview, 0BSD) and its real `obv-dump` output `example.brd.json` (local path removed), a hand-made `tiny.json`, and three `DumpError` files.
+- Tests: `test_board.py` (model, loader, renderer), `test_board_tools.py` (tools through the in-process MCP client), `test_board_photo.py` (homography and photo tools), `test_board_target.py` (local only).
+- `mcp/README.md`: new section "Boardview tools".
+
+### What works
+
+- `uv run pytest`: 179 passed, 1 skipped (the target test without `BOARDVIEW_TARGET`). `uv run ruff check mcp` and `uv run ruff format --check mcp` pass.
+- `nix build .#obv-dump` (dd-research's derivation) builds. With it:
+  - Stdio smoke test (`debug-devices-mcp --no-ui --obv-dump-path <nix store path>`) on the open example: `board_open`, `board_find_part`, `board_find_net`, `board_parts_near`, and `board_render` work. `board_open` on a file that is not a board gives "obv-dump could not read the board: unknown_format: Unrecognized file format".
+  - Target test: `BOARDVIEW_TARGET=<target> BOARDVIEW_DUMP_BIN=<nix store path> uv run pytest mcp/tests/test_board_target.py -s`: passed. Result below.
+
+Target board (local only, counts only):
+
+| Item | Value |
+|---|---|
+| Format | `gencad` |
+| Parts | 2,846 (1,625 top, 1,221 bottom, all `smd`) |
+| Pins | 10,036, all with a net and a number |
+| Nets | 2,109 |
+| Nails | 0. Test points: 35 (`TP*` parts) |
+| Outline | none (0 points, 0 segments) |
+| `p1`/`p2` | set for 2,845 parts, but `p1 == p2` (zero size) for all. The server uses the pin boxes. |
+| `rotation_deg`, `mfgcode` | set for all parts |
+| Load time, first load | 1.66 s in total: `obv-dump` about 1.4 s (JSON 1.66 MB), validation 0.04 s, index 0.13 s. Second load: from the cache. |
+| Render | 0.05-0.23 s. Whole board at 1568 px: about 6 px/mm, so few labels fit. A crop around a large part: 54 labels. |
+
+I did not look at any image of the target. An image that I open goes to a model, and the brief forbids that. I checked the target renders only with numbers (size, parts drawn, labels drawn). I deleted the target JSON from my scratch directory.
+
+### Contract findings and proposals (for the orchestrator and dd-research)
+
+1. **`DumpError.format` is `null`.** `obv-dump` sends `"format": null` when the format is unknown (also for `io_error`). The contract says that empty text fields are `""`. The MCP now accepts both. Proposal: either `obv-dump` sends `""`, or the contract allows `null` for `DumpError.format`.
+2. **Zero-size part boxes.** For the target (GenCAD from a converter), `p1 == p2` for every part. The contract says `null` only for 0,0. Proposal: `obv-dump` sends `null` when `p1 == p2`, or the contract says "a zero-size box means no box". The MCP already treats it as no box.
+3. **Empty pin numbers.** For `example.brd` (read as `brd2`), all 1,130 pin numbers are `""`. The MCP numbers the pins in file order, as OBV does. Proposal: `obv-dump` does the same, and the contract says so.
+4. **No outline.** The target has no outline. The bounds then come from the pins. No change needed. The render has no board edge for such files.
+5. `example.brd` is now in two places (`boardview/tests/fixtures/` and `mcp/tests/fixtures/boardview/`). Both are 0BSD with a license note. One copy is enough if the orchestrator wants that.
+
+### Open items
+
+- `board_register_photo` needs pixel positions from the agent (or the user). A vision step that finds the parts in a phone snapshot is not implemented. No live photo test: I did not point the phone at a board.
+- A part rotation that is only in the source file is in the dump (`rotation_deg`). The renderer draws boxes aligned to the axes. It does not rotate them.
+- `board_render` of a whole large board shows few labels. Use `crop_to_part` for details, or the highlights.

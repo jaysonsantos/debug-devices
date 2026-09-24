@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +13,9 @@ from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, Field
 
 from debug_devices_mcp.adb import Adb, AdbError
+from debug_devices_mcp.board.constants import defaults as board_defaults
+from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
+from debug_devices_mcp.board.tools import BoardSession, register_board_tools
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
 from debug_devices_mcp.images import downscale_jpeg
@@ -81,6 +84,11 @@ class Services:
     phone: PhoneClient
     webcam: FrameSource
     vision: VisionClient
+    board: BoardSession = field(
+        default_factory=lambda: BoardSession.create(
+            SubprocessRunner(), LoaderOptions(dump_bin=board_defaults.DUMP_BIN, timeout=board_defaults.DUMP_TIMEOUT)
+        )
+    )
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Services:
@@ -110,6 +118,16 @@ class Services:
                 RemoteMonitor(settings.ui_port, settings.webcam_timeout),
             ),
             vision=vision,
+            board=BoardSession.create(
+                runner,
+                LoaderOptions(
+                    dump_bin=settings.obv_dump_path,
+                    timeout=settings.boardview_dump_timeout,
+                    keys=BoardviewKeys(
+                        fz=settings.boardview_fz_key, cae=settings.boardview_cae_key, xzz=settings.boardview_xzz_key
+                    ),
+                ),
+            ),
         )
 
     async def aclose(self) -> None:
@@ -342,4 +360,5 @@ def build_server(
 
     register_phone_tools(server, services)
     register_webcam_tools(server, services)
+    register_board_tools(server, services.board)
     return server

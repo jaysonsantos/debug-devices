@@ -1,0 +1,294 @@
+{
+ "schema_version": 1,
+ "source": {
+  "path": "/fixtures/tiny.cad",
+  "format": "gencad",
+  "obv_version": "fixture"
+ },
+ "units": "mil",
+ "outline": [],
+ "outline_segments": [
+  {
+   "a": {
+    "x": 0,
+    "y": 0
+   },
+   "b": {
+    "x": 2000,
+    "y": 0
+   }
+  },
+  {
+   "a": {
+    "x": 2000,
+    "y": 0
+   },
+   "b": {
+    "x": 2000,
+    "y": 1000
+   }
+  },
+  {
+   "a": {
+    "x": 2000,
+    "y": 1000
+   },
+   "b": {
+    "x": 0,
+    "y": 1000
+   }
+  },
+  {
+   "a": {
+    "x": 0,
+    "y": 1000
+   },
+   "b": {
+    "x": 0,
+    "y": 0
+   }
+  }
+ ],
+ "parts": [
+  {
+   "name": "U1",
+   "side": "top",
+   "mounting": "smd",
+   "p1": {
+    "x": 980,
+    "y": 480
+   },
+   "p2": {
+    "x": 1120,
+    "y": 620
+   },
+   "rotation_deg": 90.0,
+   "mfgcode": "TPS62130RGT",
+   "first_pin": 0,
+   "pin_count": 4
+  },
+  {
+   "name": "R1",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "10K 0402",
+   "first_pin": 4,
+   "pin_count": 2
+  },
+  {
+   "name": "C1",
+   "side": "bottom",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "",
+   "first_pin": 6,
+   "pin_count": 2
+  },
+  {
+   "name": "TP1",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "",
+   "first_pin": 8,
+   "pin_count": 1
+  },
+  {
+   "name": "J1",
+   "side": "both",
+   "mounting": "through_hole",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": 0.0,
+   "mfgcode": "USB-C",
+   "first_pin": 9,
+   "pin_count": 2
+  },
+  {
+   "name": "U2",
+   "side": "bottom",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "TPS62130RGT",
+   "first_pin": 11,
+   "pin_count": 2
+  }
+ ],
+ "pins": [
+  {
+   "part": "U1",
+   "number": "1",
+   "name": "VIN",
+   "net": "PP3V3",
+   "x": 1000,
+   "y": 500,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "U1",
+   "number": "2",
+   "name": "GND",
+   "net": "GND",
+   "x": 1100,
+   "y": 500,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "U1",
+   "number": "3",
+   "name": "VOUT",
+   "net": "PP1V8",
+   "x": 1100,
+   "y": 600,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "U1",
+   "number": "4",
+   "name": "EN",
+   "net": "EN",
+   "x": 1000,
+   "y": 600,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "R1",
+   "number": "1",
+   "name": "",
+   "net": "EN",
+   "x": 800,
+   "y": 550,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "R1",
+   "number": "2",
+   "name": "",
+   "net": "PP3V3",
+   "x": 700,
+   "y": 550,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "C1",
+   "number": "1",
+   "name": "",
+   "net": "PP1V8",
+   "x": 1300,
+   "y": 700,
+   "side": "bottom",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "C1",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 1400,
+   "y": 700,
+   "side": "bottom",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "TP1",
+   "number": "1",
+   "name": "",
+   "net": "PP1V8",
+   "x": 1500,
+   "y": 300,
+   "side": "top",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "J1",
+   "number": "1",
+   "name": "",
+   "net": "VBUS",
+   "x": 100,
+   "y": 100,
+   "side": "both",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "J1",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 100,
+   "y": 200,
+   "side": "both",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "U2",
+   "number": "1",
+   "name": "",
+   "net": "PP3V3",
+   "x": 1800,
+   "y": 900,
+   "side": "bottom",
+   "radius": 10.0,
+   "probe": 0
+  },
+  {
+   "part": "U2",
+   "number": "2",
+   "name": "",
+   "net": "",
+   "x": 1900,
+   "y": 900,
+   "side": "bottom",
+   "radius": 10.0,
+   "probe": 0
+  }
+ ],
+ "nails": [
+  {
+   "net": "PP3V3",
+   "x": 600,
+   "y": 400,
+   "side": "bottom",
+   "probe": 1
+  },
+  {
+   "net": "GND",
+   "x": 1200,
+   "y": 800,
+   "side": "top",
+   "probe": 2
+  },
+  {
+   "net": "PP3V3",
+   "x": 1700,
+   "y": 800,
+   "side": "bottom",
+   "probe": 3
+  }
+ ]
+}

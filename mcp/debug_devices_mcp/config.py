@@ -4,9 +4,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BeforeValidator, Field, SecretStr
+from pydantic import AliasChoices, BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, CliApp, NoDecode, SettingsConfigDict
 
+from debug_devices_mcp.board.constants import defaults as board_defaults
+from debug_devices_mcp.board.constants import env as board_env
 from debug_devices_mcp.constants import ENV_FILE, PROGRAM_NAME, defaults, env
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
@@ -97,6 +99,18 @@ class Settings(BaseSettings):
     scrcpy_server_version: str = Field(
         default="", description="Version of the scrcpy server. Empty: from `scrcpy --version`. Must match the server."
     )
+    # region: boardview. The environment names have no DEBUG_DEVICES_ prefix (see .env.example).
+    obv_dump_path: str = Field(
+        default=board_defaults.DUMP_BIN,
+        validation_alias=AliasChoices("obv_dump_path", board_env.DUMP_BIN.lower()),
+        description="The obv-dump binary (boardview parser). Default: obv-dump on PATH.",
+    )
+    boardview_dump_timeout: Seconds = board_defaults.DUMP_TIMEOUT
+    # Keys for encrypted boardview formats. Prefer the environment: a flag shows in the process list.
+    boardview_fz_key: SecretStr | None = Field(default=None, validation_alias=board_env.FZ_KEY.lower())
+    boardview_cae_key: SecretStr | None = Field(default=None, validation_alias=board_env.CAE_KEY.lower())
+    boardview_xzz_key: SecretStr | None = Field(default=None, validation_alias=board_env.XZZ_KEY.lower())
+    # endregion: boardview
 
     @classmethod
     def from_cli(cls, args: list[str] | None = None) -> Settings:

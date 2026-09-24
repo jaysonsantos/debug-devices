@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
   "httpx>=0.28.1",
   "mcp>=2.2",
+  "numpy>=2.5.3",
   "pillow>=12.3.0",
   "pydantic>=2",
   "pydantic-settings>=2.15.0",
@@ -39,6 +40,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "mcp/tests/**" = ["PLR2004"]
+# An MCP tool function has one argument for each tool input, so the argument count is the tool API.
+"mcp/debug_devices_mcp/board/tools.py" = ["PLR0913", "PLR0917"]
 
 [tool.pytest.ini_options]
 testpaths = ["mcp/tests"]
