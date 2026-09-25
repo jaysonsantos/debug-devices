@@ -47,6 +47,16 @@ object Constants {
         const val VENDOR_KEY = "org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom"
         const val ENABLED_VALUE = 1
 
+        /**
+         * Vendor session operation mode that the Xiaomi camera app uses for real in-sensor zoom
+         * (`CUSTOM (36869)` in `dumpsys media.camera`, see `docs/research/xiaomi-app-zoom.md`).
+         */
+        const val VENDOR_SESSION_TYPE = 0x9005
+
+        /** Xiaomi session key for the camera app mode, and the value of the Xiaomi app's photo mode. */
+        const val APP_MODULE_KEY = "xiaomi.app.module"
+        const val APP_MODULE_PHOTO = 163
+
         /** `adb shell am start -n .../.MainActivity --ez in_sensor_zoom true`. Off by default. */
         const val INTENT_EXTRA = "in_sensor_zoom"
 
@@ -84,6 +94,7 @@ object Constants {
         const val CAPTURE_FAILED = "The still capture failed"
         const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
         const val IN_SENSOR_ZOOM_FALLBACK = "In-sensor zoom session failed, binding again without it"
+        const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
         const val START_STATE_PENDING = "Camera start state is not set yet"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "
         const val START_STATE_FAILED = "Camera bind or start state failed"

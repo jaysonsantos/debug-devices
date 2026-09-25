@@ -62,12 +62,13 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   app keeps the last rotation. `adb -s <serial> logcat -s DebugCamera:I` shows each rotation change.
 - `POST /v1/rotation {"degrees": 0|90|180|270}` locks the snapshot rotation (`RotationState`); `{"auto": true}` goes
   back to the sensor. `CameraStatus` has `rotation_degrees` and `rotation_locked`. After a start, the rotation is auto.
-- Experiment, off by default: vendor in-sensor zoom of the 200 MP sensor
-  (`org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom`). Turn it on or off with
+- Experiment, off by default: vendor in-sensor zoom of the 200 MP sensor. Turn it on or off with
   `adb -s <serial> shell am start -n dev.jayson.debugdevices.camera/.MainActivity --ez in_sensor_zoom true|false`.
-  The app sets it only when the camera publishes the key, and binds again without it when the session does not
-  stream. `logcat -s DebugCamera:I` shows `In-sensor zoom: requested=..., sessionKey=..., requestKey=..., state=...`.
-  Result on 7fad170e: the HAL gets the parameter but does not switch to in-sensor zoom, so it adds no detail.
+  On: the session opens with the vendor operation mode `0x9005` and the session parameters
+  `EnableInsensorZoom = 1` and `xiaomi.app.module = 163`, like the Xiaomi camera app. At 2x the sensor then reads a
+  half-field crop at full density (`InSensorZoomState = 2`). The app binds again in NORMAL mode when the vendor
+  session fails. It needs CameraX 1.7.0-alpha03 and two library-internal workarounds (see `CameraController.kt`).
+  `logcat -s DebugCamera:I` shows `In-sensor zoom: ..., sessionType=0x9005, state=ON`.
 - `POST /v1/preview {"flip_horizontal": bool, "flip_vertical": bool}` mirrors only the on-screen camera preview
   (`PreviewView` scale). The status label stays readable and shows `flip H` / `flip V`. Snapshots do not change.
   Both fields are required. The flips are in the viewer's upright frame, so when the phone is sideways, the axes

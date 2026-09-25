@@ -190,6 +190,67 @@ Check on `7fad170e` (APK installed at 20:06, the phone at the same position as t
 
 End state: zoom 1x, torch off, both flips false.
 
+
+### Round: vendor session mode 0x9005 (real in-sensor zoom)
+
+Brief: open our session with the vendor operation mode `CUSTOM (36869)` = `0x9005`, like the Xiaomi camera app (`docs/research/xiaomi-app-zoom.md`). Result: **it works at 2x**. With two more settings, our session gets the same sensor state as the Xiaomi app at 2x, and the 2x snapshot shows more real detail. At 4x there is no extra gain yet.
+
+Way chosen: **CameraX 1.7.0-alpha03** (the only 1.7 release; no rc or stable yet). It is the smallest change: CameraX still runs zoom, torch, preview flip, focus data, rotation, and the snapshot. The session is bound as a `SessionConfig(preview, imageCapture)`, because the session type is a session-level option. A plain Camera2 path would replace the whole capture pipeline.
+
+What was necessary (each step checked with `dumpsys media.camera` on `7fad170e`):
+
+1. `SessionConfig.Builder(...).camera2Interop { setSessionType(0x9005) }` alone: the session stayed `NORMAL (0)`. Cause in the 1.7.0-alpha03 sources: the interop writes `camera2.cameraCaptureSession.sessionType`, `SessionConfig.Builder.build()` reads `camerax.core.useCase.sessionType`, and `SupportedSurfaceCombination` gives each stream spec `SESSION_TYPE_REGULAR` anyway. This looks like a CameraX bug.
+2. Workaround (library-internal API, `@SuppressLint("RestrictedApi")`): the Preview gets its own default session config (the CameraX default template `TEMPLATE_PREVIEW`) with `Camera2ImplConfig.SESSION_TYPE_OPTION = 0x9005`. `UseCaseCameraConfig` reads that option first. Result: `Operation mode: CUSTOM (36869)`. A second write to `UseCaseConfig.OPTION_SESSION_TYPE` is also in the code. It did not help alone. I did not test the first workaround without it.
+3. In the vendor mode with `EnableInsensorZoom = 1`, the HAL still reported `InSensorZoomState = 0` at 2x. Only the base sensor mode changed (`sensorModeCache[0]` 6 instead of 2). A request diff against the Xiaomi app's 2x dump (dd-research scratch) showed the session key `xiaomi.app.module`: 163 in the Xiaomi app, not set by us (static default 65535). With `xiaomi.app.module = 163` as a session parameter and a request option, the switch happens.
+
+Code:
+
+- `InSensorZoomLogic`: `plan` (off, on, unsupported: key missing or Android < 9), `sessionType` (`0x9005` only for `ON`), `vendorParameters` (`EnableInsensorZoom = 1`, `xiaomi.app.module = 163` only for `ON`), `afterBindFailure` (`ON` -> `FALLBACK`). Constants in `Constants.InSensorZoom`.
+- `CameraController`: vendor int32 keys come from the camera's key lists (type `int[]`). With `ON`, it binds the `SessionConfig` with the session type and the session parameters. An `IllegalArgumentException` or `IllegalStateException` from the bind, or a session without preview frames in 4 s, gives `FALLBACK`: bind again in NORMAL mode without vendor settings. The log line has `sessionType=0x9005|NORMAL` and the state.
+- CameraX 1.6.2 -> 1.7.0-alpha03 for all camera artifacts. It deprecates `Camera2Interop.Extender` and `Camera2CameraInfo` (warnings only, still used).
+- New unit tests (`InSensorZoomLogicTest`): plan with Android support, vendor parameters, session type, bind fallback. 87 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Device test on `7fad170e` (20:40-20:43, the phone on the stand at about 28 cm, the same scene; flag on 1x, 2x, 4x, then off 1x, 2x, 4x, back to back; rotation locked to 0 for the six snapshots):
+
+| Flag | Zoom | Operation mode | `EnableInsensorZoom` | `InSensorZoomState` | `rawCropRegion` | `sensorModeMask` / `sensorModeCache[0]` |
+|---|---|---|---|---|---|---|
+| on | 1x | CUSTOM (36869) | 1 | (no frame block in this dump) | - | - |
+| on | 2x | CUSTOM (36869) | 1 | **2** | **1028 776 2024 1508** (half field) | **48 / 7** |
+| on | 4x | CUSTOM (36869) | 1 | 2 | 1028 776 2024 1508 (still the half field) | 48 / 7 |
+| off | 1x / 2x / 4x | NORMAL (0) | 0 | 0 | not reported | 0 / 2 |
+| Xiaomi app (research) | 2x | CUSTOM (36869) | 1 | 2 | 1028 776 2024 1508 | 48 / 7 |
+| Xiaomi app (research) | 4x | CUSTOM (36869), session restarted | 1 | 2 | 1530 1152 1020 756 (quarter) | 96 / 22 |
+
+- At 2x our state is the same as the Xiaomi app's 2x. At 4x we stay in the 2x sensor mode (half-field raw crop, then a digital 2x). The Xiaomi app restarted its session to get the quarter mode.
+- Streams in the vendor mode: preview 1600 x 1200 with format `0x22` (PRIVATE; NORMAL: `0x7fa30c06`), JPEG 4080 x 3060. The HAL accepted the JPEG `ImageCapture`, so no YUV path was needed. `cropRegion` stays `0 0 4080 3060`.
+- The preview works (screenshot at 2x: normal image, label `zoom 2.00x · torch off · ≈ 28 cm`). Focus data flows (`focused`, 3.56 diopters). Snapshots take 0.7-1.2 s. No fallback, no camera error, no crash. The same PID for the whole run.
+
+Sharpness, 800 x 800 centre crop (Laplacian variance / mean squared gradient):
+
+| Zoom | Off (NORMAL) | On (0x9005) |
+|---|---|---|
+| 1x | 575.9 / 268.8 | 807.5 / 348.8 |
+| 2x | 77.9 / 140.0 | 220.9 / 152.2 |
+| 4x | 11.0 / 54.2 | 14.7 / 45.4 |
+
+- The vendor mode also changes the processing: at 1x (no in-sensor crop) the Laplacian variance is 1.4x higher. At 2x it is 2.8x higher, so about 2x comes from the sensor crop.
+- Visual check (Read tool, native pixels, 2x nearest-neighbour): at 2x the mounting-hole label has thinner and crisper strokes, and the ring and pad edges are sharper, with the flag on. At 4x both images are soft and about equal.
+- Compared with the Xiaomi photos (research): the Xiaomi 2x against a crop zoom from its own 1x gave Laplacian ratios of about 47x, because the Xiaomi still pipeline sharpens and denoises strongly (different scene time and framing). Our on/off ratio at 2x is 2.8x on the plain CameraX JPEG. The physical gain is the same kind (a half-field crop at full density). The rest is processing.
+
+Other observations:
+
+- Each `adb install` stopped our app. While the Xiaomi camera app ran in the background, it opened camera 0 for a few seconds and lost it again to our `am start` (camera events log, 20:28, 20:31, 20:33). I did not close it. Later the user stopped all apps.
+- A first "on" run at 20:35 failed (HTTP 000), because the user stopped our app at 20:35:57. The final runs are from 20:40-20:43.
+- Images and dumps only in my scratch directory (`.../scratchpad/v9005/`).
+
+End state: zoom 1x, torch off, flag off (`sessionType=NORMAL, state=OFF`), rotation auto, both flips false.
+
+Proposal (no contract change made):
+
+1. **Keep it opt-in for now**, but make it settable through the API instead of an intent extra: for example `POST /v1/camera {"in_sensor_zoom": true}` and `CameraStatus.in_sensor_zoom` (`off`, `on`, `unsupported`, `fallback`). Reasons not to turn it on by default yet: an alpha CameraX, two library-internal workarounds, Xiaomi-specific tags, a different processing at every zoom level, and one test session only.
+2. **Where it helps:** 2x (a real half-field crop). From 2x to 4x it gives the 2x sensor crop plus a smaller digital crop, so it is still better than NORMAL, but less at 4x. Below 2x there is no in-sensor crop.
+3. **Next step that is worth it:** the quarter-field mode at 4x. The Xiaomi app restarted the session for it. Test: rebind the vendor session while the zoom is already 4x (keep the zoom over the rebind instead of the start state), and check for `rawCropRegion` `1530 1152 1020 756` and mask 96.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

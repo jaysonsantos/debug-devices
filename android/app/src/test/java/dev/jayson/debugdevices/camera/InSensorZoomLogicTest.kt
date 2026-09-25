@@ -37,9 +37,41 @@ class InSensorZoomLogicTest {
 
     @Test
     fun `plan`() {
-        assertEquals(InSensorZoomState.OFF, InSensorZoomLogic.plan(requested = false, presence = sessionOnly))
-        assertEquals(InSensorZoomState.UNSUPPORTED, InSensorZoomLogic.plan(requested = true, presence = none))
-        assertEquals(InSensorZoomState.ON, InSensorZoomLogic.plan(requested = true, presence = sessionOnly))
+        assertEquals(InSensorZoomState.OFF, InSensorZoomLogic.plan(false, sessionOnly, sessionTypeSupported = true))
+        assertEquals(InSensorZoomState.UNSUPPORTED, InSensorZoomLogic.plan(true, none, sessionTypeSupported = true))
+        assertEquals(
+            InSensorZoomState.UNSUPPORTED,
+            InSensorZoomLogic.plan(true, sessionOnly, sessionTypeSupported = false)
+        )
+        assertEquals(InSensorZoomState.ON, InSensorZoomLogic.plan(true, sessionOnly, sessionTypeSupported = true))
+    }
+
+    @Test
+    fun `only ON sets the vendor parameters, with the photo app module`() {
+        assertEquals(
+            mapOf(key to 1, "xiaomi.app.module" to 163),
+            InSensorZoomLogic.vendorParameters(InSensorZoomState.ON)
+        )
+        InSensorZoomState.entries.filter { it != InSensorZoomState.ON }.forEach {
+            assertEquals(emptyMap<String, Int>(), InSensorZoomLogic.vendorParameters(it))
+        }
+    }
+
+    @Test
+    fun `only ON uses the vendor session type`() {
+        assertEquals(0x9005, Constants.InSensorZoom.VENDOR_SESSION_TYPE)
+        assertEquals(36869, InSensorZoomLogic.sessionType(InSensorZoomState.ON))
+        InSensorZoomState.entries.filter { it != InSensorZoomState.ON }.forEach {
+            assertEquals(null, InSensorZoomLogic.sessionType(it))
+        }
+    }
+
+    @Test
+    fun `a failed vendor bind falls back to NORMAL, other states stay`() {
+        assertEquals(InSensorZoomState.FALLBACK, InSensorZoomLogic.afterBindFailure(InSensorZoomState.ON))
+        assertEquals(InSensorZoomState.OFF, InSensorZoomLogic.afterBindFailure(InSensorZoomState.OFF))
+        assertEquals(InSensorZoomState.UNSUPPORTED, InSensorZoomLogic.afterBindFailure(InSensorZoomState.UNSUPPORTED))
+        assertEquals(null, InSensorZoomLogic.sessionType(InSensorZoomLogic.afterBindFailure(InSensorZoomState.ON)))
     }
 
     @Test

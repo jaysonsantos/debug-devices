@@ -1,17 +1,22 @@
 package dev.jayson.debugdevices.camera
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.os.Build
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.camera.camera2.impl.Camera2ImplConfig
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.camera2.interop.camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
@@ -20,7 +25,10 @@ import androidx.camera.core.ExtendableBuilder
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.SessionConfig
 import androidx.camera.core.TorchState
+import androidx.camera.core.impl.MutableOptionsBundle
+import androidx.camera.core.impl.UseCaseConfig
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.concurrent.futures.await
@@ -62,7 +70,7 @@ class CameraController(
         private set
 
     /** Built again on each bind, because the in-sensor zoom parameter is set on the use case builders. */
-    private var imageCapture = buildImageCapture(vendorKey = null)
+    private var imageCapture = buildImageCapture(vendorParams = emptyList())
 
     /** The rotation that the overlay shows: the snapshot rotation. */
     val effectiveRotation: Int
@@ -110,29 +118,41 @@ class CameraController(
         withContext(Dispatchers.Main) {
             val provider = ProcessCameraProvider.getInstance(context).await()
             val vendorKey = findVendorKey(provider)
-            var state = InSensorZoomLogic.plan(inSensorZoom, vendorKey.presence)
-            var bound =
+            val sessionTypeSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+            var state = InSensorZoomLogic.plan(inSensorZoom, vendorKey.presence, sessionTypeSupported)
+            var bound = try {
                 bindUseCases(
                     provider,
                     owner,
                     previewView,
-                    vendorKey.key.takeIf {
-                        InSensorZoomLogic.setsVendorParameter(state)
-                    }
+                    vendorKey.params(InSensorZoomLogic.vendorParameters(state)),
+                    InSensorZoomLogic.sessionType(state)
                 )
+            } catch (cause: IllegalArgumentException) {
+                state = InSensorZoomLogic.afterBindFailure(state)
+                Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_BIND_FAILED, cause)
+                bindUseCases(provider, owner, previewView, vendorParams = emptyList(), sessionType = null)
+            } catch (cause: IllegalStateException) {
+                state = InSensorZoomLogic.afterBindFailure(state)
+                Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_BIND_FAILED, cause)
+                bindUseCases(provider, owner, previewView, vendorParams = emptyList(), sessionType = null)
+            }
             if (state == InSensorZoomState.ON) {
                 val stable = InSensorZoomLogic.isStable(watchSession(owner, bound, previewView))
                 state = InSensorZoomLogic.afterSessionCheck(state, stable)
                 if (state == InSensorZoomState.FALLBACK) {
                     Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_FALLBACK)
-                    bound = bindUseCases(provider, owner, previewView, vendorKey = null)
+                    bound = bindUseCases(provider, owner, previewView, vendorParams = emptyList(), sessionType = null)
                 }
             }
             inSensorZoomState = state
             Log.i(
                 Constants.Log.TAG,
                 "In-sensor zoom: requested=$inSensorZoom, sessionKey=${vendorKey.presence.inSessionKeys}, " +
-                    "requestKey=${vendorKey.presence.inRequestKeys}, state=$state"
+                    "requestKey=${vendorKey.presence.inRequestKeys}, sessionType=" +
+                    "${InSensorZoomLogic.sessionType(state)?.let {
+                        "0x" + it.toString(HEX_RADIX)
+                    } ?: "NORMAL"}, state=$state"
             )
             bound
         }
@@ -141,20 +161,71 @@ class CameraController(
         provider: ProcessCameraProvider,
         owner: LifecycleOwner,
         previewView: PreviewView,
-        vendorKey: CaptureRequest.Key<IntArray>?
+        vendorParams: List<VendorParam>,
+        sessionType: Int?
     ): Camera {
         val previewBuilder = Preview.Builder()
-        vendorKey?.let { setVendorParameter(previewBuilder, it) }
+        vendorParams.forEach { setVendorParameter(previewBuilder, it) }
         setFocusCallback(previewBuilder)
+        if (vendorParams.isNotEmpty() && sessionType != null) setPreviewSessionType(previewBuilder, sessionType)
         focusSample = null
         val preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-        imageCapture = buildImageCapture(vendorKey)
+        imageCapture = buildImageCapture(vendorParams)
         provider.unbindAll()
-        return provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture).also {
+        val selector = CameraSelector.DEFAULT_BACK_CAMERA
+        val bound = if (vendorParams.isNotEmpty() && sessionType != null &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        ) {
+            // The session type is a session-level option, so it needs a SessionConfig, not loose use cases.
+            val sessionConfig = SessionConfig.Builder(preview, imageCapture)
+                .camera2Interop {
+                    setSessionType(sessionType)
+                    vendorParams.forEach { setSessionParameter(it.key, intArrayOf(it.value)) }
+                }
+                .also { forceSessionType(it, sessionType) }
+                .build()
+            provider.bindToLifecycle(owner, selector, sessionConfig)
+        } else {
+            provider.bindToLifecycle(owner, selector, preview, imageCapture)
+        }
+        return bound.also {
             this.owner = owner
             camera = it
             readStaticOptics(it)
         }
+    }
+
+    /**
+     * Second part of the CameraX 1.7.0-alpha03 workaround: `SupportedSurfaceCombination` gives every stream spec
+     * `SESSION_TYPE_REGULAR`, so a custom type from the SessionConfig is lost. `UseCaseCameraConfig` reads
+     * `Camera2ImplConfig.SESSION_TYPE_OPTION` from the session implementation options first, and the option
+     * unpacker copies the implementation options of the use case's default session config. So the Preview gets
+     * its own default session config (the same template as the CameraX default) with the session type.
+     */
+    @SuppressLint("RestrictedApi")
+    private fun setPreviewSessionType(builder: Preview.Builder, sessionType: Int) {
+        val options = MutableOptionsBundle.create().apply {
+            insertOption(Camera2ImplConfig.SESSION_TYPE_OPTION, sessionType)
+        }
+        val defaultSession = androidx.camera.core.impl.SessionConfig.Builder()
+            .apply {
+                setTemplateType(CameraDevice.TEMPLATE_PREVIEW)
+                addImplementationOptions(options)
+            }
+            .build()
+        builder.mutableConfig.insertOption(UseCaseConfig.OPTION_DEFAULT_SESSION_CONFIG, defaultSession)
+    }
+
+    /**
+     * Workaround for CameraX 1.7.0-alpha03: `SessionConfigCamera2Interop.setSessionType` writes
+     * `camera2.cameraCaptureSession.sessionType`, but `SessionConfig.Builder.build()` reads
+     * `camerax.core.useCase.sessionType`, and the session option unpacker does not copy the Camera2 key. This fix
+     * alone did not change the mode on 7fad170e (still NORMAL); [setPreviewSessionType] did. Not tested alone
+     * without this one. Library-internal API: experiment only.
+     */
+    @SuppressLint("RestrictedApi")
+    private fun forceSessionType(builder: SessionConfig.Builder, sessionType: Int) {
+        builder.interopMutableConfig.insertOption(UseCaseConfig.OPTION_SESSION_TYPE, sessionType)
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -188,21 +259,32 @@ class CameraController(
         return optics.copy(outputWidthPx = FocusLogic.outputWidthPx(resolution.width, resolution.height))
     }
 
-    private fun buildImageCapture(vendorKey: CaptureRequest.Key<IntArray>?): ImageCapture {
+    private fun buildImageCapture(vendorParams: List<VendorParam>): ImageCapture {
         val builder = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-        vendorKey?.let { setVendorParameter(builder, it) }
+        vendorParams.forEach { setVendorParameter(builder, it) }
         return builder.build().also { it.targetRotation = rotation.effectiveRotation }
     }
 
     /** CameraX passes a request option that is in the session keys to the session parameters too. */
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun <T> setVendorParameter(builder: ExtendableBuilder<T>, key: CaptureRequest.Key<IntArray>) {
-        Camera2Interop.Extender(builder).setCaptureRequestOption(key, intArrayOf(Constants.InSensorZoom.ENABLED_VALUE))
+    private fun <T> setVendorParameter(builder: ExtendableBuilder<T>, param: VendorParam) {
+        Camera2Interop.Extender(builder).setCaptureRequestOption(param.key, intArrayOf(param.value))
     }
 
-    private class VendorKey(val presence: VendorKeyPresence, val key: CaptureRequest.Key<IntArray>?)
+    /** A vendor int32 key (the framework gives it the type int[]) and its value. */
+    private class VendorParam(val key: CaptureRequest.Key<IntArray>, val value: Int)
+
+    /** The in-sensor zoom key presence, and every vendor int32 key of the camera by name. */
+    private class VendorKey(
+        val presence: VendorKeyPresence,
+        val keysByName: Map<String, CaptureRequest.Key<IntArray>>
+    ) {
+        /** The parameters whose key the camera publishes. A missing key is skipped. */
+        fun params(values: Map<String, Int>): List<VendorParam> =
+            values.mapNotNull { (name, value) -> keysByName[name]?.let { VendorParam(it, value) } }
+    }
 
     /** Finds the vendor key in the session and request key lists of the back camera. Never throws. */
     @OptIn(ExperimentalCamera2Interop::class)
@@ -217,13 +299,15 @@ class CameraController(
 
         // The framework gives vendor keys an array type: int32 becomes int[]. A plain Int fails in
         // CameraMetadataNative with "Not an array" (seen on 7fad170e), and CameraX only logs it.
+        val names = InSensorZoomLogic.vendorParameters(InSensorZoomState.ON).keys
+
         @Suppress("UNCHECKED_CAST")
-        val key = (sessionKeys + requestKeys).firstOrNull { it.name == Constants.InSensorZoom.VENDOR_KEY }
-            as CaptureRequest.Key<IntArray>?
-        VendorKey(presence, key)
+        val keys = (sessionKeys + requestKeys).filter { it.name in names }
+            .associate { it.name to it as CaptureRequest.Key<IntArray> }
+        VendorKey(presence, keys)
     } catch (cause: Exception) {
         Log.w(Constants.Log.TAG, cause)
-        VendorKey(VendorKeyPresence(inSessionKeys = false, inRequestKeys = false), key = null)
+        VendorKey(VendorKeyPresence(inSessionKeys = false, inRequestKeys = false), keysByName = emptyMap())
     }
 
     /** Collects preview and camera error signals of a new session for the check window. */
@@ -380,3 +464,5 @@ class CameraController(
         }
     }
 }
+
+private const val HEX_RADIX = 16
