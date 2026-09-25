@@ -53,6 +53,7 @@ class phone:
     PATH_ZOOM = "/v1/zoom"
     PATH_TORCH = "/v1/torch"
     PATH_ROTATION = "/v1/rotation"
+    PATH_PREVIEW = "/v1/preview"
     PATH_SNAPSHOT = "/v1/snapshot"
 
 

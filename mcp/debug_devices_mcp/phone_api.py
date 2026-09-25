@@ -22,6 +22,46 @@ class Health(BaseModel):
 type RotationDegrees = Literal[0, 90, 180, 270]
 
 
+class FocusState(StrEnum):
+    FOCUSED = "focused"
+    SCANNING = "scanning"
+    UNFOCUSED = "unfocused"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> FocusState:
+        return cls.UNKNOWN
+
+
+class FocusCalibration(StrEnum):
+    """`LENS_INFO_FOCUS_DISTANCE_CALIBRATION`. With `uncalibrated`, the distance is not in real units."""
+
+    UNCALIBRATED = "uncalibrated"
+    APPROXIMATE = "approximate"
+    CALIBRATED = "calibrated"
+
+    @classmethod
+    def _missing_(cls, value: object) -> FocusCalibration:
+        return cls.UNCALIBRATED
+
+
+class Focus(BaseModel):
+    # 1/m; 0 means infinity; null before the first result or with a fixed-focus lens.
+    distance_diopters: float | None = None
+    state: FocusState = FocusState.UNKNOWN
+    calibration: FocusCalibration = FocusCalibration.UNCALIBRATED
+    # 0 means fixed focus.
+    min_distance_diopters: float = 0.0
+
+
+class Optics(BaseModel):
+    """The camera of /v1/snapshot: focal length, physical sensor width, and snapshot width before rotation."""
+
+    focal_length_mm: float
+    sensor_width_mm: float
+    output_width_px: int
+
+
 class CameraStatus(BaseModel):
     zoom_ratio: float
     min_zoom_ratio: float
@@ -30,6 +70,12 @@ class CameraStatus(BaseModel):
     has_flash_unit: bool
     rotation_degrees: RotationDegrees
     rotation_locked: bool
+    # The camera preview flips on the phone screen. An app from before POST /v1/preview does not send them.
+    preview_flip_horizontal: bool = False
+    preview_flip_vertical: bool = False
+    # Also newer than the first app: None when the app does not send them (or before the camera is bound).
+    focus: Focus | None = None
+    optics: Optics | None = None
 
 
 class ApiErrorCode(StrEnum):
@@ -72,6 +118,11 @@ class RotationAutoRequest(BaseModel):
     auto: Literal[True] = True
 
 
+class PreviewFlipRequest(BaseModel):
+    flip_horizontal: bool
+    flip_vertical: bool
+
+
 # endregion: models
 
 # region: errors
@@ -92,6 +143,10 @@ class PhoneApiError(PhoneError):
         super().__init__(f"phone API error {status} {error.error}: {error.message}")
         self.status = status
         self.error = error
+
+
+class PreviewNotSupportedError(PhoneError):
+    """The app has no POST /v1/preview (an app from before it): 404."""
 
 
 class PhoneProtocolError(PhoneError):
@@ -138,6 +193,16 @@ class PhoneClient:
     async def rotation(self, request: RotationLockRequest | RotationAutoRequest) -> CameraStatus:
         body = await self._request(HTTPMethod.POST, phone.PATH_ROTATION, request)
         return _parse(CameraStatus, phone.PATH_ROTATION, body)
+
+    async def preview(self, request: PreviewFlipRequest) -> CameraStatus:
+        """Mirror the camera preview on the phone screen. The snapshot stays in the true orientation."""
+        try:
+            body = await self._request(HTTPMethod.POST, phone.PATH_PREVIEW, request)
+        except PhoneApiError as exc:
+            if exc.status == HTTPStatus.NOT_FOUND:
+                raise PreviewNotSupportedError(f"the phone app has no {phone.PATH_PREVIEW}; update the app") from exc
+            raise
+        return _parse(CameraStatus, phone.PATH_PREVIEW, body)
 
     async def snapshot(self) -> bytes:
         return await self._request(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)

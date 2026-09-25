@@ -10,6 +10,7 @@ It keeps the camera state in memory, so the MCP server can run without a phone.
     python3 scripts/fake_phone.py --background         # the app is in the background: camera endpoints return 503
     python3 scripts/fake_phone.py --physical-rotation 90 # auto rotation follows this phone orientation
     python3 scripts/fake_phone.py --internal-error     # camera endpoints return 500 internal_error
+    python3 scripts/fake_phone.py --no-preview         # an old app without POST /v1/preview
     python3 scripts/fake_phone.py --start-delay 3      # camera endpoints return 503 for 3 s, then the start state
     python3 scripts/fake_phone.py --snapshot frame.jpg # serve this JPEG as the snapshot
     python3 scripts/fake_phone.py --self-check         # run scripts/qa_contract.py against every mode
@@ -62,6 +63,8 @@ class Route(StrEnum):
     ZOOM = "/v1/zoom"
     TORCH = "/v1/torch"
     ROTATION = "/v1/rotation"
+    PREVIEW = "/v1/preview"
+    FAKE_FOCUS = "/fake/focus"
     SNAPSHOT = "/v1/snapshot"
 
 
@@ -143,6 +146,24 @@ class CameraStatus:
     has_flash_unit: bool
     rotation_degrees: int
     rotation_locked: bool
+    preview_flip_horizontal: bool = False
+    preview_flip_vertical: bool = False
+    focus: dict | None = None
+    optics: dict | None = None
+
+
+# The body of POST /v1/preview: exactly these fields, both booleans.
+PREVIEW_FIELDS = frozenset({"flip_horizontal", "flip_vertical"})
+# An old app (from before POST /v1/preview) sends none of these status fields.
+NEWER_STATUS_FIELDS = ("preview_flip_horizontal", "preview_flip_vertical", "focus", "optics")
+# Plausible values of a phone main camera (docs/phone-api.md example): about 29 cm from the board.
+DEFAULT_FOCUS_DIOPTERS = 3.41
+MIN_FOCUS_DIOPTERS = 10.0
+FOCUS_STATE = "focused"
+FOCUS_CALIBRATION = "approximate"
+OPTICS = {"focal_length_mm": 6.07, "sensor_width_mm": 9.14, "output_width_px": 4080}
+# A test-only route (not in the contract): change the focus distance, like moving the phone.
+FAKE_FOCUS_FIELD = "distance_diopters"
 
 
 @dataclass(frozen=True)
@@ -160,6 +181,9 @@ class FakeConfig:
     # Seconds after the server start in which the camera endpoints return 503 (bind and start state).
     start_delay: float = 0.0
     snapshot: bytes = TEST_JPEG
+    # An app from before POST /v1/preview: the path is unknown (404), and the status has no preview fields.
+    no_preview: bool = False
+    focus_diopters: float = DEFAULT_FOCUS_DIOPTERS
 
 
 class ApiError(Exception):
@@ -184,6 +208,13 @@ class FakeCamera:
             has_flash_unit=config.has_flash_unit,
             rotation_degrees=config.physical_rotation,
             rotation_locked=False,
+            focus={
+                "distance_diopters": config.focus_diopters,
+                "state": FOCUS_STATE,
+                "calibration": FOCUS_CALIBRATION,
+                "min_distance_diopters": MIN_FOCUS_DIOPTERS,
+            },
+            optics=dict(OPTICS),
         )
 
     def _require_ready(self) -> None:
@@ -230,6 +261,20 @@ class FakeCamera:
         with self._lock:
             self._status.rotation_locked = degrees is not None
             self._status.rotation_degrees = self.config.physical_rotation if degrees is None else degrees
+        return self.status()
+
+    def move_to(self, diopters: float) -> CameraStatus:
+        """Test only: the phone is now at 100 / diopters cm from the board."""
+        with self._lock:
+            self._status.focus = {**(self._status.focus or {}), FAKE_FOCUS_FIELD: diopters}
+        return self.status()
+
+    def preview(self, flip_horizontal: bool, flip_vertical: bool) -> CameraStatus:
+        """Mirror the camera preview. The snapshot stays in the true orientation."""
+        self._require_ready()
+        with self._lock:
+            self._status.preview_flip_horizontal = flip_horizontal
+            self._status.preview_flip_vertical = flip_vertical
         return self.status()
 
     def snapshot(self) -> bytes:
@@ -299,11 +344,19 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(ErrorCode.BAD_REQUEST, f"Body is larger than {MAX_BODY_BYTES} bytes")
         return self.rfile.read(length)
 
+    def _send_status(self, status: CameraStatus) -> None:
+        data = asdict(status)
+        if self.camera.config.no_preview:
+            for name in NEWER_STATUS_FIELDS:
+                data.pop(name)
+        self._send_json(data)
+
     def _dispatch(self, routes: dict[str, Callable[[], None]]) -> None:
         path = self.path.split("?", 1)[0]
         route = routes.get(path)
+        known = KNOWN_PATHS - {Route.PREVIEW} if self.camera.config.no_preview else KNOWN_PATHS
         try:
-            if route is None and path in KNOWN_PATHS:
+            if route is None and path in known:
                 raise ApiError(ErrorCode.METHOD_NOT_ALLOWED, f"{self.command} is not allowed on {path}")
             if route is None:
                 raise ApiError(ErrorCode.NOT_FOUND, f"No route for {self.command} {self.path}")
@@ -315,13 +368,17 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch(
             {
                 Route.HEALTH: self.health,
-                Route.STATUS: lambda: self._send_json(asdict(self.camera.status())),
+                Route.STATUS: lambda: self._send_status(self.camera.status()),
                 Route.SNAPSHOT: self.snapshot,
             }
         )
 
     def do_POST(self) -> None:
-        self._dispatch({Route.ZOOM: self.zoom, Route.TORCH: self.torch, Route.ROTATION: self.rotation})
+        routes = {Route.ZOOM: self.zoom, Route.TORCH: self.torch, Route.ROTATION: self.rotation}
+        if not self.camera.config.no_preview:
+            routes[Route.PREVIEW] = self.preview
+        routes[Route.FAKE_FOCUS] = self.fake_focus
+        self._dispatch(routes)
 
     def do_PUT(self) -> None:
         self._dispatch({})
@@ -347,14 +404,14 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as err:
                 raise ApiError(ErrorCode.BAD_REQUEST, '"step" must be "in" or "out"') from err
             status = self.camera.zoom_step(step)
-        self._send_json(asdict(status))
+        self._send_status(status)
 
     def torch(self) -> None:
         data = parse_body(self._read_body())
         enabled = data.get("enabled")
         if not isinstance(enabled, bool):
             raise ApiError(ErrorCode.BAD_REQUEST, '"enabled" must be true or false')
-        self._send_json(asdict(self.camera.torch(enabled)))
+        self._send_status(self.camera.torch(enabled))
 
     def rotation(self) -> None:
         data = parse_body(self._read_body())
@@ -364,12 +421,27 @@ class Handler(BaseHTTPRequestHandler):
         if has_auto:
             if data["auto"] is not True:
                 raise ApiError(ErrorCode.BAD_REQUEST, '"auto" must be true')
-            self._send_json(asdict(self.camera.rotation(None)))
+            self._send_status(self.camera.rotation(None))
             return
         degrees = data["degrees"]
         if isinstance(degrees, bool) or not isinstance(degrees, int) or degrees not in ROTATIONS:
             raise ApiError(ErrorCode.BAD_REQUEST, f'"degrees" must be one of {list(ROTATIONS)}')
-        self._send_json(asdict(self.camera.rotation(degrees)))
+        self._send_status(self.camera.rotation(degrees))
+
+    def fake_focus(self) -> None:
+        data = parse_body(self._read_body())
+        diopters = data.get(FAKE_FOCUS_FIELD)
+        if not is_number(diopters) or diopters < 0:
+            raise ApiError(ErrorCode.BAD_REQUEST, f'"{FAKE_FOCUS_FIELD}" must be a number >= 0')
+        self._send_status(self.camera.move_to(float(diopters)))
+
+    def preview(self) -> None:
+        data = parse_body(self._read_body())
+        if set(data) != PREVIEW_FIELDS:
+            raise ApiError(ErrorCode.BAD_REQUEST, 'Send exactly "flip_horizontal" and "flip_vertical"')
+        if not all(isinstance(data[name], bool) for name in PREVIEW_FIELDS):
+            raise ApiError(ErrorCode.BAD_REQUEST, '"flip_horizontal" and "flip_vertical" must be true or false')
+        self._send_status(self.camera.preview(data["flip_horizontal"], data["flip_vertical"]))
 
     def snapshot(self) -> None:
         self._send(HTTPStatus.OK, ContentType.JPEG, self.camera.snapshot())
@@ -468,6 +540,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--internal-error", action="store_true", help="camera endpoints return 500 internal_error")
     parser.add_argument(
+        "--focus-diopters",
+        type=float,
+        default=DEFAULT_FOCUS_DIOPTERS,
+        help='focus distance in diopters (100 / cm); also POST /fake/focus {"distance_diopters": x}',
+    )
+    parser.add_argument(
+        "--no-preview", action="store_true", help="an old app: no POST /v1/preview (404), no preview fields"
+    )
+    parser.add_argument(
         "--start-delay",
         type=float,
         default=0.0,
@@ -498,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
         ready=not args.not_ready,
         capture_fails=args.capture_fails,
         internal_error=args.internal_error,
+        no_preview=args.no_preview,
+        focus_diopters=args.focus_diopters,
         background=args.background,
         physical_rotation=args.physical_rotation,
         start_delay=args.start_delay,

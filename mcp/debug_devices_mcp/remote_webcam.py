@@ -51,6 +51,7 @@ class RemoteMonitor:
         host: str = defaults.HOST,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        self.port = port
         self.base_url = f"{http.SCHEME}://{host}:{port}"
         self._http = httpx.AsyncClient(base_url=self.base_url, timeout=timeout.total_seconds(), transport=transport)
 

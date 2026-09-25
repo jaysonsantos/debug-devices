@@ -187,6 +187,8 @@ async def test_bench_start_runs_every_step_and_bench_stop_frees_everything(lazy:
         assert steps["webcam"]["status"] == "ok"
         assert steps["webcam"]["detail"] == "/dev/video0 64x48"
         assert steps["phone"]["status"] == "ok"
+        # This fake phone sends no focus data: the report is there, with advice "unknown".
+        assert started["focus"]["advice"] == "unknown"
         # A failing step does not stop the others; its error is in the result.
         assert steps["board"]["status"] == "error"
         assert lazy.opener.urls == []

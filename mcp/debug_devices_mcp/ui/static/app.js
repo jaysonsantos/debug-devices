@@ -44,10 +44,14 @@ const SNAPSHOT_ZOOM_STEP = 1.25;
 const SNAPSHOT_ZOOM_MIN = 1;
 const SNAPSHOT_ZOOM_MAX = 8;
 const SNAPSHOT_ZOOM_RESET_KEY = "0";
-// The snapshot flips: the server applies them to the snapshot. The page only flips the live view with CSS.
+// Phone camera zoom from the full-screen live view (phone_zoom, not a digital zoom of the video).
+const LIVE_ZOOM_INTERVAL_MS = 150;
+const LIVE_ZOOM_HIGHLIGHT_MS = 1200;
+const LIVE_ZOOM_KEYS = { ArrowUp: "in", ArrowRight: "in", ArrowDown: "out", ArrowLeft: "out" };
+const LIVE_ZOOM_DECIMALS = 1;
+// The snapshot flips: the server applies them to the snapshot, and the phone to its camera preview.
 const FLIP_KEYS = { h: "horizontal", v: "vertical" };
 const FLIP_FIELDS = { horizontal: "flip_horizontal", vertical: "flip_vertical" };
-const MIRRORED = -1;
 const ZOOM_LABEL_DECIMALS = 2;
 const FULL_TURN = 360;
 const QUARTER_TURN = 90;
@@ -288,12 +292,14 @@ function applyPhone(phone) {
     torch.disabled = !status.has_flash_unit;
     $("phone-rotation").textContent =
       `${status.rotation_degrees}° (${status.rotation_locked ? "locked" : "follows the phone"})`;
+    $("phone-preview-flip").textContent = previewFlipText(status);
     const snapshotRotation = $("snapshot-rotation");
     if (document.activeElement !== snapshotRotation) {
       snapshotRotation.value = status.rotation_locked ? String(status.rotation_degrees) : ROTATION_AUTO;
     }
     snapshotRotation.disabled = false;
   }
+  showFocus(phone.focus);
   showViewRotation();
   const orientationKey = applyOrientation(phone.orientation);
   const newOrientation = orientationKey !== state.orientationKey;
@@ -566,7 +572,8 @@ function renderCall(call) {
   }
   const q = (selector) => row.querySelector(selector);
   q(".time").textContent = formatTime(call.started_at);
-  q(".source").textContent = call.source;
+  // A call of another MCP server shows who made it, for example "mcp · codex 1824788".
+  q(".source").textContent = call.origin ? `${call.source} · ${call.origin}` : call.source;
   q(".source").className = `source badge ${call.source}`;
   q(".tool").textContent = call.tool;
   q(".args").textContent = formatArgs(call.arguments);
@@ -659,6 +666,7 @@ function setupFullscreen() {
   });
   setupSnapshotZoom();
   setupFlips();
+  setupLiveZoom();
   const controls = document.querySelector("#phone-view .fs-controls");
   for (const button of controls.querySelectorAll("[data-zoom]")) {
     button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
@@ -670,18 +678,57 @@ function setupFullscreen() {
 
 // endregion: full screen
 
+// region: phone distance
+
+const FOCUS_ADVICE_SHOWN = new Set(["far", "too_close"]);
+const APPROXIMATE = "approximate";
+
+// For example "≈ 29 cm · ~9 px/mm · focused". The server computes the values; the page only formats them.
+function focusText(focus) {
+  if (!focus) return "–";
+  const parts = [];
+  if (focus.distance_cm !== null) {
+    parts.push(`${focus.calibration === APPROXIMATE ? "≈ " : ""}${focus.distance_cm} cm`);
+  }
+  if (focus.detail_px_per_mm !== null) parts.push(`~${Math.round(focus.detail_px_per_mm)} px/mm`);
+  if (focus.focus_state) parts.push(focus.focus_state);
+  return parts.length ? parts.join(" · ") : focus.advice_text;
+}
+
+function showFocus(focus) {
+  const text = focusText(focus);
+  const adviceClass = focus ? `advice-${focus.advice}` : "";
+  for (const id of ["phone-focus", "live-focus"]) {
+    const element = $(id);
+    element.textContent = text;
+    element.className = `${element.className.replace(/\s*advice-\S+/g, "")} ${adviceClass}`.trim();
+  }
+  const advice = $("phone-focus-advice");
+  const shown = Boolean(focus && FOCUS_ADVICE_SHOWN.has(focus.advice));
+  advice.hidden = !shown;
+  advice.textContent = shown ? focus.advice_text : "";
+  advice.className = `hint focus-advice ${adviceClass}`.trim();
+  $("live-focus").title = shown ? focus.advice_text : "Distance to the board and detail (estimate)";
+}
+
+// endregion: phone distance
+
 // region: snapshot flips
 
-// Show the flips on the buttons, and flip the live phone view the same way. Return a key of the flips.
+// Show the flips on the buttons. Return a key of the flips. The live phone view gets no CSS flip: the phone
+// mirrors its camera preview itself (POST /v1/preview), so its status text stays readable.
 function applyOrientation(orientation) {
   const flips = orientation ?? { flip_horizontal: false, flip_vertical: false };
   for (const button of document.querySelectorAll("[data-flip]")) {
     button.setAttribute("aria-pressed", String(Boolean(flips[FLIP_FIELDS[button.dataset.flip]])));
   }
-  const scaleX = flips.flip_horizontal ? MIRRORED : 1;
-  const scaleY = flips.flip_vertical ? MIRRORED : 1;
-  $("phone-screen").style.transform = scaleX === 1 && scaleY === 1 ? "" : `scale(${scaleX}, ${scaleY})`;
   return `${flips.flip_horizontal}/${flips.flip_vertical}`;
+}
+
+function previewFlipText(status) {
+  const flips = [status.preview_flip_horizontal && "horizontally", status.preview_flip_vertical && "vertically"];
+  const on = flips.filter(Boolean);
+  return on.length ? `flipped ${on.join(" and ")}` : "not flipped";
 }
 
 function toggleFlip(direction) {
@@ -705,6 +752,64 @@ function setupFlips() {
 }
 
 // endregion: snapshot flips
+
+// region: live zoom
+
+const liveZoom = { busy: false, last: 0, highlight: null };
+
+function liveZoomActive() {
+  return document.fullscreenElement === $("phone-view");
+}
+
+function showLiveZoom(status, changed) {
+  const label = $("live-zoom");
+  if (!status) return;
+  label.textContent = `${status.zoom_ratio.toFixed(LIVE_ZOOM_DECIMALS)}x`;
+  if (!changed) return;
+  label.classList.add("changed");
+  clearTimeout(liveZoom.highlight);
+  liveZoom.highlight = setTimeout(() => label.classList.remove("changed"), LIVE_ZOOM_HIGHLIGHT_MS);
+}
+
+// One zoom step at most per interval, and none while a request runs: a fast scroll drops its extra events.
+async function liveZoomStep(step) {
+  const now = performance.now();
+  if (liveZoom.busy || now - liveZoom.last < LIVE_ZOOM_INTERVAL_MS) return;
+  liveZoom.busy = true;
+  liveZoom.last = now;
+  try {
+    const phone = await api("POST", API.phoneZoom, { step });
+    applyPhone(phone);
+    showLiveZoom(phone.status, true);
+  } catch (error) {
+    $("live-zoom").textContent = error.message;
+  } finally {
+    liveZoom.busy = false;
+  }
+}
+
+function setupLiveZoom() {
+  $("phone-view").addEventListener(
+    "wheel",
+    (event) => {
+      if (!liveZoomActive()) return;
+      event.preventDefault();
+      liveZoomStep(event.deltaY < 0 ? "in" : "out");
+    },
+    { passive: false },
+  );
+  document.addEventListener("keydown", (event) => {
+    const step = LIVE_ZOOM_KEYS[event.key];
+    if (!step || !liveZoomActive() || event.target.closest?.(FORM_FIELDS)) return;
+    event.preventDefault();
+    liveZoomStep(step);
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (liveZoomActive()) showLiveZoom(state.phone?.status, false);
+  });
+}
+
+// endregion: live zoom
 
 // region: snapshot zoom
 

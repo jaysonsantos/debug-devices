@@ -1,8 +1,12 @@
 package dev.jayson.debugdevices.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -40,7 +44,11 @@ import kotlinx.coroutines.withContext
  * CameraX back camera behind [CameraPort]. Every CameraX call runs on the main thread.
  * Zoom, torch, and the start state go through one [ControlGate].
  */
-class CameraController(private val context: Context, onRotationChanged: (Int) -> Unit) : CameraPort {
+class CameraController(
+    private val context: Context,
+    onRotationChanged: (Int) -> Unit,
+    private val onPreviewFlipChanged: (PreviewFlip) -> Unit
+) : CameraPort {
     private val gate = ControlGate()
 
     /** Touch it on the main thread only. Declared before [imageCapture], which reads it when it is built. */
@@ -48,6 +56,10 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
         imageCapture.targetRotation = next
         onRotationChanged(next)
     }
+
+    /** The one place of the preview flip state. Main thread only. */
+    var previewFlip = PreviewFlip.NONE
+        private set
 
     /** Built again on each bind, because the in-sensor zoom parameter is set on the use case builders. */
     private var imageCapture = buildImageCapture(vendorKey = null)
@@ -57,6 +69,33 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
         get() = rotation.effectiveRotation
     private val captureLock = Mutex()
     private var camera: Camera? = null
+
+    /** Latest preview result values. Written on the camera thread, read on the main thread. */
+    @Volatile
+    private var focusSample: FocusSample? = null
+
+    /** Static data of the bound camera. Main thread only. Null before the first bind. */
+    private var focusStatic: FocusStatic? = null
+    private var lensOptics: Optics? = null
+
+    /** One instance for all sessions. It allocates a new sample only when a value changes, and never logs. */
+    private val focusCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
+            val distance = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+            val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+            val current = focusSample
+            if (current == null || current.distanceDiopters != distance || current.afState != afState) {
+                focusSample = FocusSample(distance, afState)
+            }
+        }
+    }
+
+    /** The focus for the phone label. Main thread only. */
+    fun focusInfo(): FocusInfo? = FocusLogic.info(focusStatic, focusSample)
     private var owner: LifecycleOwner? = null
 
     /** The in-sensor zoom state of the last bind. Main thread only. */
@@ -106,13 +145,47 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
     ): Camera {
         val previewBuilder = Preview.Builder()
         vendorKey?.let { setVendorParameter(previewBuilder, it) }
+        setFocusCallback(previewBuilder)
+        focusSample = null
         val preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
         imageCapture = buildImageCapture(vendorKey)
         provider.unbindAll()
         return provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture).also {
             this.owner = owner
             camera = it
+            readStaticOptics(it)
         }
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun setFocusCallback(builder: Preview.Builder) {
+        Camera2Interop.Extender(builder).setSessionCaptureCallback(focusCallback)
+    }
+
+    /** Reads the focus calibration, the minimum focus distance, the focal length, and the sensor width. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun readStaticOptics(bound: Camera) {
+        val info = Camera2CameraInfo.from(bound.cameraInfo)
+        focusStatic = FocusStatic(
+            calibration = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION),
+            minDistanceDiopters = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+        )
+        lensOptics = Optics(
+            focalLengthMm = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                ?.firstOrNull() ?: Constants.Focus.UNKNOWN_MM,
+            sensorWidthMm = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width
+                ?: Constants.Focus.UNKNOWN_MM,
+            outputWidthPx = Constants.Focus.UNKNOWN_PX
+        )
+    }
+
+    /** The optics with the snapshot width, which ImageCapture knows after the bind. */
+    private fun readOptics(): Optics {
+        val optics = lensOptics
+            ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
+        val resolution = imageCapture.resolutionInfo?.resolution
+            ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
+        return optics.copy(outputWidthPx = FocusLogic.outputWidthPx(resolution.width, resolution.height))
     }
 
     private fun buildImageCapture(vendorKey: CaptureRequest.Key<IntArray>?): ImageCapture {
@@ -222,6 +295,17 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
         }
     }
 
+    override suspend fun setPreviewFlip(flip: PreviewFlip): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            val camera = activeCamera()
+            if (flip != previewFlip) {
+                previewFlip = flip
+                onPreviewFlipChanged(flip)
+            }
+            readStatus(camera)
+        }
+    }
+
     override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
@@ -279,7 +363,11 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
             torchEnabled = info.torchState.value == TorchState.ON,
             hasFlashUnit = info.hasFlashUnit(),
             rotationDegrees = rotation.effectiveDegrees,
-            rotationLocked = rotation.isLocked
+            rotationLocked = rotation.isLocked,
+            previewFlipHorizontal = previewFlip.horizontal,
+            previewFlipVertical = previewFlip.vertical,
+            focus = focusInfo(),
+            optics = readOptics()
         )
     }
 

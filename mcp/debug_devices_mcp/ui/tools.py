@@ -6,6 +6,7 @@ from enum import StrEnum
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
+from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.ui.constants import defaults, tools
 from debug_devices_mcp.ui.events import truncate
 from debug_devices_mcp.ui.monitor import Monitor
@@ -35,6 +36,8 @@ class BenchResult(BaseModel):
     url: str | None
     opened_browser: bool
     steps: list[BenchStep]
+    # After the phone step: how far the phone is from the board, and the advice (move closer, move back).
+    focus: FocusReport | None = None
 
 
 class StepName(StrEnum):
@@ -120,7 +123,9 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
                 lambda: nested_tool(monitor, tools.BOARD_OPEN, {"path": board_path}),
             ),
         ]
-        return BenchResult(url=monitor.url, opened_browser=bool(opened), steps=steps)
+        status = monitor.bus.phone.status
+        focus = focus_report(status) if phone and status is not None else None
+        return BenchResult(url=monitor.page_url, opened_browser=bool(opened), steps=steps, focus=focus)
 
     @server.tool()
     async def bench_stop() -> BenchResult:
@@ -130,7 +135,7 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
         adb forward of the phone camera, and stops the monitor page. The tool log stays in memory. Call
         bench_start or any tool to start again.
         """
-        url = monitor.url
+        url = monitor.page_url
 
         async def stop_page() -> str:
             monitor.stop_page_soon()
@@ -147,6 +152,7 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
         steps = [
             await run_step(StepName.WEBCAM, True, stop_webcam),
             await run_step(StepName.PHONE, True, stop_phone),
-            await run_step(StepName.PAGE, url is not None, stop_page),
+            # Only this server's own page: the page of a primary stays for the other servers.
+            await run_step(StepName.PAGE, monitor.url is not None, stop_page),
         ]
         return BenchResult(url=url, opened_browser=False, steps=steps)

@@ -105,6 +105,91 @@ Stability: the session with the flag on streamed and gave snapshots (about 0.84 
 
 Decision: **keep the code, off by default. Do not propose a contract change.** It has no effect when off, and the key type fix is useful for any later vendor key. Next test that is still possible (not done): the HAL can start in-sensor zoom only on `SCALER_CROP_REGION` zoom, or with the Xiaomi feature tag `com.xiaomi.camera.supportedfeatures.insensorzoom`. CameraX always uses `CONTROL_ZOOM_RATIO` on this phone, so that test needs a Camera2 request option for the crop region. If nobody plans that test, remove the code.
 
+#### Rerun at the closer position
+
+Run on 2026-09-25 at 19:44, the same way (flag on, then off, back to back; zoom 1x, 2x, 4x; `dumpsys` and a snapshot 2.5 s after each zoom change). No new build: the APK from 12:45. The app had zoom 5.6 from another client before the run.
+
+- Position: the phone lies almost flat and looks down at the board (accelerometer `2.59, 0.20, 9.45`). The whole laptop board and much of the table are in the frame.
+- **Distance: about 25-30 cm, not 10-12 cm.** Evidence: `android.lens.focusDistance` = 3.41 diopters, that is 29 cm (the calibration is "APPROXIMATE"). The board fills about half of the frame width (at 29 cm, the field is about 430 mm wide). The mounting-hole rings are about 60 px wide in the 4080 px image: about 11 px/mm, between the research values for 20 cm (14 px/mm) and 30 cm (9 px/mm).
+- **Focus at 1x: sharp.** `afState` = `PASSIVE_FOCUSED`. In the 1x center crop, the board silkscreen text and the mounting-hole labels are easy to read.
+
+| Flag | Zoom | `EnableInsensorZoom` | `cropRegion` | `InSensorZoomState` | `SensorSwitched` | `xiaomi.superResolution.inSensorZoomState` |
+|---|---|---|---|---|---|---|
+| on | 1x / 2x / 4x | 1 | 0 0 4080 3060 | 0 | 0 | 0 |
+| off | 1x / 2x / 4x | 0 | 0 0 4080 3060 | 0 | 0 | 0 |
+
+Sharpness, the same 800 x 800 center crop (variance of the Laplacian / mean squared gradient):
+
+| Zoom | Off | On |
+|---|---|---|
+| 1x | 771.2 / 315.7 | 872.4 / 335.7 |
+| 2x | 56.2 / 106.2 | 52.0 / 100.4 |
+| 4x | 4.6 / 20.1 | 5.2 / 22.7 |
+
+- The differences are again small and go both ways (on is higher at 1x and 4x, lower at 2x). At 1x the flag cannot change anything, so the 13% there shows the noise level of this measure.
+- The 4x crops side by side look the same: the same mounting-hole label is readable in both, and the part edges have the same softness.
+- 0 camera errors, 0 `CXCP` set failures, 0 crashes.
+- End state: zoom 1x, torch off, flag off (`state=OFF`). No build, so no Gradle daemon. Images and dumps only in my scratch directory (`.../scratchpad/isz2/`). The full frame also shows part of a person at the edge, so these images must stay local.
+
+**Result: the same as the first run.** The HAL gets `EnableInsensorZoom = 1` but never switches, so there is no detail gain at 2x or 4x. The decision stays: keep the code off by default, no contract change. To get more detail, move the phone to 10-12 cm (the research advice). The phone is not at that distance now.
+
+
+### Round: preview flip on the phone screen
+
+Contract: `POST /v1/preview {"flip_horizontal", "flip_vertical"}` and `CameraStatus.preview_flip_horizontal` / `preview_flip_vertical` (changed by the orchestrator).
+
+Code:
+
+- `PreviewFlip.kt`: `PreviewFlip` (the state, `NONE` after an app start) and the pure `PreviewFlipLogic`. `scale(flip, rotation)` gives the `PreviewView` scale factors. The flips are in the viewer's upright frame, like the snapshot. The activity stays in portrait, so when the phone is sideways (rotation 90/270) the axes swap: flip H mirrors the screen Y axis.
+- `PreviewRequest`: both fields required, `StrictBooleanSerializer`. `ApiJson` refuses unknown fields. So a missing field, another type, `null`, an unknown field, or broken JSON gives 400 `bad_request`.
+- `CameraController` holds the state (one place, main thread) and reports it in `CameraStatus`. `setPreviewFlip` goes through `ControlGate` (503 before the start state and in the background).
+- `MainActivity`: `applyPreviewFlip` sets `scaleX` / `scaleY` on the `PreviewView` only. The label is in the sibling overlay, so it is never mirrored. It runs on a flip change and on a rotation change. The label shows ` · flip H` and ` · flip V`.
+- **Bug found on the phone and fixed:** the first build set the scale, and the label showed `flip H`, but the preview did not change. `PreviewView` uses a `SurfaceView` by default (PERFORMANCE mode), and a `SurfaceView` ignores the view scale. Fix: `previewView.implementationMode = COMPATIBLE` (a `TextureView`).
+- `/v1/snapshot` is not changed: `ImageCapture` does not see the view scale.
+- New unit tests: `PreviewFlipLogicTest` (4) and `ApiServerTest` +3 (set and read both fields while the snapshot bytes stay the same, 9 bad bodies, 503 before the start state and 405 on GET). 77 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Check on `7fad170e` (APK installed at about 19:50, phone flat, rotation 0):
+
+| Request | Result |
+|---|---|
+| `GET /v1/status` after start | 200, both preview flips false |
+| `{"flip_horizontal":true,"flip_vertical":false}` | 200, `preview_flip_horizontal` true |
+| `{}`, only `flip_horizontal`, `"true"` as a string, an extra field `mirror` | 400 `bad_request` |
+| `GET /v1/preview` | 405 `method_not_allowed` |
+
+Screenshots (`adb -s 7fad170e exec-out screencap -p`, only in my scratch directory):
+
+- None / H / V / H+V: the preview is mirrored left-right, upside down, and both ways. The logo on the board reads backwards in the H image. The label is readable in each image: `zoom 1.00x · torch off · flip H · listening on 127.0.0.1:8765`, `... · flip V ...`, `... · flip H · flip V ...`.
+- Rotation locked to 90 with flip H: the label turns sideways and stays readable, and the preview is mirrored along the screen Y axis (left-right for a viewer who holds the phone sideways). Then `{"auto": true}` again.
+- Snapshots with flip H and without a flip: the same orientation.
+- Another client restarted the app during my first screenshot series (the PID changed from 32453 to 500 at 19:50:32, no crash). I did not use those images. The PID stayed 500 for the final series. No FATAL entry in the crash buffer.
+
+End state: zoom 1x, torch off, both flips false, rotation auto, in-sensor zoom off.
+
+
+### Round: live focus distance and optics
+
+Contract: `CameraStatus.focus {distance_diopters, state, calibration, min_distance_diopters}` and `CameraStatus.optics {focal_length_mm, sensor_width_mm, output_width_px}` (changed by the orchestrator).
+
+Code:
+
+- `Focus.kt`: the models (`FocusInfo`, `FocusState`, `FocusCalibration`, `Optics`) and the pure `FocusLogic`. AF state map: `FOCUSED_LOCKED`, `PASSIVE_FOCUSED` -> `focused`; `ACTIVE_SCAN`, `PASSIVE_SCAN` -> `scanning`; `NOT_FOCUSED_LOCKED`, `PASSIVE_UNFOCUSED` -> `unfocused`; other or none -> `unknown`. A missing calibration is `uncalibrated` (the safe value). `focus` is null before the bind. The distance is null before the first result and with fixed focus (minimum distance 0). The label distance in cm is null when uncalibrated, unknown, or infinity (0).
+- `CameraController`: one `CameraCaptureSession.CaptureCallback` instance on the Preview (`Camera2Interop.Extender.setSessionCaptureCallback`). It reads `LENS_FOCUS_DISTANCE` and `CONTROL_AF_STATE` and makes a new `FocusSample` (small, immutable, `@Volatile`) only when a value changes. It never logs. After each bind it reads `LENS_INFO_FOCUS_DISTANCE_CALIBRATION`, `LENS_INFO_MINIMUM_FOCUS_DISTANCE`, `LENS_INFO_AVAILABLE_FOCAL_LENGTHS[0]`, and `SENSOR_INFO_PHYSICAL_SIZE.width` (`Camera2CameraInfo`). The snapshot width comes from `ImageCapture.resolutionInfo` (the long side = the width before rotation).
+- `ApiJson` no longer has `explicitNulls = false`, so the JSON has `"focus": null` and `"distance_diopters": null` as the contract says. The request models give their optional fields a null default, so the requests decode as before (the old tests pass).
+- `MainActivity`: the label shows ` · ≈ NN cm`, and a coroutine reads it again every second while the app is visible (`repeatOnLifecycle(STARTED)`).
+- New unit tests: `FocusLogicTest` (6) and `ApiServerTest` +1 (the full JSON shape, `"focus":null`, `"distance_diopters":null`). 84 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Check on `7fad170e` (APK installed at 20:06, the phone at the same position as the in-sensor zoom rerun):
+
+- `GET /v1/status`: `focus` = `{"distance_diopters": 3.2467532, "state": "focused", "calibration": "approximate", "min_distance_diopters": 10.0}`, `optics` = `{"focal_length_mm": 6.07, "sensor_width_mm": 9.1392, "output_width_px": 4080}`.
+- Distance: 100 / 3.247 = **31 cm**. Detail: 4080 x 6.07 / (9.139 x 308) = **8.8 px/mm**. The minimum focus distance is 10 cm (10 diopters). So a move to 10-12 cm gives about 3x more detail.
+- Six reads 1.5 s apart without a change: the same values (the phone and the scene did not move).
+- Refocus: a zoom change to 3x gave one `scanning` read and then `focused` at 3.4965 (29 cm). Back to 1x: `scanning`, then `focused` at 3.3003 (30 cm). A torch on/off did not start a new focus scan.
+- Phone label (screenshot, only in my scratch directory): `zoom 1.00x · torch off · ≈ 30 cm · listening on 127.0.0.1:8765`.
+- No FATAL entry in the crash buffer, no `CXCP` errors, the same PID for the whole check.
+
+End state: zoom 1x, torch off, both flips false.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

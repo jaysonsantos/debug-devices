@@ -5,8 +5,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+// Explicit nulls: the contract writes `"focus": null` and `"distance_diopters": null`. Requests give their
+// optional fields a null default, so a missing field still decodes.
 val ApiJson = Json {
-    explicitNulls = false
     encodeDefaults = true
 }
 
@@ -21,7 +22,11 @@ data class CameraStatus(
     @SerialName("torch_enabled") val torchEnabled: Boolean,
     @SerialName("has_flash_unit") val hasFlashUnit: Boolean,
     @SerialName("rotation_degrees") val rotationDegrees: Int,
-    @SerialName("rotation_locked") val rotationLocked: Boolean
+    @SerialName("rotation_locked") val rotationLocked: Boolean,
+    @SerialName("preview_flip_horizontal") val previewFlipHorizontal: Boolean,
+    @SerialName("preview_flip_vertical") val previewFlipVertical: Boolean,
+    val focus: FocusInfo?,
+    val optics: Optics
 )
 
 @Serializable
@@ -43,6 +48,17 @@ data class ZoomRequest(
 data class RotationRequest(
     @Serializable(with = StrictIntSerializer::class) val degrees: Int? = null,
     @Serializable(with = StrictBooleanSerializer::class) val auto: Boolean? = null
+)
+
+/** Both fields are required. `ApiJson` refuses unknown fields. */
+@Serializable
+data class PreviewRequest(
+    @SerialName("flip_horizontal")
+    @Serializable(with = StrictBooleanSerializer::class)
+    val flipHorizontal: Boolean,
+    @SerialName("flip_vertical")
+    @Serializable(with = StrictBooleanSerializer::class)
+    val flipVertical: Boolean
 )
 
 @Serializable

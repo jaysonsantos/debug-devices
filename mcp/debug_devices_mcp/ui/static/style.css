@@ -234,6 +234,18 @@ form label { display: block; margin-bottom: 8px; }
 #snapshot-view:fullscreen #snapshot { transform-origin: 0 0; }
 #snapshot-view:fullscreen #snapshot.zoomed { cursor: grab; }
 #snapshot-view:fullscreen #snapshot.panning { cursor: grabbing; }
+.live-zoom {
+  align-self: center;
+  min-width: 4ch;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s;
+}
+.live-zoom.changed { color: var(--crop); }
+/* The phone distance, colored by the advice of the server. */
+.focus-text.advice-good { color: var(--ok); }
+.focus-text.advice-far, .focus-advice.advice-far { color: var(--running); }
+.focus-text.advice-too_close, .focus-advice.advice-too_close { color: var(--error); }
 .zoom-badge { display: none; }
 #snapshot-view:fullscreen .zoom-badge {
   display: block;

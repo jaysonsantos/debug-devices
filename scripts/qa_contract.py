@@ -57,6 +57,7 @@ class Route(StrEnum):
     ZOOM = "/v1/zoom"
     TORCH = "/v1/torch"
     ROTATION = "/v1/rotation"
+    PREVIEW = "/v1/preview"
     SNAPSHOT = "/v1/snapshot"
     UNKNOWN = "/v1/does-not-exist"
 
@@ -104,7 +105,16 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
     "has_flash_unit": bool,
     "rotation_degrees": int,
     "rotation_locked": bool,
+    "preview_flip_horizontal": bool,
+    "preview_flip_vertical": bool,
 }
+PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
+# Objects in CameraStatus, checked by expect_focus and expect_optics.
+CAMERA_STATUS_OBJECTS = ("focus", "optics")
+FOCUS_FIELDS = ("distance_diopters", "state", "calibration", "min_distance_diopters")
+FOCUS_STATES = ("focused", "scanning", "unfocused", "unknown")
+FOCUS_CALIBRATIONS = ("uncalibrated", "approximate", "calibrated")
+OPTICS_FIELDS = ("focal_length_mm", "sensor_width_mm", "output_width_px")
 ROTATIONS = (0, 90, 180, 270)
 QUARTER_TURN = 90
 HALF_TURN = 180
@@ -155,6 +165,8 @@ class CameraStatus:
     has_flash_unit: bool
     rotation_degrees: int
     rotation_locked: bool
+    preview_flip_horizontal: bool
+    preview_flip_vertical: bool
 
 
 class ContractError(AssertionError):
@@ -213,13 +225,43 @@ def expect_json(resp: Response) -> Any:
         raise ContractError(f"body is not JSON: {err}: {resp.body[:200]!r}") from err
 
 
+def is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def expect_focus(focus: object) -> None:
+    """`focus` is null (camera not bound yet) or an object with the four fields."""
+    if focus is None:
+        return
+    expect(isinstance(focus, dict), f"focus is not an object or null: {focus!r}")
+    assert isinstance(focus, dict)
+    expect(set(focus) == set(FOCUS_FIELDS), f"focus keys {sorted(focus)} != {sorted(FOCUS_FIELDS)}")
+    diopters = focus["distance_diopters"]
+    expect(diopters is None or (is_number(diopters) and diopters >= 0), f"focus.distance_diopters {diopters!r}")
+    expect(focus["state"] in FOCUS_STATES, f"focus.state {focus['state']!r} is not in {FOCUS_STATES}")
+    expect(focus["calibration"] in FOCUS_CALIBRATIONS, f"focus.calibration {focus['calibration']!r}")
+    minimum = focus["min_distance_diopters"]
+    expect(is_number(minimum) and minimum >= 0, f"focus.min_distance_diopters {minimum!r}")
+
+
+def expect_optics(optics: object) -> None:
+    expect(isinstance(optics, dict), f"optics is not an object: {optics!r}")
+    assert isinstance(optics, dict)
+    expect(set(optics) == set(OPTICS_FIELDS), f"optics keys {sorted(optics)} != {sorted(OPTICS_FIELDS)}")
+    for name in ("focal_length_mm", "sensor_width_mm"):
+        expect(is_number(optics[name]) and optics[name] > 0, f"optics.{name} {optics[name]!r} is not > 0")
+    width = optics["output_width_px"]
+    expect(isinstance(width, int) and not isinstance(width, bool) and width > 0, f"optics.output_width_px {width!r}")
+
+
 def expect_status(resp: Response) -> CameraStatus:
     expect(resp.status == HTTP_OK, f"HTTP {resp.status}, expected {HTTP_OK}: {resp.body[:200]!r}")
     data = expect_json(resp)
     expect(isinstance(data, dict), f"CameraStatus is not an object: {data!r}")
-    expect(
-        set(data) == set(CAMERA_STATUS_FIELDS), f"CameraStatus keys {sorted(data)} != {sorted(CAMERA_STATUS_FIELDS)}"
-    )
+    expected_keys = set(CAMERA_STATUS_FIELDS) | set(CAMERA_STATUS_OBJECTS)
+    expect(set(data) == expected_keys, f"CameraStatus keys {sorted(data)} != {sorted(expected_keys)}")
+    expect_focus(data["focus"])
+    expect_optics(data["optics"])
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -485,6 +527,7 @@ WRONG_METHODS: list[tuple[Method, Route]] = [
     (Method.GET, Route.ZOOM),
     (Method.GET, Route.TORCH),
     (Method.GET, Route.ROTATION),
+    (Method.GET, Route.PREVIEW),
     (Method.POST, Route.STATUS),
     (Method.POST, Route.HEALTH),
     (Method.POST, Route.SNAPSHOT),
@@ -508,6 +551,7 @@ def expect_start_state(status: CameraStatus, what: str) -> None:
     expect(status.torch_enabled is False, f"{what}: torch is on")
     expect_zoom(status.zoom_ratio, status.min_zoom_ratio, what)
     expect(status.rotation_locked is False, f"{what}: rotation is locked, expected auto")
+    expect(not status.preview_flip_horizontal and not status.preview_flip_vertical, f"{what}: the preview is flipped")
 
 
 def check_after_start(ctx: Context) -> None:
@@ -525,6 +569,40 @@ def check_rotation(ctx: Context) -> None:
     auto = expect_status(ctx.client.post_json(Route.ROTATION, {"auto": True}))
     expect(auto.rotation_locked is False, "auto: rotation_locked is not false")
     ctx.notes.append(f"auto gives {auto.rotation_degrees} degrees")
+
+
+BAD_PREVIEW_BODIES: list[tuple[str, bytes]] = [
+    ("empty body", b"{}"),
+    ("flip_vertical missing", b'{"flip_horizontal": true}'),
+    ("flip_horizontal missing", b'{"flip_vertical": false}'),
+    ("flip_horizontal is a string", b'{"flip_horizontal": "yes", "flip_vertical": false}'),
+    ("flip_vertical is a number", b'{"flip_horizontal": false, "flip_vertical": 1}'),
+    ("flip_horizontal is null", b'{"flip_horizontal": null, "flip_vertical": false}'),
+    ("unknown field", b'{"flip_horizontal": true, "flip_vertical": false, "rotate": 90}'),
+]
+
+
+def check_preview(ctx: Context) -> None:
+    """The preview flips follow each POST, the status shows them, and bad bodies are refused with no change."""
+    for flip_horizontal, flip_vertical in PREVIEW_FLIPS:
+        body = {"flip_horizontal": flip_horizontal, "flip_vertical": flip_vertical}
+        status = expect_status(ctx.client.post_json(Route.PREVIEW, body))
+        again = ctx.status()
+        for what, got in (("POST", status), ("GET status", again)):
+            expect(
+                (got.preview_flip_horizontal, got.preview_flip_vertical) == (flip_horizontal, flip_vertical),
+                f"preview {body}: {what} shows {got.preview_flip_horizontal}, {got.preview_flip_vertical}",
+            )
+    for name, raw in BAD_PREVIEW_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.PREVIEW, raw), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"preview {name}: {err}") from err
+    after = ctx.status()
+    expect(
+        not after.preview_flip_horizontal and not after.preview_flip_vertical,
+        "the preview flips changed after bad requests",
+    )
 
 
 def snapshot_bytes(ctx: Context) -> bytes:
@@ -716,6 +794,7 @@ READY_CHECKS: list[Check] = [
     check_torch,
     check_torch_bad_request,
     check_rotation,
+    check_preview,
     check_rotation_bad_request,
     check_post_needs_json_content_type,
     check_snapshot,

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, JsonValue
 
+from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.phone_api import CameraStatus
 from debug_devices_mcp.ui.constants import defaults
@@ -29,6 +30,10 @@ def utc_now() -> datetime:
 
 def to_ms(duration: timedelta) -> float:
     return duration.total_seconds() * MILLISECONDS_PER_SECOND
+
+
+def from_ms(milliseconds: float) -> timedelta:
+    return timedelta(milliseconds=milliseconds)
 
 
 class CallSource(StrEnum):
@@ -71,6 +76,8 @@ class ToolCallEvent(BaseModel):
     error: str | None
     details: dict[str, JsonValue]
     images: list[ImageRef]
+    # Another MCP server that sent this call to this monitor (for example "codex 1824788"). None: this server.
+    origin: str | None = None
 
 
 class PhoneState(BaseModel):
@@ -82,6 +89,8 @@ class PhoneState(BaseModel):
     snapshot_seq: int = 0
     # The flips of the phone snapshots. The page shows the buttons and turns the live view the same way.
     orientation: SnapshotOrientation = SnapshotOrientation()
+    # How far the phone is from the board and the detail it gives (from `status`, computed on the server).
+    focus: FocusReport | None = None
     # The phone screen stream in the page: off, starting, streaming, or error.
     screen: str = "off"
     screen_error: str | None = None
@@ -116,6 +125,7 @@ class ToolCall:
     error: str | None = None
     details: dict[str, JsonValue] = field(default_factory=dict)
     images: list[AttachedImage] = field(default_factory=list)
+    origin: str | None = None
 
     def attach_image(self, jpeg: bytes, label: str) -> None:
         self.images.append(AttachedImage(label=label, jpeg=jpeg))
@@ -141,6 +151,7 @@ class ToolCall:
             error=self.error,
             details=self.details,
             images=[ImageRef(index=index, label=image.label) for index, image in enumerate(self.images)],
+            origin=self.origin,
         )
 
 
@@ -180,6 +191,9 @@ class EventBus:
         self._clock = clock
         self._subscribers: set[asyncio.Queue[BusMessage]] = set()
         self.phone = PhoneState()
+        # Calls that other MCP servers sent to this monitor, with the same limits per server.
+        self._remote: dict[str, deque[ToolCall]] = {}
+        self._history_size = history_size
 
     # region: calls
 
@@ -212,12 +226,59 @@ class EventBus:
         self.publish_call(call)
 
     def calls(self) -> list[ToolCall]:
-        return list(self._calls)
+        """The calls of this server and of the other servers, oldest first."""
+        if not self._remote:
+            return list(self._calls)
+        remote = (call for calls in self._remote.values() for call in calls)
+        return sorted([*self._calls, *remote], key=lambda call: call.started_at)
 
     def find_call(self, call_id: UUID) -> ToolCall | None:
-        return next((call for call in self._calls if call.id == call_id), None)
+        return next((call for call in self.calls() if call.id == call_id), None)
 
     # endregion: calls
+
+    # region: calls of other servers
+
+    def ingest(self, event: ToolCallEvent, origin: str) -> ToolCall:
+        """Add or update a call that another MCP server sent. A late start event never undoes the end."""
+        calls = self._remote.get(origin)
+        if calls is None:
+            if len(self._remote) >= defaults.MAX_REMOTE_SERVERS:
+                del self._remote[next(iter(self._remote))]
+            calls = self._remote[origin] = deque(maxlen=self._history_size)
+        call = next((known for known in calls if known.id == event.id), None)
+        if call is None:
+            call = ToolCall(
+                tool=event.tool,
+                source=event.source,
+                arguments=event.arguments,
+                started_at=event.started_at,
+                id=event.id,
+                origin=origin,
+            )
+            calls.append(call)
+            for old in list(calls)[: -self._image_history_size]:
+                old.images.clear()
+        elif event.status is CallStatus.RUNNING and call.status is not CallStatus.RUNNING:
+            return call
+        call.status = event.status
+        call.summary = event.summary
+        call.error = event.error
+        call.details = event.details
+        if event.duration_ms is not None:
+            call.finished_at = event.started_at + from_ms(event.duration_ms)
+        self.publish_call(call)
+        return call
+
+    def attach_ingested_image(self, origin: str, call_id: UUID, label: str, data: bytes) -> bool:
+        call = next((known for known in self._remote.get(origin, ()) if known.id == call_id), None)
+        if call is None:
+            return False
+        call.attach_image(data, label)
+        self.publish_call(call)
+        return True
+
+    # endregion: calls of other servers
 
     # region: publish
 
@@ -225,6 +286,9 @@ class EventBus:
         self._publish(BusMessage(kind=EventKind.CALL, data=call.to_event()))
 
     def update_phone(self, **changes: Any) -> None:
+        status = changes.get("status")
+        if isinstance(status, CameraStatus):
+            changes["focus"] = focus_report(status)
         self.phone = self.phone.model_copy(update=changes)
         self._publish(BusMessage(kind=EventKind.PHONE, data=self.phone))
 

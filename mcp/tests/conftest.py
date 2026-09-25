@@ -66,3 +66,9 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
         app_start_timeout=timedelta(seconds=1),
         instructions_file=tmp_path / "instructions.md",
     )
+
+
+@pytest.fixture(autouse=True)
+def private_runtime_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The monitor writes its ingest token file to $XDG_RUNTIME_DIR: keep test files out of the real one."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("runtime")))

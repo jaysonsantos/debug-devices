@@ -21,6 +21,7 @@ Change this file first, then change both sides.
 | POST | `/v1/zoom` | `{"ratio": 2.5}` or `{"step": "in" \| "out"}` | `CameraStatus` |
 | POST | `/v1/torch` | `{"enabled": true}` | `CameraStatus` |
 | POST | `/v1/rotation` | `{"degrees": 0 \| 90 \| 180 \| 270}` or `{"auto": true}` | `CameraStatus` |
+| POST | `/v1/preview` | `{"flip_horizontal": true, "flip_vertical": false}` | `CameraStatus` |
 | GET | `/v1/snapshot` | none | `image/jpeg` bytes of one full still capture |
 
 `CameraStatus`:
@@ -33,7 +34,20 @@ Change this file first, then change both sides.
   "torch_enabled": false,
   "has_flash_unit": true,
   "rotation_degrees": 0,
-  "rotation_locked": false
+  "rotation_locked": false,
+  "preview_flip_horizontal": false,
+  "preview_flip_vertical": false,
+  "focus": {
+    "distance_diopters": 3.41,
+    "state": "focused",
+    "calibration": "approximate",
+    "min_distance_diopters": 10.0
+  },
+  "optics": {
+    "focal_length_mm": 6.07,
+    "sensor_width_mm": 9.14,
+    "output_width_px": 4080
+  }
 }
 ```
 
@@ -51,6 +65,9 @@ Rules:
 - After an app start, the torch is off and the zoom is at `min_zoom_ratio`.
 - `rotation_degrees` is the rotation of the next snapshot (0, 90, 180, 270). With `rotation_locked: false`, the app follows the physical orientation of the phone. When the phone lies flat (no angle), the app keeps the last value.
 - `POST /v1/rotation {"degrees": N}` locks the snapshot rotation to N. `{"auto": true}` goes back to the physical orientation. Other values, or both fields, or neither, return 400 `bad_request`. After an app start, the rotation is auto.
+- `POST /v1/preview` mirrors only the camera preview on the phone screen: `flip_horizontal` left-right, `flip_vertical` upside down. The status label and the other on-screen text stay readable (not mirrored). Both fields are required booleans; a missing field, another type, or an unknown field returns 400 `bad_request`. It does not change `/v1/snapshot`: the snapshot stays in the true orientation, and the MCP server applies its own flips to the snapshots. After an app start, both preview flips are false; the MCP server sends them again after `phone_connect` and after an app start.
+- `focus` comes from the latest preview capture result of the back camera. `distance_diopters` is `LENS_FOCUS_DISTANCE` (1/m; 0 means infinity), `null` until the first result or when the lens has fixed focus. `state` is the autofocus state: `focused`, `scanning`, `unfocused`, or `unknown`. `calibration` is `LENS_INFO_FOCUS_DISTANCE_CALIBRATION`: `uncalibrated`, `approximate`, or `calibrated` (with `uncalibrated`, the distance is not in real units: clients must not show cm). `min_distance_diopters` is `LENS_INFO_MINIMUM_FOCUS_DISTANCE` (0 = fixed focus). The `focus` object can be `null` before the camera is bound.
+- `optics` describes the camera of `/v1/snapshot`: the first focal length, the physical sensor width (`SENSOR_INFO_PHYSICAL_SIZE`), and the snapshot width in pixels before rotation. Clients compute the distance in cm (100 / diopters) and the detail in px/mm (`output_width_px * focal_length_mm / (sensor_width_mm * distance_mm)`, thin-lens estimate). Zoom does not change this detail value: zoom crops.
 - The camera endpoints return 503 `camera_not_ready` while the app is not in the foreground.
 - `/v1/snapshot` does not fire the flash. The torch state after a snapshot is the same as before it.
 

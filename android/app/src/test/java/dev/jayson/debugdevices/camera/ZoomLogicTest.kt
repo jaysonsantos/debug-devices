@@ -12,7 +12,16 @@ class ZoomLogicTest {
         torchEnabled = false,
         hasFlashUnit = true,
         rotationDegrees = 0,
-        rotationLocked = false
+        rotationLocked = false,
+        previewFlipHorizontal = false,
+        previewFlipVertical = false,
+        focus = FocusInfo(
+            distanceDiopters = 3.5f,
+            state = FocusState.FOCUSED,
+            calibration = FocusCalibration.APPROXIMATE,
+            minDistanceDiopters = 10f
+        ),
+        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080)
     )
 
     @Test

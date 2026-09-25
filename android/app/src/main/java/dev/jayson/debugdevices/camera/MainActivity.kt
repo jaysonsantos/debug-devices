@@ -18,10 +18,13 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -55,6 +58,9 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         previewView = findViewById(R.id.preview)
+        // A TextureView follows scaleX and scaleY, so the preview flip works. The default SurfaceView ignores them
+        // (seen on 7fad170e: the label said "flip H", but the preview did not change).
+        previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         statusView = findViewById(R.id.status)
         safeArea = findViewById(R.id.safe_area)
         overlay = findViewById(R.id.overlay)
@@ -67,7 +73,11 @@ class MainActivity : ComponentActivity() {
         safeArea.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> layoutOverlay() }
         renderStatus()
 
-        camera = CameraController(applicationContext) { next -> onRotationChanged(next) }
+        camera = CameraController(
+            applicationContext,
+            onRotationChanged = { next -> onRotationChanged(next) },
+            onPreviewFlipChanged = { applyPreviewFlip() }
+        )
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.
         orientationListener = object : OrientationEventListener(this) {
@@ -79,6 +89,15 @@ class MainActivity : ComponentActivity() {
             Log.e(Constants.Log.TAG, Constants.Messages.UNEXPECTED, cause)
         }
         lifecycleScope.launch(Dispatchers.IO) { server.start() }
+        // The focus distance changes without an event, so the label reads it again while the app is visible.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    renderStatus()
+                    delay(Constants.Focus.LABEL_REFRESH_MILLIS)
+                }
+            }
+        }
 
         inSensorZoom = readInSensorZoom(intent)
         if (hasCameraPermission()) {
@@ -145,6 +164,7 @@ class MainActivity : ComponentActivity() {
 
     private fun onRotationChanged(next: Int) {
         layoutOverlay()
+        applyPreviewFlip()
         Log.i(Constants.Log.TAG, Constants.Messages.ROTATION_CHANGED + OrientationLogic.surfaceDegrees(next))
     }
 
@@ -179,9 +199,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Mirrors only the preview view. The overlay with the label is a sibling, so its text stays readable. */
+    private fun applyPreviewFlip() {
+        val scale = PreviewFlipLogic.scale(camera.previewFlip, camera.effectiveRotation)
+        previewView.scaleX = scale.scaleX
+        previewView.scaleY = scale.scaleY
+        renderStatus()
+    }
+
     private fun renderStatus() {
         val torch = getString(if (torchEnabled) R.string.torch_on else R.string.torch_off)
+        val flip = if (::camera.isInitialized) camera.previewFlip else PreviewFlip.NONE
+        val distanceCm = if (::camera.isInitialized) FocusLogic.distanceCm(camera.focusInfo()) else null
+        val distanceText = distanceCm?.let {
+            getString(R.string.status_separator) +
+                getString(R.string.focus_distance, it)
+        }
+            .orEmpty()
+        val flipText = listOfNotNull(
+            getString(R.string.flip_horizontal).takeIf { flip.horizontal },
+            getString(R.string.flip_vertical).takeIf { flip.vertical }
+        ).joinToString(separator = "") { getString(R.string.status_separator) + it }
         statusView.text =
-            getString(R.string.status_label, zoomRatio, torch, Constants.Server.HOST, Constants.Server.PORT)
+            getString(
+                R.string.status_label,
+                zoomRatio,
+                torch,
+                Constants.Server.HOST,
+                Constants.Server.PORT,
+                flipText,
+                distanceText
+            )
     }
 }

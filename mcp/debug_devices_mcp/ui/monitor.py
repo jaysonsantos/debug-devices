@@ -32,6 +32,7 @@ from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details, http, labels, tools
 from debug_devices_mcp.ui.desktop import BrowserOpener
 from debug_devices_mcp.ui.events import CallSource, CallStatus, EventBus, ToolCall, current_call, truncate
+from debug_devices_mcp.ui.forward import CallForwarder, origin_label, remove_token, token_dir, write_token
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
 from debug_devices_mcp.webcam import Crop
 from debug_devices_mcp.webcam_stream import FrameSource, WebcamStream
@@ -203,6 +204,14 @@ class Monitor:
         self.closing = asyncio.Event()
         self.url: str | None = None
         self.last_snapshot: bytes | None = None
+        # The page of another MCP server on the configured port (the primary). Then this server serves no page and
+        # sends its calls there.
+        self.primary_url: str | None = None
+        self.client_name: str | None = None
+        self.forwarder: CallForwarder | None = None
+        self.token_dir: Path = token_dir()
+        self.ingest_token: str | None = None
+        self._token_port: int | None = None
         # The raw still from the phone (true orientation, full size). The page gets it through `render_snapshot`.
         self.last_snapshot_raw: bytes | None = None
         # Full phone snapshots by tool call, until the call ends (the tool result has only the scaled image).
@@ -215,10 +224,29 @@ class Monitor:
         self._call_tool = server.call_tool
 
         async def call_tool(name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+            self._remember_client(context)
             _, result = await self._record_call(name, arguments, CallSource.MCP, context)
             return result
 
         server.call_tool = call_tool  # type: ignore[method-assign]
+
+    def _remember_client(self, context: Any) -> None:
+        """The client name from initialize (for example "codex"), for the origin label on the primary page."""
+        if self.client_name is not None or context is None:
+            return
+        with contextlib.suppress(AttributeError, LookupError, ValueError, RuntimeError):
+            self.client_name = context.session.client_params.client_info.name
+
+    def origin(self) -> str:
+        return origin_label(self.client_name)
+
+    @property
+    def page_url(self) -> str | None:
+        """The page that the user opens: this server's page, or the page of the primary."""
+        return self.url or self.primary_url
+
+    def is_secondary(self) -> bool:
+        return self._server is None and self.primary_url is not None
 
     async def call_from_ui(self, name: str, arguments: dict[str, Any]) -> tuple[ToolCall, CallToolResult]:
         """Run a tool for the page. A tool failure raises `ToolError`; the log has the call."""
@@ -396,6 +424,14 @@ class Monitor:
                 await self._page_stop_task
             if self._server is not None and self.url is not None:
                 return self.url
+            primary = await self._find_primary()
+            if primary is not None:
+                # Another server has the page: send the calls there, and serve no page here.
+                self.primary_url = primary.url
+                if self.forwarder is not None:
+                    self.forwarder.start()
+                return primary.url
+            self.primary_url = None
             await self._serve()
             assert self.url is not None
             url = self.url
@@ -410,20 +446,36 @@ class Monitor:
         except (OSError, RuntimeError, TimeoutError) as exc:
             logger.warning("the monitor page did not start: %s", exc)
 
+    async def _find_primary(self) -> MonitorIdentity | None:
+        """The server with the page on the configured port. A secondary waits a short time for it (a dev monitor
+        reload takes about 2 s), so it does not take the port while the primary restarts."""
+        if self.shared is None:
+            return None
+        waited = self.primary_url is not None
+        deadline = self._clock() + (defaults.PRIMARY_RESTART_GRACE.total_seconds() if waited else 0)
+        while True:
+            primary = await self.shared.remote.find_monitor()
+            if primary is not None or self._clock() >= deadline:
+                return primary
+            await asyncio.sleep(defaults.PRIMARY_POLL.total_seconds())
+
     async def _other_monitor_runs(self) -> bool:
         return self.shared is not None and await self.shared.remote.find_monitor() is not None
 
     async def open_browser(self) -> str | None:
         """Open the page in a new browser window. Return the program, or None when none started."""
-        if self.url is None:
+        url = self.url or self.primary_url
+        if url is None:
             return None
-        return await self._opener.open(self.url)
+        return await self._opener.open(url)
 
     async def _serve(self) -> None:
         self.closing = asyncio.Event()
         sock = bind_socket(self.options.host, self.options.port)
         host, port = sock.getsockname()[:2]
         self.url = f"{http.SCHEME}://{host}:{port}/"
+        # The secret of the ingest routes. Secondaries read it from this file (mode 600, this user only).
+        self.ingest_token, self._token_port = write_token(self.token_dir, port), port
         config = uvicorn.Config(
             create_app(self),
             log_level=logging.WARNING,
@@ -446,6 +498,9 @@ class Monitor:
         self.closing.set()
         server, task = self._server, self._serve_task
         self._server, self._serve_task, self.url = None, None, None
+        if self.ingest_token is not None and self._token_port is not None:
+            remove_token(self.token_dir, self._token_port, self.ingest_token)
+            self.ingest_token = None
         if server is not None:
             server.should_exit = True
         if task is not None:
@@ -637,6 +692,8 @@ class Monitor:
             self._status_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._status_task
+        if self.forwarder is not None:
+            await self.forwarder.stop()
         if self.shared is not None:
             await self.shared.remote.aclose()
 

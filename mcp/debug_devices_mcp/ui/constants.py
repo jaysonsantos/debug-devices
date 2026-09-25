@@ -55,6 +55,13 @@ class defaults:
     # Images use memory, so only the most recent calls keep them.
     IMAGE_HISTORY_SIZE = 30
     SUBSCRIBER_QUEUE_SIZE = 256
+    # The primary monitor keeps the calls of at most this many other MCP servers (the oldest server goes first).
+    MAX_REMOTE_SERVERS = 20
+    # A secondary waits this long for its primary to come back (dev monitor reload) before it serves its own page.
+    PRIMARY_RESTART_GRACE = timedelta(seconds=3)
+    PRIMARY_POLL = timedelta(milliseconds=250)
+    # The origin label when the MCP client did not give its name in initialize.
+    UNKNOWN_CLIENT = "mcp"
     SUMMARY_CHARS = 300
     SSE_KEEPALIVE = timedelta(seconds=15)
 
@@ -89,6 +96,8 @@ class http:
     MJPEG_BOUNDARY = "frame"
     MJPEG_MEDIA_TYPE = f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"
     JPEG_MEDIA_TYPE = "image/jpeg"
+    JSON_MEDIA_TYPE = "application/json"
+    CONTENT_TYPE_HEADER = "content-type"
     SSE_MEDIA_TYPE = "text/event-stream"
     NO_CACHE: ClassVar[dict[str, str]] = {"Cache-Control": "no-store"}
     ALLOWED_HOSTS = ("127.0.0.1", "localhost")
@@ -139,6 +148,33 @@ class screen:
     MEDIA_TYPE = "application/octet-stream"
 
 
+class ingest:
+    """A secondary MCP server sends its tool calls to the primary monitor (the page on the configured port)."""
+
+    CALLS_PATH = "/api/ingest/calls"
+    IMAGE_PATH = "/api/ingest/calls/{call_id}/images"
+    TOKEN_HEADER = "X-Debug-Devices-Token"
+    TOKEN_FILE_PREFIX = "ingest-"
+    TOKEN_FILE_SUFFIX = ".token"
+    TOKEN_BYTES = 32
+    TOKEN_FILE_MODE = 0o600
+    ORIGIN_PARAM = "origin"
+    LABEL_PARAM = "label"
+    INDEX_PARAM = "index"
+    # Short: a slow or gone primary must never slow a tool call of the secondary.
+    REQUEST_TIMEOUT = timedelta(seconds=1)
+    SEND_ATTEMPTS = 2
+    # At the stop of a secondary, its last calls still go to the primary, within this time.
+    DRAIN_TIME = timedelta(seconds=1)
+    DRAIN_POLL = timedelta(milliseconds=20)
+    BACKOFF_START = timedelta(seconds=1)
+    BACKOFF_MAX = timedelta(seconds=30)
+    MAX_IMAGE_BYTES = 16 * 2**20
+    MAX_EVENT_BYTES = 2**20
+    IMAGE_MEDIA_TYPES = frozenset({"image/jpeg", "image/png"})
+    REDACTED_TEXT = "(not forwarded: the user's instructions)"
+
+
 class tools:
     """MCP tool names that the monitor reads results from."""
 
@@ -150,6 +186,9 @@ class tools:
     PHONE_ROTATION = "phone_rotation"
     PHONE_SNAPSHOT_ORIENTATION = "phone_snapshot_orientation"
     BOARD_OPEN = "board_open"
+    BENCH_INSTRUCTIONS = "bench_instructions"
+    # Their results hold the user's instructions text: other monitors get only the tool name and the status.
+    REDACTED = frozenset({BENCH_INSTRUCTIONS})
     MONITOR_OPEN = "monitor_open"
     BENCH_START = "bench_start"
     BENCH_STOP = "bench_stop"

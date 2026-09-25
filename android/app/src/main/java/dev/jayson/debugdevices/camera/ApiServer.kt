@@ -79,6 +79,10 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             val request = call.receive<RotationRequest>()
             call.respond(camera.setRotation(OrientationLogic.lockedRotationFor(request)))
         }
+        post(Constants.Paths.PREVIEW) {
+            val request = call.receive<PreviewRequest>()
+            call.respond(camera.setPreviewFlip(PreviewFlipLogic.fromRequest(request)))
+        }
         get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
     }
 }

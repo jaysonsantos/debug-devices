@@ -19,6 +19,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ApiServerTest {
@@ -49,6 +50,11 @@ class ApiServerTest {
             status().copy(rotationDegrees = degrees, rotationLocked = lockedRotation != null).also { status = it }
         }
 
+        override suspend fun setPreviewFlip(flip: PreviewFlip): CameraStatus = gate.control {
+            status().copy(previewFlipHorizontal = flip.horizontal, previewFlipVertical = flip.vertical)
+                .also { status = it }
+        }
+
         override suspend fun capture(): ByteArray {
             captureError?.let { throw it }
             status()
@@ -63,7 +69,16 @@ class ApiServerTest {
         torchEnabled = false,
         hasFlashUnit = true,
         rotationDegrees = 0,
-        rotationLocked = false
+        rotationLocked = false,
+        previewFlipHorizontal = false,
+        previewFlipVertical = false,
+        focus = FocusInfo(
+            distanceDiopters = 3.5f,
+            state = FocusState.FOCUSED,
+            calibration = FocusCalibration.APPROXIMATE,
+            minDistanceDiopters = 10f
+        ),
+        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080)
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -95,7 +110,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080}}""",
             body
         )
     }
@@ -326,6 +341,72 @@ class ApiServerTest {
             assertEquals(body, HttpStatusCode.BadRequest, response.status)
             assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
         }
+    }
+
+    @Test
+    fun `focus is null before the camera is bound, and the distance can be null`() {
+        api(ready(ready.copy(focus = null))) {
+            val body = client.get(Constants.Paths.STATUS).bodyAsText()
+            assertTrue(body, body.contains(""""focus":null"""))
+            assertTrue(body, body.contains(""""optics":{"focal_length_mm":6.07"""))
+        }
+        val noDistance = ready.copy(focus = ready.focus?.copy(distanceDiopters = null, state = FocusState.UNKNOWN))
+        api(ready(noDistance)) {
+            val body = client.get(Constants.Paths.STATUS).bodyAsText()
+            assertTrue(body, body.contains(""""focus":{"distance_diopters":null,"state":"unknown""""))
+            assertEquals(null, ApiJson.decodeFromString<CameraStatus>(body).focus?.distanceDiopters)
+        }
+    }
+
+    @Test
+    fun `preview flip sets both fields and keeps the snapshot`() {
+        val camera = ready(ready)
+        api(camera) {
+            val flipped = postJson(
+                Constants.Paths.PREVIEW,
+                """{"flip_horizontal":true,"flip_vertical":false}"""
+            ).status()
+            assertEquals(true, flipped.previewFlipHorizontal)
+            assertEquals(false, flipped.previewFlipVertical)
+            val status = client.get(Constants.Paths.STATUS).status()
+            assertEquals(true, status.previewFlipHorizontal)
+            assertEquals(0, status.rotationDegrees)
+            assertArrayEquals(camera.jpeg, client.get(Constants.Paths.SNAPSHOT).readRawBytes())
+            val both = postJson(Constants.Paths.PREVIEW, """{"flip_vertical":true,"flip_horizontal":true}""").status()
+            assertEquals(true, both.previewFlipHorizontal)
+            assertEquals(true, both.previewFlipVertical)
+            val none = postJson(Constants.Paths.PREVIEW, """{"flip_horizontal":false,"flip_vertical":false}""").status()
+            assertEquals(false, none.previewFlipHorizontal)
+            assertEquals(false, none.previewFlipVertical)
+        }
+    }
+
+    @Test
+    fun `preview flip bad bodies are 400`() = api(ready(ready)) {
+        val bodies = listOf(
+            "{}",
+            """{"flip_horizontal":true}""",
+            """{"flip_vertical":true}""",
+            """{"flip_horizontal":"true","flip_vertical":false}""",
+            """{"flip_horizontal":1,"flip_vertical":false}""",
+            """{"flip_horizontal":null,"flip_vertical":false}""",
+            """{"flip_horizontal":true,"flip_vertical":false,"mirror":true}""",
+            "[]",
+            "{"
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.PREVIEW, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+        assertEquals(false, client.get(Constants.Paths.STATUS).status().previewFlipHorizontal)
+    }
+
+    @Test
+    fun `preview flip is 503 before the start state and 405 on get`() = api(FakeCamera(ready)) {
+        val body = """{"flip_horizontal":true,"flip_vertical":false}"""
+        assertEquals(HttpStatusCode.ServiceUnavailable, postJson(Constants.Paths.PREVIEW, body).status)
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get(Constants.Paths.PREVIEW).status)
     }
 
     @Test

@@ -21,6 +21,7 @@ object Constants {
         const val TORCH = "$PREFIX/torch"
         const val SNAPSHOT = "$PREFIX/snapshot"
         const val ROTATION = "$PREFIX/rotation"
+        const val PREVIEW = "$PREFIX/preview"
     }
 
     object Zoom {
@@ -51,6 +52,19 @@ object Constants {
 
         /** How long a new session with the parameter must stream without a camera error. */
         const val SESSION_CHECK_MILLIS = 4_000L
+    }
+
+    object Focus {
+        /** `LENS_INFO_MINIMUM_FOCUS_DISTANCE` of a fixed-focus lens. */
+        const val FIXED_FOCUS_DIOPTERS = 0f
+        const val CM_PER_METER = 100f
+
+        /** Placeholders when the camera does not publish a value. */
+        const val UNKNOWN_MM = 0f
+        const val UNKNOWN_PX = 0
+
+        /** How often the phone label reads the focus distance again. */
+        const val LABEL_REFRESH_MILLIS = 1_000L
     }
 
     object Start {

@@ -18,10 +18,11 @@ from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
 from debug_devices_mcp.board.tools import BoardSession, register_board_tools
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
+from debug_devices_mcp.focus import PhoneStatusReport
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.instructions import register_instructions_tool, server_instructions
 from debug_devices_mcp.multimeter import MeterSource, MultimeterReading, VisionClient, VisionError
-from debug_devices_mcp.orientation import OrientationState
+from debug_devices_mcp.orientation import OrientationState, PreviewSync
 from debug_devices_mcp.phone_api import (
     ApiErrorCode,
     CameraStatus,
@@ -100,6 +101,11 @@ class Services:
     )
     # The flips of every phone snapshot: the tools, the saved files, and the monitor page use them.
     orientation: OrientationState = field(default_factory=OrientationState)
+    # Sends the same flips to the phone preview, so the phone screen matches the snapshots.
+    preview_sync: PreviewSync = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.preview_sync = PreviewSync(self.phone, self.orientation)
 
     async def phone_snapshot(self) -> bytes:
         """One phone still in the orientation that the user chose (the true bytes when there is no flip)."""
@@ -247,6 +253,9 @@ async def connect_phone(services: Services) -> PhoneConnection:
             f"camera app on {device.serial} is not ready after {settings.app_start_timeout}. "
             "Unlock the phone and check that the app is installed and has the camera permission."
         ) from exc
+    # After an app start the preview is not flipped: send the chosen flips again.
+    services.preview_sync.reset()
+    status = await services.preview_sync.ensure(status)
     return PhoneConnection(
         serial=device.serial,
         local_port=settings.local_forward_port,
@@ -271,10 +280,17 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
             return await connect_phone(services)
 
     @server.tool()
-    async def phone_status() -> CameraStatus:
-        """Return the zoom ratio, the zoom range, and the torch state of the phone camera."""
+    async def phone_status() -> PhoneStatusReport:
+        """Return the zoom, the torch, and the rotation of the phone camera, and how far the phone is from the board.
+
+        `distance_cm` (lens focus distance), `detail_px_per_mm` (how many snapshot pixels one mm of the board gets),
+        `advice` (`too_close`, `good`, `far`, `unknown`), and `advice_text`. Tell the user to move the phone when
+        the advice is `far` or `too_close`. The values are estimates; `calibration` says how good the distance is.
+        """
         with tool_errors():
-            return await services.phone.status()
+            # A status with other preview flips means that the app restarted: send the flips again.
+            status = await services.preview_sync.ensure(await services.phone.status())
+        return PhoneStatusReport.of(status)
 
     @server.tool()
     async def phone_zoom(ratio: float | None = None, step: ZoomStep | None = None) -> CameraStatus:
@@ -338,9 +354,13 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
 
         Use it when the user says the photo is mirrored (left-right: flip_horizontal) or upside down
         (flip_vertical). The setting persists and applies to phone_snapshot, multimeter_read with the phone, and
-        the monitor page. It does not change the phone camera.
+        the monitor page. The phone mirrors its camera preview the same way (its status text stays readable);
+        the phone camera and its zoom do not change.
         """
-        return services.orientation.update(flip_horizontal, flip_vertical)
+        orientation = services.orientation.update(flip_horizontal, flip_vertical)
+        # The phone preview follows (only the camera image; the app's text stays readable).
+        await services.preview_sync.push()
+        return orientation
 
 
 # endregion: phone tools

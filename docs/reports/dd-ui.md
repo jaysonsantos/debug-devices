@@ -453,3 +453,194 @@ The earlier display-only mirror plan was replaced before I built it. The one set
 ### Open items
 
 - The live view flip is CSS only (the phone screen stream is video). The snapshot is the evidence image: the server makes it, and the agent gets the same image.
+
+## Round 13: snapshot flips on the phone preview, no CSS flip of the live view
+
+### Why
+
+The page flipped the whole live phone screen with CSS, so the app's status text (zoom, torch) was mirrored and unreadable. The app now mirrors only its camera preview (`POST /v1/preview`, contract in `docs/phone-api.md`, changed before this task).
+
+### What I did
+
+- `phone_api.py` (small edit):
+  - `CameraStatus.preview_flip_horizontal` and `preview_flip_vertical` default to false, so the status of an app from before the endpoint still parses.
+  - New `PreviewFlipRequest` and `PhoneClient.preview()`. A 404 becomes `PreviewNotSupportedError` ("update the app").
+  - `constants.phone.PATH_PREVIEW`.
+- `orientation.py`: `PreviewSync`, the one sync object.
+  - `push()` sends the current snapshot flips.
+  - `ensure(status)` sends them only when the status shows other preview flips (an app restart).
+  - After a 404, it warns one time and stops trying until the next `phone_connect` (`reset()`).
+  - Other phone errors (not connected, camera not ready) only log at info level: `phone_connect` and the status reads send the flips again later.
+- `server.py` (small edits):
+  - `Services.preview_sync` is created in `__post_init__`.
+  - `connect_phone` resets the 404 flag and calls `ensure()`. `bench_start` runs `phone_connect`, so it is covered too.
+  - `phone_status` calls `ensure()` (app restart).
+  - `phone_snapshot_orientation` calls `push()` after the change. The page toggles run this tool.
+  - The tool description says that the phone mirrors its preview the same way.
+- `ui/setup.py`: the monitor status poll (1 s after `phone_connect`) reads the status through `ensure()`, so an app restart is fixed within about a second.
+- The snapshot is still flipped only by the server (`orient_jpeg`). The app keeps `/v1/snapshot` unflipped, so nothing is flipped twice.
+- Page: I removed the CSS flip of the live phone view; the live view shows the phone screen as it is. The snapshot flip stays on the server, as before. The phone panel has a new line, "Preview flip", from the camera status ("not flipped", "flipped horizontally", "flipped horizontally and vertically").
+- `scripts/fake_phone.py`:
+  - `POST /v1/preview` with the 400 rules: exactly `flip_horizontal` and `flip_vertical`, both booleans. A missing field, another type, or an unknown field gives 400 `bad_request`.
+  - The new status fields.
+  - `--no-preview` is an old app: the path gives 404 (not 405), and the status has no preview fields.
+- `scripts/qa_contract.py`:
+  - The status requires the two fields.
+  - The start state requires no preview flips.
+  - New `check_preview`: all four flip combinations, in the POST answer and in `GET /v1/status`, then 7 bad bodies with 400 and no change.
+  - `GET /v1/preview` is in the wrong-method list (405).
+- `mcp/README.md`: "Snapshot flips" describes the phone preview.
+
+### Tests
+
+- `mcp/tests/test_preview_sync.py` (6 tests):
+  - The client sends the flips and reads the status. An old app raises `PreviewNotSupportedError`, and an old status reads as not flipped.
+  - `phone_connect` sends the chosen flips. The same flips send nothing. A toggle sends at once. After an app restart (preview flips back to false), the next `phone_status` sends them again.
+  - An old app: `phone_connect` and `phone_status` still work, and the snapshot is still flipped by the server. It gets one request and one warning per `phone_connect`, not one per status read.
+  - `scripts/qa_contract.py --strict` against `scripts/fake_phone.py` passes, with `PASS preview`.
+- `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18896 --strict` against the fake phone: 19/19 checks passed.
+- Playwright (headless Firefox, fake phone, eager server on port 18890, `--webcam /dev/video99`):
+  - After connect: "not flipped". Panel "Flip H": "flipped horizontally" (the check ran before the wording change, which shows "horizontal").
+  - The key `v`: both flips.
+  - The live view `style.transform` stayed empty at each step.
+  - The fake phone `/v1/status` showed `preview_flip_horizontal: true`, `preview_flip_vertical: true`.
+- `uv run pytest`: 236 passed, 1 skipped. `uv run ruff check`: pass. `ruff format --check` and `prek run --files` on my files: pass.
+
+### Open items
+
+- I did not test against the real phone app: dd-android builds `/v1/preview` now. After the new app is on the phone, run `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict`, and check on the phone that only the camera image mirrors.
+- The live view shows what the phone screen shows. So the preview flips show on the page only when the app mirrors its preview; with an old app, the live view stays unflipped.
+
+## Round 14: phone camera zoom from the full-screen live view (wheel and arrow keys)
+
+### What I did
+
+- Region `live zoom` in `app.js`. It acts only when `document.fullscreenElement` is `#phone-view` (the live phone screen).
+  - A wheel listener on `#phone-view` with `{ passive: false }` and `preventDefault()` only in this full-screen view. Wheel up gives step `in`, wheel down step `out`.
+  - A key listener, also only in this full-screen view and not in form fields: `ArrowUp` and `ArrowRight` zoom in, `ArrowDown` and `ArrowLeft` zoom out.
+  - Each step is the phone camera zoom: `POST /api/phone/zoom {"step": ...}` runs `phone_zoom` through the instrumented `call_tool` (source `ui`, in the log). It is not a digital zoom of the video.
+  - Rate limit: `LIVE_ZOOM_INTERVAL_MS = 150`. There is at most one step per interval, and none while a zoom request runs. Extra events are dropped, not queued.
+  - The full-screen bar shows the zoom ratio from the returned `CameraStatus` ("1.5x"). It is highlighted for 1.2 s after a step, and it is set when the view enters full screen.
+- The digital wheel zoom of the full-screen snapshot, the webcam view, and the page scrolling do not change.
+- `mcp/README.md`: the full screen section.
+
+### Tests
+
+Playwright check (headless Firefox, 1440x600) against a separate eager server with the fake phone and fake adb (`--ui-port 18890 --webcam /dev/video99 --no-phone-screen`; a test picture on the canvas, because the fake phone has no stream):
+
+- In full screen, one wheel up: the fake phone zoom went 1.0 to 1.5, the bar showed "1.5x", and the log had `phone_zoom in:ui`.
+- A burst of 10 wheel-up events inside one interval: exactly one more call (fake phone zoom 2.25).
+- `ArrowUp`, `ArrowRight`, `ArrowDown`, `ArrowLeft` (0.3 s apart) gave `in, in, out, out` in the log. The zoom went back to 2.25.
+- Outside full screen, the wheel over the phone view scrolled the page, and `ArrowDown` made no zoom call (0 new calls).
+- `uv run pytest`: 236 passed, 1 skipped (no Python change in this task). `uv run ruff check` and `prek run --files` on the page files: pass.
+
+## Round 15: one monitor page shows the tool calls of every MCP server
+
+### What I did
+
+- **Primary and secondary** (`ui/monitor.py`):
+  - The primary is the server with the page on the configured UI port.
+  - Before `ensure_page()` serves a page, it asks `/api/whoami` on that port (same app name, another pid, through `RemoteMonitor.find_monitor()`). If a monitor answers, this server is a secondary: it serves no page and opens no browser, `primary_url` is set, and the forwarder starts.
+  - `monitor_open` and `bench_start` return the primary URL (`open_browser()` uses it too).
+  - A secondary that had a primary waits up to 3 s for it (`PRIMARY_RESTART_GRACE`, polls every 0.25 s), so a dev monitor reload does not give the port to a secondary. When no primary answers, the next tool call starts this server's page, and it becomes the primary.
+- **Token** (`ui/forward.py`):
+  - At each page start, the primary writes a new `secrets.token_urlsafe` token to `$XDG_RUNTIME_DIR/debug-devices/ingest-<port>.token`, mode 600, created with `O_EXCL`. Without `XDG_RUNTIME_DIR`, the state folder is used.
+  - At page stop, the primary removes the file, but only if it still holds its own token.
+- **Forwarder** (`CallForwarder`, secondary side):
+  - It subscribes to the bus in `start()`, not in its task, so the events of the call that found the primary are not lost.
+  - One worker sends the local events in order: each start and end event to `POST /api/ingest/calls` (`IngestCall{origin, event}`), then at the end of a call its images to `POST /api/ingest/calls/{id}/images?origin=&label=&index=`. The header `X-Debug-Devices-Token` carries the token.
+  - The timeout is 1 s. A tool call never waits: the bus hands the events over with `put_nowait`.
+  - After a failed send, it looks up the primary again at once and reads the new token (a restarted primary), then tries one more time. After a failed lookup, it backs off: 1 s, 2 s, up to 30 s.
+  - At stop, it sends what is still queued, for at most 1 s.
+- **Origin label**: the MCP client name from `initialize` (`context.session.client_params.client_info.name`, read one time) and the pid, for example "codex 1824788". Without a name, "mcp <pid>".
+- **Redaction**: forwarded events of `bench_instructions` (the user's instructions text) carry only the tool name and the status: the summary is "(not forwarded: the user's instructions)", with no details and no images. The OpenRouter key is never in an event: events carry tool arguments and results only.
+- **Primary side**:
+  - `routes/ingest.py`:
+    - 403 without the token or with a wrong one (`secrets.compare_digest`).
+    - Size limits: 1 MiB per event (413), 16 MiB per image (413).
+    - Only `image/jpeg` and `image/png` (415).
+    - An image before its event gives 404.
+  - `EventBus.ingest()` adds or updates a call. A late start event never undoes an end.
+  - Per sender: the recent 200 calls and images for the recent 30, and at most 20 senders.
+  - `calls()` merges all senders by start time. The existing image route finds the calls of other senders too.
+- **Page**: the source badge shows the sender ("mcp · codex 1824788").
+- **Tests**: `conftest.py` has an autouse fixture that points `XDG_RUNTIME_DIR` at a temporary folder, so tests never write token files into the real one.
+- **Docs**: `mcp/README.md` ("More than one MCP server"), `README.md` ("Live reload").
+
+### Tests
+
+- `mcp/tests/test_shared_log.py` (10 tests):
+  - Ingest routes: 403 without the token and with a wrong one; 204 and the call with its origin and duration; images, 404 before the event, 415, and 403.
+  - A late start event after the end; the limits per sender; the token file mode 600.
+  - Forwarding over real HTTP (a primary on port 0, a secondary in the same process with a patched primary pid): the calls and the image arrive with the origin label. The secondary has no page, and `monitor_open` gives the primary URL.
+  - The instructions are redacted.
+  - A primary restart with a new token: the secondary waits, does not take the port, and sends to the new primary.
+  - A primary that hangs for 10 s does not slow three tool calls.
+  - With no primary, the server serves its own page and sends nothing.
+- Real check (two processes, a shared temporary `XDG_RUNTIME_DIR`):
+  - A primary (`debug-devices-mcp --ui-start eager --ui-port 18892 --webcam /dev/video99`) and a second server over stdio (`mcp.ClientSession`, fake phone, fake adb, `--ui-port 18892`).
+  - The primary wrote `ingest-18892.token`.
+  - The second server: `phone_connect` and `phone_status` ok, and `monitor_open` returned `http://127.0.0.1:18892/`. Only 18892 and the fake phone port listened, so the second server served no page.
+  - The primary `/api/state` listed `phone_connect`, `phone_status`, and `monitor_open`, all ok, with `origin=mcp 1445664` (the Python MCP client names itself "mcp").
+- `uv run pytest`: 246 passed, 1 skipped, five runs in a row. One run during a parallel prek run failed one test and passed on the next run. I raised the time limit of the slow-primary test from 1 s to 3 s (the fake primary hangs for 10 s). `uv run ruff check`, `ruff format --check`, and `prek run --files` on my files: pass.
+
+### Notes and open items
+
+- **The code is live.** watchexec restarted the running dev monitor (pid 1390385, 19:58:47) and the dev-reload agent servers with the new code while I worked. The dev monitor wrote `ingest-18766.token`. One agent server reloaded while the dev monitor restarted and took a free port (`ingest-41513.token`); it becomes a secondary only after it stops serving that page. I did not stop or change these processes.
+- The page of a secondary is not served, so only the primary URL works. Old bookmarks of random secondary ports do not work anymore; that is intended.
+- The 3 s restart grace can delay one tool call of a secondary by up to 3 s, but only when its primary is gone.
+
+## Round 16: phone distance and detail (monitor page and phone_status)
+
+### What I did
+
+- `phone_api.py` (small edit):
+  - New models `Focus`, `Optics`, `FocusState`, and `FocusCalibration`. `CameraStatus.focus` and `CameraStatus.optics` are optional (default None), so an old app still works.
+  - An unknown state becomes `unknown`, and an unknown calibration becomes `uncalibrated` (then no cm show), so a new app value does not break the status.
+- `focus.py` (new, pure math, named constants):
+  - `distance_cm = 100 / diopters`: None for no value and for 0 (infinity).
+  - `detail_px_per_mm = output_width_px * focal_length_mm / (sensor_width_mm * distance_mm)`.
+  - The closest focus distance comes from `min_distance_diopters`; 0 is fixed focus, with no "too close".
+  - Advice: `too_close` (nearer than the closest focus distance), `good` (`GOOD_DETAIL_PX_PER_MM = 20`), `far` (text "move closer: about N cm gives about M px/mm", with N = `CLOSER_FACTOR` 1.1 × the closest focus distance), and `unknown` (no data, no value yet, or an uncalibrated lens).
+  - Rounding: whole cm from 10 cm, one decimal below; detail with one decimal.
+  - `PhoneStatusReport` extends `CameraStatus` flat with the derived values.
+- `phone_status` returns a `PhoneStatusReport`. The tool description tells the agent to tell the user to move the phone when the advice is `far` or `too_close`. It stays a `CameraStatus`, so the monitor and the page read it as before.
+- `bench_start`: `BenchResult.focus` after the phone step.
+- **Fixes of round 15**, found here:
+  - `bench_start` and `bench_stop` give the page URL of the primary on a secondary (`Monitor.page_url`).
+  - `bench_stop` stops only this server's own page.
+- **Page**:
+  - `EventBus.update_phone()` computes `PhoneState.focus` for each new status, so the math stays on the server. The status poll (1 s, and only on a change) brings the updates, with no extra load.
+  - The phone panel has a line "Distance" with an advice line. The full-screen live view bar shows the same text.
+  - The format is "≈ 29 cm · ~9 px/mm · focused": "≈" for an approximate calibration, and no cm for an uncalibrated lens.
+  - The color follows the advice (good green, far amber, too close red). The advice text shows for `far` and `too_close`.
+  - The agents do not read the page (cockpit rule); `phone_status` gives them the same values.
+- `scripts/fake_phone.py`:
+  - `focus` and `optics` with the contract example values (3.41 dpt, focused, approximate, closest 10 dpt; 6.07 mm, 9.14 mm, 4080 px).
+  - `--focus-diopters` for the start distance, and the test-only route `POST /fake/focus {"distance_diopters": x}` (outside `/v1`, not part of the contract) to move the phone.
+  - `--no-preview` (an old app) also drops `focus` and `optics`.
+- `scripts/qa_contract.py`: the status must have `focus` (null, or the four fields with the allowed enum values and numbers ≥ 0) and `optics` (three positive values; the width is an integer).
+- `mcp/README.md`: the tools table and "Phone distance".
+
+### Tests
+
+- `mcp/tests/test_focus.py` (8 tests):
+  - The known values: 3.41 dpt, 6.07 mm, 9.14 mm, and 4080 px give about 29.3 cm and 9.3 px/mm (9.24; rounded 9.2), and 10 cm gives about 27 px/mm.
+  - The advice text at 29 cm is "move closer: about 11 cm gives about 24.6 px/mm". At 10 cm the advice is good, and at 6.7 cm too close.
+  - Uncalibrated gives no cm. Infinity gives far. No value gives unknown. Fixed focus is never too close.
+  - An old app without the fields, and unknown enum values.
+  - The page state report, and the `phone_status` result (29 cm, 9.2 px/mm, far, with the camera status fields).
+- `test_lazy.py`: the `bench_start` result has a focus report.
+- `scripts/qa_contract.py --strict` against the fake phone (through `test_preview_sync.py`) passes with the new checks.
+- Playwright (headless Firefox, fake phone, eager server on port 18890, `--webcam /dev/video99`, temporary state and runtime folders):
+  - After connect: "≈ 29 cm · ~9 px/mm · focused", class `advice-far`, and the advice "move closer: about 11 cm gives about 24.6 px/mm".
+  - After `POST /fake/focus 10`: "≈ 10 cm · ~27 px/mm · focused", `advice-good`, no advice line.
+  - After 15 dpt: "≈ 6.7 cm · ~41 px/mm · focused", `advice-too_close`, and "too close: the lens focuses from about 10 cm; move back".
+  - In full screen, the bar showed the same text and class.
+  - The page followed each move within the 1 s status poll.
+- `uv run pytest`: 254 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on my files: pass.
+
+### Open items
+
+- I did not test with the real phone app: dd-android adds `focus` and `optics` now. With the new app, run `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict`, and check the distance with a ruler once. The thin-lens estimate and an `approximate` calibration can be off by some cm.
+- The detail value is for the snapshot at zoom 1. Zoom crops, so the snapshot gets no more pixels per mm; moving the phone closer does.

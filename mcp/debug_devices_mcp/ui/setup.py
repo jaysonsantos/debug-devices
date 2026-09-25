@@ -1,12 +1,14 @@
 """Build the monitor from the server settings, and connect it to the services."""
 
 from debug_devices_mcp.config import Settings
+from debug_devices_mcp.phone_api import CameraStatus
 from debug_devices_mcp.phone_screen import PhoneScreen, PhoneScreenOptions
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.scrcpy import ScrcpyLauncher, ScrcpyOptions
 from debug_devices_mcp.server import Services
 from debug_devices_mcp.ui.constants import SCRCPY_LOG_FILE_NAME
+from debug_devices_mcp.ui.forward import CallForwarder
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, state_dir
 from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
@@ -40,6 +42,10 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
     )
     stream = WebcamStream(stream_options)
 
+    async def read_status() -> CameraStatus:
+        # The status poll also sees an app restart (other preview flips) and sends the flips again.
+        return await services.preview_sync.ensure(await services.phone.status())
+
     async def remove_forward(serial: str) -> None:
         await services.adb.remove_forward(serial, settings.local_forward_port)
 
@@ -57,7 +63,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             stream=stream,
             scrcpy=scrcpy,
             shared=shared,
-            status_reader=services.phone.status,
+            status_reader=read_status,
             forward_remover=remove_forward,
             orientation=services.orientation,
         ),
@@ -78,6 +84,10 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             SubprocessRunner(),
             on_state=monitor.screen_changed,
         )
+    # When another server has the page on the configured port, this server sends its calls there.
+    monitor.forwarder = CallForwarder(
+        monitor.bus, RemoteMonitor(settings.ui_port, settings.webcam_timeout), monitor.is_secondary, monitor.origin
+    )
     stream.set_crop_provider(monitor.crop)
     shared.set_start_local(monitor.start_stream)
     services.webcam = monitor.frame_source(shared)

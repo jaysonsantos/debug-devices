@@ -44,6 +44,7 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{"step":"in"}' localhost
 curl -s -X POST -H 'Content-Type: application/json' -d '{"enabled":true}' localhost:8765/v1/torch
 curl -s -X POST -H 'Content-Type: application/json' -d '{"degrees":90}' localhost:8765/v1/rotation
 curl -s -X POST -H 'Content-Type: application/json' -d '{"auto":true}' localhost:8765/v1/rotation
+curl -s -X POST -H 'Content-Type: application/json' -d '{"flip_horizontal":true,"flip_vertical":false}' localhost:8765/v1/preview
 curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 ```
 
@@ -67,6 +68,16 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   The app sets it only when the camera publishes the key, and binds again without it when the session does not
   stream. `logcat -s DebugCamera:I` shows `In-sensor zoom: requested=..., sessionKey=..., requestKey=..., state=...`.
   Result on 7fad170e: the HAL gets the parameter but does not switch to in-sensor zoom, so it adds no detail.
+- `POST /v1/preview {"flip_horizontal": bool, "flip_vertical": bool}` mirrors only the on-screen camera preview
+  (`PreviewView` scale). The status label stays readable and shows `flip H` / `flip V`. Snapshots do not change.
+  Both fields are required. The flips are in the viewer's upright frame, so when the phone is sideways, the axes
+  swap (`PreviewFlipLogic`). The preview uses `PreviewView.ImplementationMode.COMPATIBLE` (a `TextureView`),
+  because a `SurfaceView` ignores the view scale. Both flips are off after an app start.
+- `CameraStatus.focus` and `CameraStatus.optics`: the live focus distance (diopters, from the latest preview capture
+  result), the autofocus state, the calibration, the minimum focus distance, the focal length, the sensor width, and
+  the snapshot width. Distance in cm = 100 / diopters. Detail in px/mm = `output_width_px * focal_length_mm /
+  (sensor_width_mm * distance_mm)`. The phone label shows `≈ NN cm` when the calibration is `approximate` or
+  `calibrated`. A capture callback on the Preview keeps the values (no logging per frame).
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

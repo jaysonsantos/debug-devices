@@ -12,6 +12,9 @@ interface CameraPort {
 
     suspend fun setTorch(enabled: Boolean): CameraStatus
 
+    /** Mirrors the on-screen preview only. Snapshots do not change. */
+    suspend fun setPreviewFlip(flip: PreviewFlip): CameraStatus
+
     /** Locks the snapshot rotation to a `Surface.ROTATION_*` value, or goes back to auto with null. */
     suspend fun setRotation(lockedRotation: Int?): CameraStatus
 
