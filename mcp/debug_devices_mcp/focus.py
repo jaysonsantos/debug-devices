@@ -8,7 +8,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from debug_devices_mcp.phone_api import CameraStatus, FocusCalibration, Optics
+from debug_devices_mcp.phone_api import CameraStatus, FocusCalibration, InSensorZoom, Optics
 
 CM_PER_METER = 100
 MM_PER_CM = 10
@@ -20,6 +20,8 @@ CLOSER_FACTOR = 1.1
 DECIMAL_BELOW_CM = 10
 DISTANCE_DECIMALS_NEAR = 1
 DETAIL_DECIMALS = 1
+# With the in-sensor zoom on, a zoom from this ratio gives real extra detail (the estimate does not include it).
+SENSOR_ZOOM_MIN_RATIO = 2.0
 
 
 class Advice(StrEnum):
@@ -39,6 +41,8 @@ class FocusReport(BaseModel):
     calibration: str | None
     advice: Advice
     advice_text: str
+    # True when the in-sensor zoom is on and the zoom is 2x or more: the real detail is higher than the estimate.
+    sensor_zoom_boost: bool = False
 
 
 def distance_cm(diopters: float | None) -> float | None:
@@ -63,6 +67,11 @@ def round_detail(value: float) -> float:
 
 
 def focus_report(status: CameraStatus) -> FocusReport:
+    boost = status.in_sensor_zoom is InSensorZoom.ON and status.zoom_ratio >= SENSOR_ZOOM_MIN_RATIO
+    return distance_report(status).model_copy(update={"sensor_zoom_boost": boost})
+
+
+def distance_report(status: CameraStatus) -> FocusReport:
     focus = status.focus
     if focus is None:
         return FocusReport(
@@ -127,6 +136,7 @@ class PhoneStatusReport(CameraStatus):
     calibration: str | None = None
     advice: Advice = Advice.UNKNOWN
     advice_text: str = ""
+    sensor_zoom_boost: bool = False
 
     @classmethod
     def of(cls, status: CameraStatus) -> PhoneStatusReport:

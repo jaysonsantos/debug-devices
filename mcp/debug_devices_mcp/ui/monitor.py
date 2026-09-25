@@ -21,6 +21,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
+from debug_devices_mcp.camera_choice import InSensorZoomChoice
 from debug_devices_mcp.constants import images
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.orientation import OrientationState
@@ -47,7 +48,9 @@ STATUS_POLL_SECONDS = 1
 # The whole cleanup at exit: web server, webcam stream, scrcpy, phone screen (adb forward --remove).
 STOP_TIMEOUT_SECONDS = 15
 TEXT_SEPARATOR = "\n"
-PHONE_STATUS_TOOLS = frozenset({tools.PHONE_STATUS, tools.PHONE_ZOOM, tools.PHONE_TORCH, tools.PHONE_ROTATION})
+PHONE_STATUS_TOOLS = frozenset(
+    {tools.PHONE_STATUS, tools.PHONE_ZOOM, tools.PHONE_TORCH, tools.PHONE_ROTATION, tools.PHONE_IN_SENSOR_ZOOM}
+)
 
 type ToolCaller = Callable[..., Awaitable[Any]]
 type SettingsListener = Callable[[EffectiveSettings], None]
@@ -92,6 +95,8 @@ class MonitorParts:
     forward_remover: ForwardRemover | None = None
     # The flips of the phone snapshots (shared with the tools). The page shows the snapshot in this orientation.
     orientation: OrientationState | None = None
+    # The in-sensor zoom choice (shared with the tools).
+    in_sensor_zoom: InSensorZoomChoice | None = None
     clock: Clock = field(default=time.monotonic)
 
 
@@ -178,6 +183,7 @@ class Monitor:
         self.screen = parts.screen
         self.status_reader = parts.status_reader
         self.orientation = parts.orientation
+        self.in_sensor_zoom = parts.in_sensor_zoom
         # Rendered page images of the raw snapshot: (snapshot number, orientation, full size) -> JPEG.
         self._rendered: dict[tuple[int, SnapshotOrientation, bool], bytes] = {}
         self._forward_remover = parts.forward_remover
@@ -267,6 +273,11 @@ class Monitor:
             finally:
                 self._full_snapshots.pop(call.id, None)
         return call, result
+
+    def in_sensor_zoom_changed(self, enabled: bool) -> None:
+        """Listener for `InSensorZoomChoice`: the page shows the toggle state."""
+        self.saved = self.saved.model_copy(update={"in_sensor_zoom": enabled})
+        self.bus.update_phone(in_sensor_zoom_choice=enabled)
 
     def orientation_changed(self, orientation: SnapshotOrientation) -> None:
         """Listener for `OrientationState`: the page updates its buttons and reloads the snapshot."""
@@ -381,6 +392,8 @@ class Monitor:
         if self.orientation is not None:
             # OrientationState owns the flips: a page that saves other settings must not change them.
             saved = saved.model_copy(update={"snapshot_orientation": self.orientation.current})
+        if self.in_sensor_zoom is not None:
+            saved = saved.model_copy(update={"in_sensor_zoom": self.in_sensor_zoom.enabled})
         old = self.effective
         self._store.save(saved)
         self.saved = saved

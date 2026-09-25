@@ -91,6 +91,8 @@ class PhoneState(BaseModel):
     orientation: SnapshotOrientation = SnapshotOrientation()
     # How far the phone is from the board and the detail it gives (from `status`, computed on the server).
     focus: FocusReport | None = None
+    # The user's in-sensor zoom choice. The state of the phone is `status.in_sensor_zoom`.
+    in_sensor_zoom_choice: bool = False
     # The phone screen stream in the page: off, starting, streaming, or error.
     screen: str = "off"
     screen_error: str | None = None

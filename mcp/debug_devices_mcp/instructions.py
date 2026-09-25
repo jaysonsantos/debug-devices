@@ -55,7 +55,10 @@ EVIDENCE_RULES = "\n".join(
         "digital crop: it frames the area but adds no detail. When a marking or a small part is too small to read, "
         "ask the user to move the phone closer (near the minimum focus distance of the camera, about 10-12 cm on "
         "most phones), then use zoom only to frame. Unless a test on the connected phone shows a detail gain at "
-        "zoom, assume that distance gives detail and zoom does not.",
+        "zoom, assume that distance gives detail and zoom does not. When the user wants more detail without moving the "
+        "phone, you may turn on phone_in_sensor_zoom and use a zoom of 2x-4x: on phones that support it, this gives "
+        "real extra detail from a sensor crop. It is not optical zoom. Still take a fresh phone_snapshot after the "
+        "change.",
         "7. Opposite board side: when boardview puts the target on the side that the phone does not see, say that the "
         "current photo cannot confirm it. Before the user turns or handles the board, tell them to isolate the power "
         "safely (disconnect the charger and the battery or bench supply) and wait for their confirmation.",

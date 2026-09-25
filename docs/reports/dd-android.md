@@ -251,6 +251,71 @@ Proposal (no contract change made):
 2. **Where it helps:** 2x (a real half-field crop). From 2x to 4x it gives the 2x sensor crop plus a smaller digital crop, so it is still better than NORMAL, but less at 4x. Below 2x there is no in-sensor crop.
 3. **Next step that is worth it:** the quarter-field mode at 4x. The Xiaomi app restarted the session for it. Test: rebind the vendor session while the zoom is already 4x (keep the zoom over the rebind instead of the start state), and check for `rawCropRegion` `1530 1152 1020 756` and mask 96.
 
+
+### Round: 4x quarter-field mode (part 1)
+
+Brief: get the Xiaomi app's quarter-field mode at 4x (`rawCropRegion 1530 1152 1020 756`, `sensorModeMask 96`) by a rebind at the 4x boundary. Result: **the quarter-field mode is not reachable with our streams, and a rebind at 4x makes it worse. What works: keep the half-field mode from 2x up, also at 4x and 6x.** The automatic rebind is removed again.
+
+What I found on `7fad170e` (vendor session on, `dumpsys media.camera`, complete frame dumps only):
+
+1. I implemented the rebind at the 4x boundary (zoom bands, a 600 ms debounce, through `ControlGate`, keeping zoom and torch). A session that is created at 4x or 6x gives `InSensorZoomState = 0`, the full raw crop `0 4 4080 3052`, and mask 0: no in-sensor zoom at all. Rebinds took 4.8-8.4 s.
+2. Probes in one session: zoom 3.9 -> half field (state 2, mask 48). A session created at 1x, then 1x -> 2x -> 4x -> 6x: the half field stays at 4x and 6x. A direct jump 1x -> 5x: state 1, mask 0 (not entered). 1x -> 3x -> 5x: half field at 5x.
+3. Rule: **the HAL enters the half-field mode only when the zoom lands in [2x, 4x). After that it keeps the mode above 4x.** The quarter mode (mask 96) never appeared in our session, at any zoom and after any rebind. The Xiaomi app uses 1440 x 1080 YUV streams and a vendor still pipeline, not a 4080 x 3060 JPEG stream. That is the likely condition for the quarter mode. Our snapshot would lose resolution with that stream set, so I did not try it.
+
+Code (final):
+
+- The automatic zoom-band rebind (`Debouncer`, zoom bands, their tests) is **removed**, because it only made 4x worse.
+- `InSensorZoomLogic.zoomPath(state, from, to)`: in an `ON` session, a jump from below 2x to 4x or more goes through `ENTRY_RATIO = 3x`, with `ENTRY_SETTLE_MILLIS = 300` between the steps. `updateZoom` and the rebind restore use it. Constants in `Constants.InSensorZoom`.
+- Bug found and fixed on the phone: the restore after a rebind read the old state (OFF), so it jumped 1x -> 4x directly. The restore now gets the state of the new session.
+
+Device results (session on, 21:11-21:16):
+
+| Case | `InSensorZoomState` | `rawCropRegion` | mask |
+|---|---|---|---|
+| On, 1x | 0 or 1 | `0 4 4080 3052` | 0 |
+| On, 2x | 2 | `1028 776 2024 1508` (half) | 48 |
+| On, 4x (through 2x or 3x) | 2 | half | 48 |
+| On, 6x | 2 | half | 48 |
+| On, jump 1x -> 5x (with the zoom path) | 2 | half | 48 |
+| Turned on at 4x and at 6x (rebind with the zoom path) | 2 | half | 48 |
+| Off (NORMAL), 4x | 0 | - | 0 |
+| Xiaomi app, 4x (research) | 2 | `1530 1152 1020 756` (quarter) | 96 |
+
+Sharpness, 800 x 800 centre crop (Laplacian variance / mean squared gradient): on 1x 530.2 / 253.8, on 2x 226.3 / 155.5, on 4x 15.5 / 46.7, on 6x 5.0 / 23.4, off 4x 10.4 / 51.6. At 4x, on against off: 1.5x Laplacian variance, about the same gradient. Visual check (native pixels): at 4x the pads are narrower and better separated with in-sensor zoom on. A small, real gain (a 2x digital enlargement of the full-density half field instead of a 4x enlargement of the binned image). It does not match the Xiaomi 4x.
+
+Preview gap and time of a rebind (log `Camera open again, zoom and torch set`): 0.8-1.4 s until the camera is open again with zoom and torch set. Turning in-sensor zoom on takes about 5 s in total, because the app checks the vendor session for 4 s (`SESSION_CHECK_MILLIS`). Turning it off takes about 0.9 s.
+
+### Round: API switch for in-sensor zoom (part 2)
+
+Contract: `POST /v1/camera {"in_sensor_zoom": bool}` and `CameraStatus.in_sensor_zoom` (`off`, `on`, `unsupported`, `fallback`), changed by the orchestrator.
+
+Code:
+
+- `CameraSettingsRequest` with a required strict boolean. `ApiJson` refuses unknown fields.
+- `CameraController.inSensorZoomRequested` is the one place of the request (off after an app start). `setInSensorZoom` goes through `ControlGate`. `needsReconfigure`: a new value binds again, and `true` again after a `fallback` tries the vendor session once more. The same value does nothing. `reconfigure` saves zoom and torch, binds again, and sets them back (with the zoom path). `unsupported` (no vendor keys, or Android < 9) returns 200. A failed vendor session gives `fallback` and the NORMAL mode.
+- `InSensorZoomState` has the API words. `CameraStatus.in_sensor_zoom` shows the state of the current session.
+- `MainActivity`: the intent extra stays as an adb helper and goes through `setInSensorZoom` (keeps zoom and torch). The label observes the zoom and torch of the new `CameraInfo` after a rebind, and removes the old observers.
+- New unit tests: `ApiServerTest` +4 (on and off keep zoom and torch, `unsupported` is 200, 6 bad bodies, 503 before the start state and 405 on GET), `InSensorZoomLogicTest` (zoom path, reconfigure rule, state words). 94 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Checks on `7fad170e` with curl (local port 18765):
+
+| Request | Result |
+|---|---|
+| `GET /v1/status` after start | `"in_sensor_zoom":"off"` |
+| `{"in_sensor_zoom":true}` at 1x / 4x / 6x | 200, `on`, 4.9-5.4 s, zoom kept |
+| `{"in_sensor_zoom":false}` at 6x with torch on | 200, `off`, 0.89 s, zoom 6.0 and torch on kept |
+| `{"in_sensor_zoom":false}` again | 200, 0.02 s (no rebind) |
+| `{}`, `"true"`, `1`, `null`, an unknown field | 400 `bad_request` |
+| `GET /v1/camera` | 405 `method_not_allowed` |
+
+- `unsupported` and `fallback` cannot happen on this phone (it has the keys, and the session works). The unit tests cover them.
+- The crash buffer has 2 FATAL entries from 20:43, both from another app (`com.plexapp.android`). None from our app.
+- The camera was free during the tests: only our app was a client. A `com.android.camera` process ran in the background but did not open the camera.
+
+End state: zoom 1x, torch off, in-sensor zoom off, rotation auto, both flips false. Images and dumps only in my scratch directory (`.../scratchpad/q4x/`).
+
+Proposal: keep in-sensor zoom off by default. The MCP can turn it on for work at 2x and more. The detail gain is real at 2x, and small at 4x and more. For more detail at 4x the quarter mode needs the Xiaomi stream set (YUV 1440 x 1080), which costs snapshot resolution. I do not recommend that now.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

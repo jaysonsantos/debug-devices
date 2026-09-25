@@ -83,6 +83,10 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             val request = call.receive<PreviewRequest>()
             call.respond(camera.setPreviewFlip(PreviewFlipLogic.fromRequest(request)))
         }
+        post(Constants.Paths.CAMERA) {
+            val request = call.receive<CameraSettingsRequest>()
+            call.respond(camera.setInSensorZoom(request.inSensorZoom))
+        }
         get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
     }
 }

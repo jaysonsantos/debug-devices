@@ -16,6 +16,7 @@ from debug_devices_mcp.adb import Adb, AdbError
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
 from debug_devices_mcp.board.tools import BoardSession, register_board_tools
+from debug_devices_mcp.camera_choice import InSensorZoomChoice, InSensorZoomSync
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
 from debug_devices_mcp.focus import PhoneStatusReport
@@ -103,9 +104,23 @@ class Services:
     orientation: OrientationState = field(default_factory=OrientationState)
     # Sends the same flips to the phone preview, so the phone screen matches the snapshots.
     preview_sync: PreviewSync = field(init=False)
+    # The user's in-sensor zoom choice, and the sync that sends it again after an app start.
+    in_sensor_zoom: InSensorZoomChoice = field(default_factory=InSensorZoomChoice)
+    in_sensor_zoom_sync: InSensorZoomSync = field(init=False)
 
     def __post_init__(self) -> None:
         self.preview_sync = PreviewSync(self.phone, self.orientation)
+        self.in_sensor_zoom_sync = InSensorZoomSync(self.phone, self.in_sensor_zoom)
+
+    def reset_phone_syncs(self) -> None:
+        """A new phone_connect: try the newer endpoints again (the app can have an update)."""
+        self.preview_sync.reset()
+        self.in_sensor_zoom_sync.reset()
+
+    async def sync_phone(self, status: CameraStatus) -> CameraStatus:
+        """Bring the app back to the user's choices when a status shows other ones (for example after an app start)."""
+        status = await self.preview_sync.ensure(status)
+        return await self.in_sensor_zoom_sync.ensure(status)
 
     async def phone_snapshot(self) -> bytes:
         """One phone still in the orientation that the user chose (the true bytes when there is no flip)."""
@@ -145,6 +160,7 @@ class Services:
             ),
             vision=vision,
             orientation=OrientationState(SettingsStore.in_dir(state_dir())),
+            in_sensor_zoom=InSensorZoomChoice(SettingsStore.in_dir(state_dir())),
             board=BoardSession.create(
                 runner,
                 LoaderOptions(
@@ -254,8 +270,8 @@ async def connect_phone(services: Services) -> PhoneConnection:
             "Unlock the phone and check that the app is installed and has the camera permission."
         ) from exc
     # After an app start the preview is not flipped: send the chosen flips again.
-    services.preview_sync.reset()
-    status = await services.preview_sync.ensure(status)
+    services.reset_phone_syncs()
+    status = await services.sync_phone(status)
     return PhoneConnection(
         serial=device.serial,
         local_port=settings.local_forward_port,
@@ -289,7 +305,7 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         """
         with tool_errors():
             # A status with other preview flips means that the app restarted: send the flips again.
-            status = await services.preview_sync.ensure(await services.phone.status())
+            status = await services.sync_phone(await services.phone.status())
         return PhoneStatusReport.of(status)
 
     @server.tool()
@@ -310,6 +326,20 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         """Turn the phone torch (flash LED) on or off."""
         with tool_errors():
             return await services.phone.torch(enabled)
+
+    @server.tool()
+    async def phone_in_sensor_zoom(enabled: bool) -> PhoneStatusReport:
+        """Turn the in-sensor zoom on or off. Real extra detail at 2x-4x from a sensor crop (not optics) on phones
+        that support it; the preview stops about 1 s while the camera rebinds.
+
+        `in_sensor_zoom` in the result: `on`, `off`, `unsupported` (this phone has no such mode), or `fallback` (the
+        mode failed; the camera runs normally). The choice persists and comes back after an app restart. Take a
+        fresh phone_snapshot after the change; this is not optical zoom.
+        """
+        services.in_sensor_zoom.set(enabled)
+        with tool_errors():
+            status = await services.in_sensor_zoom_sync.send()
+        return PhoneStatusReport.of(status)
 
     @server.tool()
     async def phone_rotation(degrees: RotationDegrees | None = None, auto: bool = False) -> CameraStatus:

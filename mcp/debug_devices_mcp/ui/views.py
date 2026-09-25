@@ -1,6 +1,6 @@
 """JSON shapes of the monitor web API."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from debug_devices_mcp.phone_api import RotationDegrees, ZoomStep
 from debug_devices_mcp.ui.events import PhoneState, ToolCallEvent
@@ -40,6 +40,11 @@ class OrientationBody(BaseModel):
 
     flip_horizontal: bool | None = None
     flip_vertical: bool | None = None
+
+
+class InSensorZoomBody(BaseModel):
+    # Strict: "yes" or 1 must not turn a camera mode on.
+    enabled: StrictBool
 
 
 class RotationBody(BaseModel):

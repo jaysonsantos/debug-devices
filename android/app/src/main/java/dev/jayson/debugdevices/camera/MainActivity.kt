@@ -13,6 +13,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.TorchState
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -38,8 +39,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var camera: CameraController
     private var bindJob: Job? = null
 
-    /** In-sensor zoom experiment. Off at process start; `--ez in_sensor_zoom true|false` changes it. */
-    private var inSensorZoom = false
+    /** The camera info whose zoom and torch the label observes. A rebind can give a new one. */
+    private var observedInfo: CameraInfo? = null
     private lateinit var server: ApiServer
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
@@ -76,7 +77,8 @@ class MainActivity : ComponentActivity() {
         camera = CameraController(
             applicationContext,
             onRotationChanged = { next -> onRotationChanged(next) },
-            onPreviewFlipChanged = { applyPreviewFlip() }
+            onPreviewFlipChanged = { applyPreviewFlip() },
+            onCameraBound = { bound -> observe(bound) }
         )
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.
@@ -99,7 +101,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        inSensorZoom = readInSensorZoom(intent)
+        // adb test helper: `--ez in_sensor_zoom true` at start. The API switch is POST /v1/camera.
+        camera.inSensorZoomRequested = readInSensorZoom(intent, current = false)
         if (hasCameraPermission()) {
             bindCamera()
         } else {
@@ -110,17 +113,24 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        val next = readInSensorZoom(intent)
-        if (next != inSensorZoom) {
-            inSensorZoom = next
-            if (hasCameraPermission()) bindCamera()
+        val next = readInSensorZoom(intent, current = camera.inSensorZoomRequested)
+        if (next != camera.inSensorZoomRequested && hasCameraPermission()) {
+            lifecycleScope.launch {
+                try {
+                    camera.setInSensorZoom(next)
+                } catch (cause: CancellationException) {
+                    throw cause
+                } catch (cause: Exception) {
+                    Log.w(Constants.Log.TAG, Constants.Messages.REBIND_FAILED, cause)
+                }
+            }
         }
     }
 
-    private fun readInSensorZoom(intent: Intent?): Boolean {
+    private fun readInSensorZoom(intent: Intent?, current: Boolean): Boolean {
         val extra = Constants.InSensorZoom.INTENT_EXTRA
         return InSensorZoomLogic.requested(
-            current = inSensorZoom,
+            current = current,
             extraPresent = intent?.hasExtra(extra) == true,
             extraValue = intent?.getBooleanExtra(extra, false) == true
         )
@@ -151,8 +161,7 @@ class MainActivity : ComponentActivity() {
             // No error from bind or the start state may escape this coroutine: it runs on the main thread,
             // so an escaped error kills the app. A coroutine cancel (activity destroyed) goes through.
             try {
-                val boundCamera = camera.bind(this@MainActivity, previewView, inSensorZoom)
-                observe(boundCamera)
+                val boundCamera = camera.bind(this@MainActivity, previewView)
                 camera.applyStartState(boundCamera)
             } catch (cause: CancellationException) {
                 throw cause
@@ -189,6 +198,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun observe(boundCamera: Camera) {
+        if (boundCamera.cameraInfo === observedInfo) return
+        observedInfo?.zoomState?.removeObservers(this)
+        observedInfo?.torchState?.removeObservers(this)
+        observedInfo = boundCamera.cameraInfo
         boundCamera.cameraInfo.zoomState.observe(this) { state ->
             zoomRatio = state.zoomRatio
             renderStatus()

@@ -22,6 +22,7 @@ Change this file first, then change both sides.
 | POST | `/v1/torch` | `{"enabled": true}` | `CameraStatus` |
 | POST | `/v1/rotation` | `{"degrees": 0 \| 90 \| 180 \| 270}` or `{"auto": true}` | `CameraStatus` |
 | POST | `/v1/preview` | `{"flip_horizontal": true, "flip_vertical": false}` | `CameraStatus` |
+| POST | `/v1/camera` | `{"in_sensor_zoom": true}` | `CameraStatus` |
 | GET | `/v1/snapshot` | none | `image/jpeg` bytes of one full still capture |
 
 `CameraStatus`:
@@ -47,7 +48,8 @@ Change this file first, then change both sides.
     "focal_length_mm": 6.07,
     "sensor_width_mm": 9.14,
     "output_width_px": 4080
-  }
+  },
+  "in_sensor_zoom": "off"
 }
 ```
 
@@ -68,6 +70,8 @@ Rules:
 - `POST /v1/preview` mirrors only the camera preview on the phone screen: `flip_horizontal` left-right, `flip_vertical` upside down. The status label and the other on-screen text stay readable (not mirrored). Both fields are required booleans; a missing field, another type, or an unknown field returns 400 `bad_request`. It does not change `/v1/snapshot`: the snapshot stays in the true orientation, and the MCP server applies its own flips to the snapshots. After an app start, both preview flips are false; the MCP server sends them again after `phone_connect` and after an app start.
 - `focus` comes from the latest preview capture result of the back camera. `distance_diopters` is `LENS_FOCUS_DISTANCE` (1/m; 0 means infinity), `null` until the first result or when the lens has fixed focus. `state` is the autofocus state: `focused`, `scanning`, `unfocused`, or `unknown`. `calibration` is `LENS_INFO_FOCUS_DISTANCE_CALIBRATION`: `uncalibrated`, `approximate`, or `calibrated` (with `uncalibrated`, the distance is not in real units: clients must not show cm). `min_distance_diopters` is `LENS_INFO_MINIMUM_FOCUS_DISTANCE` (0 = fixed focus). The `focus` object can be `null` before the camera is bound.
 - `optics` describes the camera of `/v1/snapshot`: the first focal length, the physical sensor width (`SENSOR_INFO_PHYSICAL_SIZE`), and the snapshot width in pixels before rotation. Clients compute the distance in cm (100 / diopters) and the detail in px/mm (`output_width_px * focal_length_mm / (sensor_width_mm * distance_mm)`, thin-lens estimate). Zoom does not change this detail value: zoom crops.
+- `POST /v1/camera {"in_sensor_zoom": true|false}` turns the vendor in-sensor zoom on or off. The body field is a required boolean (400 `bad_request` otherwise). The app binds the camera again: the preview stops for about 1 s, and the zoom and the torch stay as they were. `CameraStatus.in_sensor_zoom` is `off`, `on`, `unsupported` (the phone has no such vendor mode; the request still returns 200 with this value), or `fallback` (the vendor session failed; the app runs in the normal mode). After an app start, it is `off`.
+- With `in_sensor_zoom` `on`, a zoom at 2x or more can give real extra detail (a sensor crop at full density, not optics). The detail estimate in `optics` does not include this gain.
 - The camera endpoints return 503 `camera_not_ready` while the app is not in the foreground.
 - `/v1/snapshot` does not fire the flash. The torch state after a snapshot is the same as before it.
 

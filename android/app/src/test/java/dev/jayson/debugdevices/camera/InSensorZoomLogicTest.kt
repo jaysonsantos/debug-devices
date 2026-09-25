@@ -58,6 +58,43 @@ class InSensorZoomLogicTest {
     }
 
     @Test
+    fun `a jump over the half-field range goes through the entry ratio in an ON session`() {
+        val on = InSensorZoomState.ON
+        assertEquals(listOf(3f, 5f), InSensorZoomLogic.zoomPath(on, from = 1f, to = 5f))
+        assertEquals(listOf(3f, 4f), InSensorZoomLogic.zoomPath(on, from = 1.9f, to = 4f))
+        assertEquals(listOf(5f), InSensorZoomLogic.zoomPath(on, from = 2f, to = 5f))
+        assertEquals(listOf(6f), InSensorZoomLogic.zoomPath(on, from = 4f, to = 6f))
+        assertEquals(listOf(3.9f), InSensorZoomLogic.zoomPath(on, from = 1f, to = 3.9f))
+        assertEquals(listOf(1f), InSensorZoomLogic.zoomPath(on, from = 5f, to = 1f))
+        InSensorZoomState.entries.filter { it != on }.forEach {
+            assertEquals(listOf(5f), InSensorZoomLogic.zoomPath(it, from = 1f, to = 5f))
+        }
+        val entry = Constants.InSensorZoom.ENTRY_RATIO
+        assertTrue(
+            entry >= Constants.InSensorZoom.HALF_FIELD_RATIO && entry < Constants.InSensorZoom.QUARTER_FIELD_RATIO
+        )
+    }
+
+    @Test
+    fun `reconfigure on a change, or on true again after a fallback`() {
+        assertTrue(InSensorZoomLogic.needsReconfigure(requested = false, InSensorZoomState.OFF, enabled = true))
+        assertTrue(InSensorZoomLogic.needsReconfigure(requested = true, InSensorZoomState.ON, enabled = false))
+        assertFalse(InSensorZoomLogic.needsReconfigure(requested = true, InSensorZoomState.ON, enabled = true))
+        assertFalse(InSensorZoomLogic.needsReconfigure(requested = false, InSensorZoomState.OFF, enabled = false))
+        assertTrue(InSensorZoomLogic.needsReconfigure(requested = true, InSensorZoomState.FALLBACK, enabled = true))
+        assertFalse(InSensorZoomLogic.needsReconfigure(requested = true, InSensorZoomState.UNSUPPORTED, enabled = true))
+    }
+
+    @Test
+    fun `state words for the API`() {
+        assertEquals("\"fallback\"", ApiJson.encodeToString(InSensorZoomState.serializer(), InSensorZoomState.FALLBACK))
+        assertEquals(
+            "\"unsupported\"",
+            ApiJson.encodeToString(InSensorZoomState.serializer(), InSensorZoomState.UNSUPPORTED)
+        )
+    }
+
+    @Test
     fun `only ON uses the vendor session type`() {
         assertEquals(0x9005, Constants.InSensorZoom.VENDOR_SESSION_TYPE)
         assertEquals(36869, InSensorZoomLogic.sessionType(InSensorZoomState.ON))

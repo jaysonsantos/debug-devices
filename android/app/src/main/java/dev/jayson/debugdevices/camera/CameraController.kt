@@ -10,6 +10,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.impl.Camera2ImplConfig
@@ -40,6 +41,7 @@ import androidx.lifecycle.asFlow
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -55,7 +57,8 @@ import kotlinx.coroutines.withContext
 class CameraController(
     private val context: Context,
     onRotationChanged: (Int) -> Unit,
-    private val onPreviewFlipChanged: (PreviewFlip) -> Unit
+    private val onPreviewFlipChanged: (PreviewFlip) -> Unit,
+    private val onCameraBound: (Camera) -> Unit
 ) : CameraPort {
     private val gate = ControlGate()
 
@@ -105,17 +108,23 @@ class CameraController(
     /** The focus for the phone label. Main thread only. */
     fun focusInfo(): FocusInfo? = FocusLogic.info(focusStatic, focusSample)
     private var owner: LifecycleOwner? = null
+    private var previewView: PreviewView? = null
 
     /** The in-sensor zoom state of the last bind. Main thread only. */
     var inSensorZoomState = InSensorZoomState.OFF
         private set
 
+    /** The one place of the in-sensor zoom request. Off after an app start. Main thread only. */
+    var inSensorZoomRequested = false
+
     /**
      * Binds the back camera. With [inSensorZoom], it sets the vendor session parameter when the camera publishes
      * the key, checks that the session streams, and binds again without it when the session fails.
      */
-    suspend fun bind(owner: LifecycleOwner, previewView: PreviewView, inSensorZoom: Boolean): Camera =
+    suspend fun bind(owner: LifecycleOwner, previewView: PreviewView, restore: CameraRestore? = null): Camera =
         withContext(Dispatchers.Main) {
+            this@CameraController.previewView = previewView
+            val inSensorZoom = inSensorZoomRequested
             val provider = ProcessCameraProvider.getInstance(context).await()
             val vendorKey = findVendorKey(provider)
             val sessionTypeSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
@@ -137,15 +146,25 @@ class CameraController(
                 Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_BIND_FAILED, cause)
                 bindUseCases(provider, owner, previewView, vendorParams = emptyList(), sessionType = null)
             }
+            restore?.let {
+                val started = SystemClock.elapsedRealtime()
+                restoreState(bound, it, state)
+                Log.i(
+                    Constants.Log.TAG,
+                    "Camera open again, zoom and torch set: ${SystemClock.elapsedRealtime() - started} ms"
+                )
+            }
             if (state == InSensorZoomState.ON) {
                 val stable = InSensorZoomLogic.isStable(watchSession(owner, bound, previewView))
                 state = InSensorZoomLogic.afterSessionCheck(state, stable)
                 if (state == InSensorZoomState.FALLBACK) {
                     Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_FALLBACK)
                     bound = bindUseCases(provider, owner, previewView, vendorParams = emptyList(), sessionType = null)
+                    restore?.let { restoreState(bound, it, state) }
                 }
             }
             inSensorZoomState = state
+            onCameraBound(bound)
             Log.i(
                 Constants.Log.TAG,
                 "In-sensor zoom: requested=$inSensorZoom, sessionKey=${vendorKey.presence.inSessionKeys}, " +
@@ -337,6 +356,62 @@ class CameraController(
         return events
     }
 
+    /** Sets the zoom and the torch again as soon as the new session opens (before the in-sensor session check). */
+    private suspend fun restoreState(bound: Camera, restore: CameraRestore, state: InSensorZoomState) {
+        bound.cameraInfo.cameraState.asFlow().first { it.type == CameraState.Type.OPEN }
+        // A new session starts at 1x, so the restore follows the same zoom path as a request.
+        setZoomAlongPath(bound, Constants.Zoom.UNIT_RATIO, restore.zoomRatio, state)
+        if (bound.cameraInfo.hasFlashUnit()) {
+            runControl {
+                bound.cameraControl.enableTorch(restore.torchEnabled).await()
+            }
+        }
+    }
+
+    /** Sets the zoom through [InSensorZoomLogic.zoomPath], with a short settle time between the steps. */
+    private suspend fun setZoomAlongPath(
+        target: Camera,
+        from: Float,
+        to: Float,
+        state: InSensorZoomState = inSensorZoomState
+    ) {
+        val path = InSensorZoomLogic.zoomPath(state, from, to)
+        path.forEachIndexed { index, step ->
+            runControl { target.cameraControl.setZoomRatio(step).await() }
+            if (index < path.lastIndex) delay(Constants.InSensorZoom.ENTRY_SETTLE_MILLIS)
+        }
+    }
+
+    /** Binds again with the current request and keeps the zoom and the torch. The caller holds the gate lock. */
+    private suspend fun reconfigure(reason: String) {
+        val current = activeCamera()
+        val restore = CameraRestore(
+            zoomRatio = current.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO,
+            torchEnabled = current.cameraInfo.torchState.value == TorchState.ON
+        )
+        val lifecycleOwner =
+            owner ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
+        val view = previewView ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
+        val started = SystemClock.elapsedRealtime()
+        bind(lifecycleOwner, view, restore)
+        Log.i(
+            Constants.Log.TAG,
+            "Rebind ($reason) at zoom ${restore.zoomRatio}: ${SystemClock.elapsedRealtime() - started} ms, " +
+                "state=$inSensorZoomState"
+        )
+    }
+
+    override suspend fun setInSensorZoom(enabled: Boolean): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            activeCamera()
+            if (InSensorZoomLogic.needsReconfigure(inSensorZoomRequested, inSensorZoomState, enabled)) {
+                inSensorZoomRequested = enabled
+                reconfigure(Constants.Messages.REBIND_REASON_API)
+            }
+            readStatus(activeCamera())
+        }
+    }
+
     /**
      * Waits until the camera is open, then sets the start state of the contract: zoom at min, torch off.
      * The API returns 503 until this is done. A failure goes to the caller, and the API opens anyway.
@@ -365,7 +440,7 @@ class CameraController(
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
             val ratio = target(readStatus(camera))
-            runControl { camera.cameraControl.setZoomRatio(ratio).await() }
+            setZoomAlongPath(camera, camera.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO, ratio)
             // The zoom LiveData updates later, so report the ratio that CameraX accepted.
             readStatus(camera).copy(zoomRatio = ratio)
         }
@@ -451,7 +526,8 @@ class CameraController(
             previewFlipHorizontal = previewFlip.horizontal,
             previewFlipVertical = previewFlip.vertical,
             focus = focusInfo(),
-            optics = readOptics()
+            optics = readOptics(),
+            inSensorZoom = inSensorZoomState
         )
     }
 

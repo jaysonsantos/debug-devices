@@ -185,6 +185,7 @@ class tools:
     PHONE_SNAPSHOT = "phone_snapshot"
     PHONE_ROTATION = "phone_rotation"
     PHONE_SNAPSHOT_ORIENTATION = "phone_snapshot_orientation"
+    PHONE_IN_SENSOR_ZOOM = "phone_in_sensor_zoom"
     BOARD_OPEN = "board_open"
     BENCH_INSTRUCTIONS = "bench_instructions"
     # Their results hold the user's instructions text: other monitors get only the tool name and the status.

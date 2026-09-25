@@ -1,19 +1,30 @@
 package dev.jayson.debugdevices.camera
 
-/** State of the Qualcomm vendor in-sensor zoom experiment (see `docs/research/phone-lenses.md`, option B). */
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+/** State of the vendor in-sensor zoom. The API words come from `docs/phone-api.md`. */
+@Serializable
 enum class InSensorZoomState {
     /** Not requested. The default. */
+    @SerialName("off")
     OFF,
 
     /** Requested: the session runs with the vendor session type 0x9005 and the vendor session parameter. */
+    @SerialName("on")
     ON,
 
     /** Requested, but the camera does not publish the vendor key, or Android is older than 9. Bound without it. */
+    @SerialName("unsupported")
     UNSUPPORTED,
 
     /** Requested, but the vendor session failed to bind or showed no preview frames. Bound again in NORMAL mode. */
+    @SerialName("fallback")
     FALLBACK
 }
+
+/** Zoom and torch to set again after a rebind. */
+data class CameraRestore(val zoomRatio: Float, val torchEnabled: Boolean)
 
 /** Signals from a new camera session. */
 enum class SessionEvent {
@@ -75,6 +86,24 @@ object InSensorZoomLogic {
     } else {
         emptyMap()
     }
+
+    /**
+     * The zoom steps from [from] to [to]. In an [InSensorZoomState.ON] session, a jump from below the half-field
+     * ratio to the quarter-field ratio or more goes through the entry ratio, so the HAL enters the half-field mode.
+     */
+    fun zoomPath(state: InSensorZoomState, from: Float, to: Float): List<Float> {
+        val jumpsOverEntry = from < Constants.InSensorZoom.HALF_FIELD_RATIO &&
+            to >= Constants.InSensorZoom.QUARTER_FIELD_RATIO
+        return if (state == InSensorZoomState.ON && jumpsOverEntry) {
+            listOf(Constants.InSensorZoom.ENTRY_RATIO, to)
+        } else {
+            listOf(to)
+        }
+    }
+
+    /** A new value binds again. `true` again after a fallback tries the vendor session once more. */
+    fun needsReconfigure(requested: Boolean, state: InSensorZoomState, enabled: Boolean): Boolean =
+        enabled != requested || (enabled && state == InSensorZoomState.FALLBACK)
 
     /** Only an [InSensorZoomState.ON] session sets the vendor parameter. */
     fun setsVendorParameter(state: InSensorZoomState): Boolean = state == InSensorZoomState.ON

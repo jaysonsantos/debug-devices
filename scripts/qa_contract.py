@@ -58,6 +58,7 @@ class Route(StrEnum):
     TORCH = "/v1/torch"
     ROTATION = "/v1/rotation"
     PREVIEW = "/v1/preview"
+    CAMERA = "/v1/camera"
     SNAPSHOT = "/v1/snapshot"
     UNKNOWN = "/v1/does-not-exist"
 
@@ -110,7 +111,11 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
 }
 PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
 # Objects in CameraStatus, checked by expect_focus and expect_optics.
-CAMERA_STATUS_OBJECTS = ("focus", "optics")
+CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom")
+IN_SENSOR_ZOOM_STATES = ("off", "on", "unsupported", "fallback")
+# After POST /v1/camera: a phone can say that it cannot (unsupported) or that the vendor session failed (fallback).
+IN_SENSOR_ZOOM_AFTER_ON = ("on", "unsupported", "fallback")
+IN_SENSOR_ZOOM_AFTER_OFF = ("off", "unsupported")
 FOCUS_FIELDS = ("distance_diopters", "state", "calibration", "min_distance_diopters")
 FOCUS_STATES = ("focused", "scanning", "unfocused", "unknown")
 FOCUS_CALIBRATIONS = ("uncalibrated", "approximate", "calibrated")
@@ -262,6 +267,8 @@ def expect_status(resp: Response) -> CameraStatus:
     expect(set(data) == expected_keys, f"CameraStatus keys {sorted(data)} != {sorted(expected_keys)}")
     expect_focus(data["focus"])
     expect_optics(data["optics"])
+    zoom_mode = data["in_sensor_zoom"]
+    expect(zoom_mode in IN_SENSOR_ZOOM_STATES, f"in_sensor_zoom {zoom_mode!r} is not in {IN_SENSOR_ZOOM_STATES}")
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -528,6 +535,7 @@ WRONG_METHODS: list[tuple[Method, Route]] = [
     (Method.GET, Route.TORCH),
     (Method.GET, Route.ROTATION),
     (Method.GET, Route.PREVIEW),
+    (Method.GET, Route.CAMERA),
     (Method.POST, Route.STATUS),
     (Method.POST, Route.HEALTH),
     (Method.POST, Route.SNAPSHOT),
@@ -557,6 +565,8 @@ def expect_start_state(status: CameraStatus, what: str) -> None:
 def check_after_start(ctx: Context) -> None:
     """Right after an app start, the torch is off, the zoom is at min, and the rotation is auto."""
     expect_start_state(ctx.status(), "after the app start")
+    mode = expect_json(ctx.client.get(Route.STATUS))["in_sensor_zoom"]
+    expect(mode == "off", f"after the app start: in_sensor_zoom is {mode!r}, expected off")
 
 
 def check_rotation(ctx: Context) -> None:
@@ -569,6 +579,38 @@ def check_rotation(ctx: Context) -> None:
     auto = expect_status(ctx.client.post_json(Route.ROTATION, {"auto": True}))
     expect(auto.rotation_locked is False, "auto: rotation_locked is not false")
     ctx.notes.append(f"auto gives {auto.rotation_degrees} degrees")
+
+
+BAD_CAMERA_BODIES: list[tuple[str, bytes]] = [
+    ("empty body", b"{}"),
+    ("in_sensor_zoom is a string", b'{"in_sensor_zoom": "on"}'),
+    ("in_sensor_zoom is a number", b'{"in_sensor_zoom": 1}'),
+    ("in_sensor_zoom is null", b'{"in_sensor_zoom": null}'),
+    ("unknown field", b'{"in_sensor_zoom": true, "mode": "hdr"}'),
+]
+
+
+def check_camera(ctx: Context) -> None:
+    """The in-sensor zoom turns on and off, zoom and torch stay, and bad bodies are refused."""
+    before = ctx.status()
+    raw = ctx.client.post_json(Route.CAMERA, {"in_sensor_zoom": True})
+    on = expect_status(raw)
+    mode_on = expect_json(raw)["in_sensor_zoom"]
+    expect(mode_on in IN_SENSOR_ZOOM_AFTER_ON, f"in_sensor_zoom after true: {mode_on!r}")
+    expect_zoom(on.zoom_ratio, before.zoom_ratio, "zoom stays after POST /v1/camera")
+    expect(on.torch_enabled == before.torch_enabled, "torch stays after POST /v1/camera")
+    raw_status = ctx.client.get(Route.STATUS)
+    expect(expect_json(raw_status)["in_sensor_zoom"] == mode_on, "GET status shows another in_sensor_zoom")
+    ctx.notes.append(f"in_sensor_zoom true gives {mode_on!r}")
+    raw = ctx.client.post_json(Route.CAMERA, {"in_sensor_zoom": False})
+    expect_status(raw)
+    mode_off = expect_json(raw)["in_sensor_zoom"]
+    expect(mode_off in IN_SENSOR_ZOOM_AFTER_OFF, f"in_sensor_zoom after false: {mode_off!r}")
+    for name, body in BAD_CAMERA_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.CAMERA, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"camera {name}: {err}") from err
 
 
 BAD_PREVIEW_BODIES: list[tuple[str, bytes]] = [
@@ -795,6 +837,7 @@ READY_CHECKS: list[Check] = [
     check_torch_bad_request,
     check_rotation,
     check_preview,
+    check_camera,
     check_rotation_bad_request,
     check_post_needs_json_content_type,
     check_snapshot,

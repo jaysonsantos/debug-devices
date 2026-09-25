@@ -64,6 +64,7 @@ class Route(StrEnum):
     TORCH = "/v1/torch"
     ROTATION = "/v1/rotation"
     PREVIEW = "/v1/preview"
+    CAMERA = "/v1/camera"
     FAKE_FOCUS = "/fake/focus"
     SNAPSHOT = "/v1/snapshot"
 
@@ -150,12 +151,18 @@ class CameraStatus:
     preview_flip_vertical: bool = False
     focus: dict | None = None
     optics: dict | None = None
+    in_sensor_zoom: str = "off"
 
 
 # The body of POST /v1/preview: exactly these fields, both booleans.
 PREVIEW_FIELDS = frozenset({"flip_horizontal", "flip_vertical"})
 # An old app (from before POST /v1/preview) sends none of these status fields.
-NEWER_STATUS_FIELDS = ("preview_flip_horizontal", "preview_flip_vertical", "focus", "optics")
+NEWER_STATUS_FIELDS = ("preview_flip_horizontal", "preview_flip_vertical", "focus", "optics", "in_sensor_zoom")
+# The body of POST /v1/camera: exactly this field, a boolean.
+CAMERA_FIELD = "in_sensor_zoom"
+IN_SENSOR_ZOOM_ON = "on"
+IN_SENSOR_ZOOM_OFF = "off"
+IN_SENSOR_ZOOM_UNSUPPORTED = "unsupported"
 # Plausible values of a phone main camera (docs/phone-api.md example): about 29 cm from the board.
 DEFAULT_FOCUS_DIOPTERS = 3.41
 MIN_FOCUS_DIOPTERS = 10.0
@@ -184,6 +191,8 @@ class FakeConfig:
     # An app from before POST /v1/preview: the path is unknown (404), and the status has no preview fields.
     no_preview: bool = False
     focus_diopters: float = DEFAULT_FOCUS_DIOPTERS
+    # A phone without the vendor in-sensor zoom: POST /v1/camera answers 200 with "unsupported".
+    in_sensor_zoom_unsupported: bool = False
 
 
 class ApiError(Exception):
@@ -261,6 +270,16 @@ class FakeCamera:
         with self._lock:
             self._status.rotation_locked = degrees is not None
             self._status.rotation_degrees = self.config.physical_rotation if degrees is None else degrees
+        return self.status()
+
+    def camera(self, in_sensor_zoom: bool) -> CameraStatus:
+        """Turn the in-sensor zoom on or off (the real app binds the camera again). Zoom and torch stay."""
+        self._require_ready()
+        with self._lock:
+            if self.config.in_sensor_zoom_unsupported:
+                self._status.in_sensor_zoom = IN_SENSOR_ZOOM_UNSUPPORTED
+            else:
+                self._status.in_sensor_zoom = IN_SENSOR_ZOOM_ON if in_sensor_zoom else IN_SENSOR_ZOOM_OFF
         return self.status()
 
     def move_to(self, diopters: float) -> CameraStatus:
@@ -354,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, routes: dict[str, Callable[[], None]]) -> None:
         path = self.path.split("?", 1)[0]
         route = routes.get(path)
-        known = KNOWN_PATHS - {Route.PREVIEW} if self.camera.config.no_preview else KNOWN_PATHS
+        known = KNOWN_PATHS - {Route.PREVIEW, Route.CAMERA} if self.camera.config.no_preview else KNOWN_PATHS
         try:
             if route is None and path in known:
                 raise ApiError(ErrorCode.METHOD_NOT_ALLOWED, f"{self.command} is not allowed on {path}")
@@ -377,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
         routes = {Route.ZOOM: self.zoom, Route.TORCH: self.torch, Route.ROTATION: self.rotation}
         if not self.camera.config.no_preview:
             routes[Route.PREVIEW] = self.preview
+            routes[Route.CAMERA] = self.camera_settings
         routes[Route.FAKE_FOCUS] = self.fake_focus
         self._dispatch(routes)
 
@@ -427,6 +447,12 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(degrees, bool) or not isinstance(degrees, int) or degrees not in ROTATIONS:
             raise ApiError(ErrorCode.BAD_REQUEST, f'"degrees" must be one of {list(ROTATIONS)}')
         self._send_status(self.camera.rotation(degrees))
+
+    def camera_settings(self) -> None:
+        data = parse_body(self._read_body())
+        if set(data) != {CAMERA_FIELD} or not isinstance(data[CAMERA_FIELD], bool):
+            raise ApiError(ErrorCode.BAD_REQUEST, f'Send exactly "{CAMERA_FIELD}": true or false')
+        self._send_status(self.camera.camera(data[CAMERA_FIELD]))
 
     def fake_focus(self) -> None:
         data = parse_body(self._read_body())
@@ -540,6 +566,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--internal-error", action="store_true", help="camera endpoints return 500 internal_error")
     parser.add_argument(
+        "--in-sensor-zoom-unsupported",
+        action="store_true",
+        help='a phone without the vendor in-sensor zoom: POST /v1/camera gives "unsupported"',
+    )
+    parser.add_argument(
         "--focus-diopters",
         type=float,
         default=DEFAULT_FOCUS_DIOPTERS,
@@ -581,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
         internal_error=args.internal_error,
         no_preview=args.no_preview,
         focus_diopters=args.focus_diopters,
+        in_sensor_zoom_unsupported=args.in_sensor_zoom_unsupported,
         background=args.background,
         physical_rotation=args.physical_rotation,
         start_delay=args.start_delay,

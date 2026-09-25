@@ -171,6 +171,8 @@ async def test_evidence_rules_in_instructions_and_descriptions(settings: Setting
         "current photo cannot confirm it",
         "isolate the power",
         "assume that distance gives detail and zoom does not",
+        "you may turn on phone_in_sensor_zoom and use a zoom of 2x-4x",
+        "It is not optical zoom. Still take a fresh phone_snapshot after the change.",
     ):
         assert phrase in EVIDENCE_RULES
 

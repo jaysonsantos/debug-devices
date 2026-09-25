@@ -62,13 +62,15 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   app keeps the last rotation. `adb -s <serial> logcat -s DebugCamera:I` shows each rotation change.
 - `POST /v1/rotation {"degrees": 0|90|180|270}` locks the snapshot rotation (`RotationState`); `{"auto": true}` goes
   back to the sensor. `CameraStatus` has `rotation_degrees` and `rotation_locked`. After a start, the rotation is auto.
-- Experiment, off by default: vendor in-sensor zoom of the 200 MP sensor. Turn it on or off with
-  `adb -s <serial> shell am start -n dev.jayson.debugdevices.camera/.MainActivity --ez in_sensor_zoom true|false`.
-  On: the session opens with the vendor operation mode `0x9005` and the session parameters
-  `EnableInsensorZoom = 1` and `xiaomi.app.module = 163`, like the Xiaomi camera app. At 2x the sensor then reads a
-  half-field crop at full density (`InSensorZoomState = 2`). The app binds again in NORMAL mode when the vendor
-  session fails. It needs CameraX 1.7.0-alpha03 and two library-internal workarounds (see `CameraController.kt`).
-  `logcat -s DebugCamera:I` shows `In-sensor zoom: ..., sessionType=0x9005, state=ON`.
+- Vendor in-sensor zoom, off after an app start: `POST /v1/camera {"in_sensor_zoom": true|false}` (status field
+  `in_sensor_zoom`: `off`, `on`, `unsupported`, `fallback`). The app binds again and keeps the zoom and the torch
+  (the preview stops for about 1 s; turning it on takes about 5 s, because the app checks the new session for 4 s).
+  On: the session uses the vendor operation mode `0x9005` with `EnableInsensorZoom = 1` and
+  `xiaomi.app.module = 163`, like the Xiaomi camera app. From 2x on, the sensor reads a half-field crop at full
+  density (`InSensorZoomState = 2`), also at 4x and more. The HAL enters this mode only when the zoom lands between
+  2x and 4x, so a jump from below 2x to 4x or more goes through 3x first. The adb helper
+  `am start ... --ez in_sensor_zoom true|false` still works. It needs CameraX 1.7.0-alpha03 and two
+  library-internal workarounds (see `CameraController.kt`).
 - `POST /v1/preview {"flip_horizontal": bool, "flip_vertical": bool}` mirrors only the on-screen camera preview
   (`PreviewView` scale). The status label stays readable and shows `flip H` / `flip V`. Snapshots do not change.
   Both fields are required. The flips are in the viewer's upright frame, so when the phone is sideways, the axes

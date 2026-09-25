@@ -644,3 +644,55 @@ Playwright check (headless Firefox, 1440x600) against a separate eager server wi
 
 - I did not test with the real phone app: dd-android adds `focus` and `optics` now. With the new app, run `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict`, and check the distance with a ruler once. The thin-lens estimate and an `approximate` calibration can be off by some cm.
 - The detail value is for the snapshot at zoom 1. Zoom crops, so the snapshot gets no more pixels per mm; moving the phone closer does.
+
+## Round 17: in-sensor zoom switch (MCP server and monitor page)
+
+### What I did
+
+- `phone_api.py`:
+  - `InSensorZoom` (`off`, `on`, `unsupported`, `fallback`; an unknown value reads as `off`). `CameraStatus.in_sensor_zoom` is optional; None means an app from before the endpoint.
+  - New `CameraSettingsRequest` and `PhoneClient.camera()` for `POST /v1/camera`. A 404 becomes `CameraSettingsNotSupportedError`: "the phone app has no /v1/camera; update the phone app to use the in-sensor zoom".
+- `camera_choice.py` (new):
+  - `InSensorZoomChoice` persists the user's choice in `ui-settings.json` (`in_sensor_zoom`, default off), like the flips. It also works with `--no-ui`.
+  - `InSensorZoomSync` sends the choice when a status clearly differs: choice on and status `off` (an app restart), or choice off and status `on`. It never sends for `unsupported` or `fallback`, because each request rebinds the camera and stops the preview for about 1 s. After a 404, it warns one time and stops until the next `phone_connect`.
+- `server.py`:
+  - `Services.sync_phone(status)` runs the preview flip sync and this sync. `connect_phone` (so also `bench_start`), `phone_status`, and the monitor status poll use it. `reset_phone_syncs()` runs at each `phone_connect`.
+  - New tool `phone_in_sensor_zoom(enabled)`: it saves the choice, sends it, and returns the status report (a `CameraStatus` with the distance values). The description is the text of the brief. An old app gives a `ToolError` with "update the phone app".
+- `instructions.py`, evidence rule 6: "When the user wants more detail without moving the phone, you may turn on phone_in_sensor_zoom and use a zoom of 2x-4x: on phones that support it, this gives real extra detail from a sensor crop. It is not optical zoom. Still take a fresh phone_snapshot after the change." `test_board_marking.py` checks the new phrases.
+- `focus.py`: `FocusReport.sensor_zoom_boost` is true when the in-sensor zoom is `on` and the zoom is 2x or more (`SENSOR_ZOOM_MIN_RATIO`). The detail number stays the thin-lens estimate; no number is made up.
+- Monitor and page:
+  - `PhoneState.in_sensor_zoom_choice`. `phone_in_sensor_zoom` counts as a status tool, so the panel updates. `update_settings()` keeps the choice, as it does the flips.
+  - `POST /api/phone/in-sensor-zoom {"enabled": true}` runs the tool (source `ui`). The body is a `StrictBool`: the test showed that pydantic's lax mode took `"yes"` as true.
+  - The toggle "Sensor zoom (2x-4x detail)" is in the phone panel, and "Sensor zoom" in the full-screen live bar (`aria-pressed` shows the choice).
+  - The panel line "Sensor zoom" shows on, off, "not on this phone", "failed; normal camera", or "not in this app". When the mode is on and the zoom is 2x-4x, it adds the hint "real sensor detail at this zoom (not optics)".
+  - The distance line adds "+ sensor zoom" after the px/mm estimate.
+- `scripts/fake_phone.py`:
+  - `POST /v1/camera`: exactly `in_sensor_zoom`, a boolean; otherwise 400.
+  - The status field, `off` at start. Zoom and torch stay.
+  - `--in-sensor-zoom-unsupported` answers 200 with `unsupported`. The old-app mode (`--no-preview`) gives 404 and no field.
+- `scripts/qa_contract.py`:
+  - The status field must have an allowed value, and it is `off` after an app start.
+  - New `check_camera`: true gives `on`, `unsupported`, or `fallback`, and `GET /v1/status` shows the same. Zoom and torch stay. False gives `off` or `unsupported`. Five bad bodies give 400.
+  - `GET /v1/camera` gives 405.
+- Docs: `mcp/README.md` (the tools table and "Sensor zoom"), `README.md` (the tool list).
+
+### Tests
+
+- `mcp/tests/test_in_sensor_zoom.py` (8 tests):
+  - The client call, the old-app 404 error, and the old status without the field.
+  - The tool sets the choice, saves it, and a new start reads it. An old app gives a tool error with "update the phone app".
+  - `phone_connect` sends the choice. The same state sends nothing. After an app restart (status `off`), `phone_status` sends it again.
+  - With `unsupported` and with `fallback`, the server sends one time only (at connect), never again.
+  - Choice off and a phone that is `on`: the server sends false.
+  - The "+ sensor zoom" flag only with `on` and a zoom of 2x or more.
+  - The page route runs the tool, a non-boolean gives 400, and a page save of other settings keeps the choice.
+- `scripts/qa_contract.py --strict` against the fake phone: 20/20 in the normal mode (`in_sensor_zoom true gives 'on'`) and in `--in-sensor-zoom-unsupported` (`'unsupported'`).
+- Playwright (headless Firefox, fake phone, eager server on port 18890, `--webcam /dev/video99`, temporary folders):
+  - Supported: the panel toggle gives "on" (`aria-pressed` true). At 2.25x, the hint shows, and the line reads "≈ 29 cm · ~9 px/mm + sensor zoom · focused". The full-screen bar toggle sets it back to "off", and the "+ sensor zoom" goes away.
+  - Unsupported: "not on this phone", with no hint and no "+ sensor zoom".
+- `uv run pytest`: 262 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on my files: pass.
+
+### Open items
+
+- I did not test with the real phone app (dd-android builds `/v1/camera` now). With the new app, run `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict` (the camera check turns the mode on and off one time, so the preview stops twice for about 1 s), then compare a snapshot at 2x with the mode on and off.
+- In the unsupported mode, the button stays pressed (it shows the choice), and the line says "not on this phone".

@@ -20,6 +20,7 @@ object Constants {
         const val ZOOM = "$PREFIX/zoom"
         const val TORCH = "$PREFIX/torch"
         const val SNAPSHOT = "$PREFIX/snapshot"
+        const val CAMERA = "$PREFIX/camera"
         const val ROTATION = "$PREFIX/rotation"
         const val PREVIEW = "$PREFIX/preview"
     }
@@ -27,6 +28,9 @@ object Constants {
     object Zoom {
         /** `step: "in"` multiplies the zoom ratio by this factor, `step: "out"` divides it. */
         const val STEP_FACTOR = 1.5f
+
+        /** Zoom ratio 1x: the fallback when the camera has no zoom state yet. */
+        const val UNIT_RATIO = 1f
     }
 
     object Orientation {
@@ -59,6 +63,16 @@ object Constants {
 
         /** `adb shell am start -n .../.MainActivity --ez in_sensor_zoom true`. Off by default. */
         const val INTENT_EXTRA = "in_sensor_zoom"
+
+        /**
+         * The HAL enters the half-field sensor mode only when the zoom lands in [HALF_FIELD_RATIO, QUARTER_FIELD_RATIO)
+         * and then keeps it above QUARTER_FIELD_RATIO. A direct jump from below 2x to 4x or more never enters it
+         * (seen on 7fad170e). So such a jump goes through ENTRY_RATIO first and waits ENTRY_SETTLE_MILLIS.
+         */
+        const val HALF_FIELD_RATIO = 2f
+        const val QUARTER_FIELD_RATIO = 4f
+        const val ENTRY_RATIO = 3f
+        const val ENTRY_SETTLE_MILLIS = 300L
 
         /** How long a new session with the parameter must stream without a camera error. */
         const val SESSION_CHECK_MILLIS = 4_000L
@@ -94,6 +108,8 @@ object Constants {
         const val CAPTURE_FAILED = "The still capture failed"
         const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
         const val IN_SENSOR_ZOOM_FALLBACK = "In-sensor zoom session failed, binding again without it"
+        const val REBIND_REASON_API = "in_sensor_zoom request"
+        const val REBIND_FAILED = "In-sensor zoom rebind failed"
         const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
         const val START_STATE_PENDING = "Camera start state is not set yet"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "

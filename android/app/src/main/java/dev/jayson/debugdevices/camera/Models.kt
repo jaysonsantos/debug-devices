@@ -26,7 +26,8 @@ data class CameraStatus(
     @SerialName("preview_flip_horizontal") val previewFlipHorizontal: Boolean,
     @SerialName("preview_flip_vertical") val previewFlipVertical: Boolean,
     val focus: FocusInfo?,
-    val optics: Optics
+    val optics: Optics,
+    @SerialName("in_sensor_zoom") val inSensorZoom: InSensorZoomState
 )
 
 @Serializable
@@ -48,6 +49,14 @@ data class ZoomRequest(
 data class RotationRequest(
     @Serializable(with = StrictIntSerializer::class) val degrees: Int? = null,
     @Serializable(with = StrictBooleanSerializer::class) val auto: Boolean? = null
+)
+
+/** The field is required. `ApiJson` refuses unknown fields. */
+@Serializable
+data class CameraSettingsRequest(
+    @SerialName("in_sensor_zoom")
+    @Serializable(with = StrictBooleanSerializer::class)
+    val inSensorZoom: Boolean
 )
 
 /** Both fields are required. `ApiJson` refuses unknown fields. */

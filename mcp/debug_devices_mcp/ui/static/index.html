@@ -62,6 +62,7 @@
         <dt>Torch</dt><dd id="phone-torch">–</dd>
         <dt>Rotation</dt><dd id="phone-rotation">–</dd>
         <dt>Distance</dt><dd><span id="phone-focus" class="focus-text">–</span><br><span id="phone-focus-advice" class="hint focus-advice" hidden></span></dd>
+        <dt>Sensor zoom</dt><dd><span id="phone-isz-state">–</span><br><span id="phone-isz-hint" class="hint" hidden></span></dd>
         <dt>Preview flip</dt><dd id="phone-preview-flip" title="The phone mirrors its camera preview (live view)">–</dd>
       </dl>
       <div class="row">
@@ -76,6 +77,9 @@
       <div class="row">
         <label><input id="torch" type="checkbox" disabled> Torch</label>
         <button id="phone-snapshot" type="button">Take snapshot</button>
+      </div>
+      <div class="row">
+        <button type="button" data-isz aria-pressed="false" title="Real extra detail at 2x-4x from a sensor crop (not optics), on phones that support it. The preview stops about 1 s.">Sensor zoom (2x-4x detail)</button>
       </div>
       <div class="row">
         <span>Screen view</span>
@@ -102,6 +106,7 @@
           <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
           <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
           <button type="button" data-torch aria-label="Torch on or off">Torch</button>
+          <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x">Sensor zoom</button>
           <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
           <span id="live-zoom" class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
         </div>

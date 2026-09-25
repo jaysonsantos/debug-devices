@@ -21,7 +21,8 @@ class ZoomLogicTest {
             calibration = FocusCalibration.APPROXIMATE,
             minDistanceDiopters = 10f
         ),
-        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080)
+        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080),
+        inSensorZoom = InSensorZoomState.OFF
     )
 
     @Test

@@ -33,6 +33,8 @@ class defaults:
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
     PHONE_HTTP_TIMEOUT = timedelta(seconds=10)
     PHONE_SNAPSHOT_TIMEOUT = timedelta(seconds=30)
+    # Turning the in-sensor zoom on binds the camera again and checks the vendor session: about 5 s, up to 8.4 s seen.
+    PHONE_RECONFIGURE_TIMEOUT = timedelta(seconds=20)
     APP_START_TIMEOUT = timedelta(seconds=20)
     ADB_TIMEOUT = timedelta(seconds=15)
     WEBCAM_TIMEOUT = timedelta(seconds=20)
@@ -54,6 +56,7 @@ class phone:
     PATH_TORCH = "/v1/torch"
     PATH_ROTATION = "/v1/rotation"
     PATH_PREVIEW = "/v1/preview"
+    PATH_CAMERA = "/v1/camera"
     PATH_SNAPSHOT = "/v1/snapshot"
 
 

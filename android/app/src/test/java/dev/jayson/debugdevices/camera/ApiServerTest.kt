@@ -25,6 +25,22 @@ import org.junit.Test
 class ApiServerTest {
     /** Uses a real [ControlGate], like the CameraX controller. [gate] is ready unless a test says otherwise. */
     private class FakeCamera(var status: CameraStatus?, val gate: ControlGate = ControlGate()) : CameraPort {
+        /** Like the real camera: `unsupported` without the vendor keys. */
+        var vendorSupported = true
+        var rebinds = 0
+
+        override suspend fun setInSensorZoom(enabled: Boolean): CameraStatus = gate.control {
+            val current = status()
+            val state = when {
+                !enabled -> InSensorZoomState.OFF
+                !vendorSupported -> InSensorZoomState.UNSUPPORTED
+                else -> InSensorZoomState.ON
+            }
+            if (state != current.inSensorZoom) rebinds++
+            // The rebind keeps the zoom and the torch.
+            current.copy(inSensorZoom = state).also { status = it }
+        }
+
         val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
         var captureError: Exception? = null
         var statusError: Exception? = null
@@ -78,7 +94,8 @@ class ApiServerTest {
             calibration = FocusCalibration.APPROXIMATE,
             minDistanceDiopters = 10f
         ),
-        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080)
+        optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080),
+        inSensorZoom = InSensorZoomState.OFF
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -110,7 +127,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080}}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off"}""",
             body
         )
     }
@@ -356,6 +373,60 @@ class ApiServerTest {
             assertTrue(body, body.contains(""""focus":{"distance_diopters":null,"state":"unknown""""))
             assertEquals(null, ApiJson.decodeFromString<CameraStatus>(body).focus?.distanceDiopters)
         }
+    }
+
+    @Test
+    fun `in-sensor zoom on and off keeps zoom and torch`() {
+        val camera = ready(ready.copy(zoomRatio = 3f, torchEnabled = true))
+        api(camera) {
+            val on = postJson(Constants.Paths.CAMERA, """{"in_sensor_zoom":true}""")
+            assertEquals(HttpStatusCode.OK, on.status)
+            val onStatus = on.status()
+            assertEquals(InSensorZoomState.ON, onStatus.inSensorZoom)
+            assertEquals(3f, onStatus.zoomRatio)
+            assertEquals(true, onStatus.torchEnabled)
+            assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""in_sensor_zoom":"on""""))
+            val off = postJson(Constants.Paths.CAMERA, """{"in_sensor_zoom":false}""").status()
+            assertEquals(InSensorZoomState.OFF, off.inSensorZoom)
+            assertEquals(3f, off.zoomRatio)
+            assertEquals(2, camera.rebinds)
+        }
+    }
+
+    @Test
+    fun `in-sensor zoom without vendor keys is 200 unsupported`() {
+        val camera = ready(ready).apply { vendorSupported = false }
+        api(camera) {
+            val response = postJson(Constants.Paths.CAMERA, """{"in_sensor_zoom":true}""")
+            assertEquals(HttpStatusCode.OK, response.status)
+            assertTrue(response.bodyAsText().contains(""""in_sensor_zoom":"unsupported""""))
+        }
+    }
+
+    @Test
+    fun `camera bad bodies are 400`() = api(ready(ready)) {
+        val bodies = listOf(
+            "{}",
+            """{"in_sensor_zoom":"true"}""",
+            """{"in_sensor_zoom":1}""",
+            """{"in_sensor_zoom":null}""",
+            """{"in_sensor_zoom":true,"mode":"x"}""",
+            "{"
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.CAMERA, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+    }
+
+    @Test
+    fun `camera is 503 before the start state and 405 on get`() = api(FakeCamera(ready)) {
+        assertEquals(
+            HttpStatusCode.ServiceUnavailable,
+            postJson(Constants.Paths.CAMERA, """{"in_sensor_zoom":true}""").status
+        )
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get(Constants.Paths.CAMERA).status)
     }
 
     @Test

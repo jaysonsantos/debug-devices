@@ -44,7 +44,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
 
     async def read_status() -> CameraStatus:
         # The status poll also sees an app restart (other preview flips) and sends the flips again.
-        return await services.preview_sync.ensure(await services.phone.status())
+        return await services.sync_phone(await services.phone.status())
 
     async def remove_forward(serial: str) -> None:
         await services.adb.remove_forward(serial, settings.local_forward_port)
@@ -66,8 +66,11 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             status_reader=read_status,
             forward_remover=remove_forward,
             orientation=services.orientation,
+            in_sensor_zoom=services.in_sensor_zoom,
         ),
     )
+    monitor.bus.update_phone(in_sensor_zoom_choice=services.in_sensor_zoom.enabled)
+    services.in_sensor_zoom.add_listener(monitor.in_sensor_zoom_changed)
     monitor.bus.update_phone(orientation=services.orientation.current)
     services.orientation.add_listener(monitor.orientation_changed)
     if settings.phone_screen:

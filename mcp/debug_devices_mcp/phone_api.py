@@ -8,7 +8,13 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from debug_devices_mcp.constants import CONTENT_TYPE_HEADER, ERROR_BODY_PREVIEW_CHARS, JSON_CONTENT_TYPE, phone
+from debug_devices_mcp.constants import (
+    CONTENT_TYPE_HEADER,
+    ERROR_BODY_PREVIEW_CHARS,
+    JSON_CONTENT_TYPE,
+    defaults,
+    phone,
+)
 
 # region: models
 
@@ -62,6 +68,21 @@ class Optics(BaseModel):
     output_width_px: int
 
 
+class InSensorZoom(StrEnum):
+    """The vendor in-sensor zoom: real extra detail at 2x or more from a sensor crop, on phones that have it."""
+
+    OFF = "off"
+    ON = "on"
+    # The phone has no such vendor mode.
+    UNSUPPORTED = "unsupported"
+    # The vendor session failed; the app runs in the normal mode.
+    FALLBACK = "fallback"
+
+    @classmethod
+    def _missing_(cls, value: object) -> InSensorZoom:
+        return cls.OFF
+
+
 class CameraStatus(BaseModel):
     zoom_ratio: float
     min_zoom_ratio: float
@@ -76,6 +97,8 @@ class CameraStatus(BaseModel):
     # Also newer than the first app: None when the app does not send them (or before the camera is bound).
     focus: Focus | None = None
     optics: Optics | None = None
+    # None: an app from before POST /v1/camera.
+    in_sensor_zoom: InSensorZoom | None = None
 
 
 class ApiErrorCode(StrEnum):
@@ -118,6 +141,10 @@ class RotationAutoRequest(BaseModel):
     auto: Literal[True] = True
 
 
+class CameraSettingsRequest(BaseModel):
+    in_sensor_zoom: bool
+
+
 class PreviewFlipRequest(BaseModel):
     flip_horizontal: bool
     flip_vertical: bool
@@ -147,6 +174,10 @@ class PhoneApiError(PhoneError):
 
 class PreviewNotSupportedError(PhoneError):
     """The app has no POST /v1/preview (an app from before it): 404."""
+
+
+class CameraSettingsNotSupportedError(PhoneError):
+    """The app has no POST /v1/camera (an app from before it): 404."""
 
 
 class PhoneProtocolError(PhoneError):
@@ -203,6 +234,20 @@ class PhoneClient:
                 raise PreviewNotSupportedError(f"the phone app has no {phone.PATH_PREVIEW}; update the app") from exc
             raise
         return _parse(CameraStatus, phone.PATH_PREVIEW, body)
+
+    async def camera(self, request: CameraSettingsRequest) -> CameraStatus:
+        """Turn the in-sensor zoom on or off. The app binds the camera again: on takes about 5 s, off about 1 s."""
+        try:
+            body = await self._request(
+                HTTPMethod.POST, phone.PATH_CAMERA, request, timeout=defaults.PHONE_RECONFIGURE_TIMEOUT
+            )
+        except PhoneApiError as exc:
+            if exc.status == HTTPStatus.NOT_FOUND:
+                raise CameraSettingsNotSupportedError(
+                    f"the phone app has no {phone.PATH_CAMERA}; update the phone app to use the in-sensor zoom"
+                ) from exc
+            raise
+        return _parse(CameraStatus, phone.PATH_CAMERA, body)
 
     async def snapshot(self) -> bytes:
         return await self._request(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)

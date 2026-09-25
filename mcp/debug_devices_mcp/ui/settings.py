@@ -38,6 +38,8 @@ class UiSettings(BaseModel):
     screen_rotation: ScreenRotation | None = None
     # The flips of the phone snapshot. `OrientationState` owns this value; the other settings keep it as it is.
     snapshot_orientation: SnapshotOrientation | None = None
+    # The in-sensor zoom choice. `InSensorZoomChoice` owns it, like the flips.
+    in_sensor_zoom: bool | None = None
 
 
 class EffectiveSettings(BaseModel):

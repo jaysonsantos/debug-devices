@@ -12,6 +12,9 @@ interface CameraPort {
 
     suspend fun setTorch(enabled: Boolean): CameraStatus
 
+    /** Turns the vendor in-sensor zoom on or off. It binds again and keeps the zoom and the torch. */
+    suspend fun setInSensorZoom(enabled: Boolean): CameraStatus
+
     /** Mirrors the on-screen preview only. Snapshots do not change. */
     suspend fun setPreviewFlip(flip: PreviewFlip): CameraStatus
 

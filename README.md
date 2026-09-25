@@ -86,7 +86,7 @@ A normal session:
 | Group | Tools |
 |---|---|
 | Bench | `bench_instructions`, `bench_start`, `bench_stop`, `monitor_open` |
-| Phone camera | `phone_connect`, `phone_status`, `phone_zoom`, `phone_torch`, `phone_rotation`, `phone_snapshot`, `phone_snapshot_orientation` |
+| Phone camera | `phone_connect`, `phone_status`, `phone_zoom`, `phone_torch`, `phone_rotation`, `phone_snapshot`, `phone_snapshot_orientation`, `phone_in_sensor_zoom` |
 | Webcam and multimeter | `webcam_snapshot`, `multimeter_read` (source `webcam` or `phone`) |
 | Board file | `board_open`, `board_find_part`, `board_match_marking`, `board_part_pins`, `board_find_net`, `board_parts_near`, `board_render`, `board_register_photo`, `board_locate_in_photo` |
 

@@ -21,6 +21,7 @@ const API = {
   phoneScreen: "/api/phone/screen",
   phoneRotation: "/api/phone/rotation",
   phoneOrientation: "/api/phone/orientation",
+  phoneInSensorZoom: "/api/phone/in-sensor-zoom",
   callImage: (id, index) => `/api/calls/${id}/images/${index}`,
 };
 const MAX_LOG_ROWS = 200;
@@ -300,6 +301,7 @@ function applyPhone(phone) {
     snapshotRotation.disabled = false;
   }
   showFocus(phone.focus);
+  showInSensorZoom(phone);
   showViewRotation();
   const orientationKey = applyOrientation(phone.orientation);
   const newOrientation = orientationKey !== state.orientationKey;
@@ -330,7 +332,14 @@ async function phoneAction(url, body, button) {
   }
 }
 
+function toggleInSensorZoom(button) {
+  phoneAction(API.phoneInSensorZoom, { enabled: !state.phone?.in_sensor_zoom_choice }, button);
+}
+
 function setupPhone() {
+  for (const button of document.querySelectorAll("[data-isz]")) {
+    button.addEventListener("click", () => toggleInSensorZoom(button));
+  }
   $("phone-connect").addEventListener("click", (e) => phoneAction(API.phoneConnect, undefined, e.currentTarget));
   $("phone-refresh").addEventListener("click", (e) => phoneAction(API.phoneStatus, undefined, e.currentTarget));
   $("zoom-in").addEventListener("click", (e) => phoneAction(API.phoneZoom, { step: "in" }, e.currentTarget));
@@ -681,6 +690,15 @@ function setupFullscreen() {
 // region: phone distance
 
 const FOCUS_ADVICE_SHOWN = new Set(["far", "too_close"]);
+// The in-sensor zoom gives real extra detail in this zoom range.
+const SENSOR_ZOOM_MIN = 2;
+const SENSOR_ZOOM_MAX = 4;
+const SENSOR_ZOOM_STATES = {
+  on: "on",
+  off: "off",
+  unsupported: "not on this phone",
+  fallback: "failed; normal camera",
+};
 const APPROXIMATE = "approximate";
 
 // For example "≈ 29 cm · ~9 px/mm · focused". The server computes the values; the page only formats them.
@@ -690,9 +708,26 @@ function focusText(focus) {
   if (focus.distance_cm !== null) {
     parts.push(`${focus.calibration === APPROXIMATE ? "≈ " : ""}${focus.distance_cm} cm`);
   }
-  if (focus.detail_px_per_mm !== null) parts.push(`~${Math.round(focus.detail_px_per_mm)} px/mm`);
+  if (focus.detail_px_per_mm !== null) {
+    // With the in-sensor zoom at 2x or more, the real detail is higher than this estimate (no number is made up).
+    parts.push(`~${Math.round(focus.detail_px_per_mm)} px/mm${focus.sensor_zoom_boost ? " + sensor zoom" : ""}`);
+  }
   if (focus.focus_state) parts.push(focus.focus_state);
   return parts.length ? parts.join(" · ") : focus.advice_text;
+}
+
+function showInSensorZoom(phone) {
+  for (const button of document.querySelectorAll("[data-isz]")) {
+    button.setAttribute("aria-pressed", String(Boolean(phone.in_sensor_zoom_choice)));
+  }
+  const status = phone.status;
+  const state = status?.in_sensor_zoom;
+  $("phone-isz-state").textContent = !status ? "–" : state ? SENSOR_ZOOM_STATES[state] ?? state : "not in this app";
+  const zoom = status?.zoom_ratio ?? 0;
+  const inRange = zoom >= SENSOR_ZOOM_MIN && zoom <= SENSOR_ZOOM_MAX;
+  const hint = $("phone-isz-hint");
+  hint.hidden = !(state === "on" && inRange);
+  hint.textContent = hint.hidden ? "" : "real sensor detail at this zoom (not optics)";
 }
 
 function showFocus(focus) {
