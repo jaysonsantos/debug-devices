@@ -63,6 +63,8 @@ Choose one:
 
 ### 4. Debug
 
+**Phone position:** put the phone close to the board, near the minimum focus distance of the camera (about 10-12 cm on many phones). On many phones, zoom is only a digital crop: it frames the area, but it adds no detail. On the test phone, 10-12 cm gives about 25-29 px/mm, and 25-30 cm only about 11 px/mm. Distance gives detail; zoom only frames. See [docs/research/phone-lenses.md](docs/research/phone-lenses.md).
+
 A normal session:
 
 1. Say **"start the bench"**. The agent runs `bench_start`: it starts the monitor page, the webcam, and the phone, opens the board file when your instructions give its path, and gives you the page URL.

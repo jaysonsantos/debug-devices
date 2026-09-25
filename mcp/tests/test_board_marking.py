@@ -170,6 +170,7 @@ async def test_evidence_rules_in_instructions_and_descriptions(settings: Setting
         "not proof of what appears in a physical photo",
         "current photo cannot confirm it",
         "isolate the power",
+        "Distance gives detail; zoom does not.",
     ):
         assert phrase in EVIDENCE_RULES
 
