@@ -169,6 +169,12 @@
             # Do not set UV_PYTHON: it makes `uv pip install` write into the read-only Nix store.
             UV_PYTHON_DOWNLOADS = "never";
             UV_PYTHON_PREFERENCE = "only-system";
+            # Binary wheels from PyPI (numpy, opencv-python-headless) need the C++ runtime and zlib. The Python from
+            # the flake does not search the system library paths, so give them here (CI runners have no such libs).
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.stdenv.cc.cc.lib
+              pkgs.zlib
+            ];
           };
         }
       );
