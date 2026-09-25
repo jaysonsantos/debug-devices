@@ -41,6 +41,18 @@ object Constants {
         const val UNKNOWN_ANGLE = -1
     }
 
+    object InSensorZoom {
+        /** Qualcomm vendor session parameter (int32) of the 200 MP main camera. */
+        const val VENDOR_KEY = "org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom"
+        const val ENABLED_VALUE = 1
+
+        /** `adb shell am start -n .../.MainActivity --ez in_sensor_zoom true`. Off by default. */
+        const val INTENT_EXTRA = "in_sensor_zoom"
+
+        /** How long a new session with the parameter must stream without a camera error. */
+        const val SESSION_CHECK_MILLIS = 4_000L
+    }
+
     object Start {
         /** After an app start the torch is off. The zoom starts at the minimum ratio (see [ZoomLogic.startRatio]). */
         const val TORCH_ENABLED = false
@@ -57,6 +69,7 @@ object Constants {
         const val METHOD_NOT_ALLOWED = "This method is not allowed on this endpoint"
         const val CAPTURE_FAILED = "The still capture failed"
         const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
+        const val IN_SENSOR_ZOOM_FALLBACK = "In-sensor zoom session failed, binding again without it"
         const val START_STATE_PENDING = "Camera start state is not set yet"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "
         const val START_STATE_FAILED = "Camera bind or start state failed"

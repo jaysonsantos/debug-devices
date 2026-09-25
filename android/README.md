@@ -61,6 +61,12 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   app keeps the last rotation. `adb -s <serial> logcat -s DebugCamera:I` shows each rotation change.
 - `POST /v1/rotation {"degrees": 0|90|180|270}` locks the snapshot rotation (`RotationState`); `{"auto": true}` goes
   back to the sensor. `CameraStatus` has `rotation_degrees` and `rotation_locked`. After a start, the rotation is auto.
+- Experiment, off by default: vendor in-sensor zoom of the 200 MP sensor
+  (`org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom`). Turn it on or off with
+  `adb -s <serial> shell am start -n dev.jayson.debugdevices.camera/.MainActivity --ez in_sensor_zoom true|false`.
+  The app sets it only when the camera publishes the key, and binds again without it when the session does not
+  stream. `logcat -s DebugCamera:I` shows `In-sensor zoom: requested=..., sessionKey=..., requestKey=..., state=...`.
+  Result on 7fad170e: the HAL gets the parameter but does not switch to in-sensor zoom, so it adds no detail.
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

@@ -1,10 +1,18 @@
 package dev.jayson.debugdevices.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.util.Log
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
+import androidx.camera.core.ExtendableBuilder
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -15,11 +23,13 @@ import androidx.concurrent.futures.await
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.Observer
 import androidx.lifecycle.asFlow
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -31,17 +41,16 @@ import kotlinx.coroutines.withContext
  * Zoom, torch, and the start state go through one [ControlGate].
  */
 class CameraController(private val context: Context, onRotationChanged: (Int) -> Unit) : CameraPort {
-    private val imageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-        .build()
     private val gate = ControlGate()
 
-    /** Touch it on the main thread only. */
+    /** Touch it on the main thread only. Declared before [imageCapture], which reads it when it is built. */
     private val rotation = RotationState { next ->
         imageCapture.targetRotation = next
         onRotationChanged(next)
     }
+
+    /** Built again on each bind, because the in-sensor zoom parameter is set on the use case builders. */
+    private var imageCapture = buildImageCapture(vendorKey = null)
 
     /** The rotation that the overlay shows: the snapshot rotation. */
     val effectiveRotation: Int
@@ -50,14 +59,125 @@ class CameraController(private val context: Context, onRotationChanged: (Int) ->
     private var camera: Camera? = null
     private var owner: LifecycleOwner? = null
 
-    suspend fun bind(owner: LifecycleOwner, previewView: PreviewView): Camera = withContext(Dispatchers.Main) {
-        val provider = ProcessCameraProvider.getInstance(context).await()
-        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+    /** The in-sensor zoom state of the last bind. Main thread only. */
+    var inSensorZoomState = InSensorZoomState.OFF
+        private set
+
+    /**
+     * Binds the back camera. With [inSensorZoom], it sets the vendor session parameter when the camera publishes
+     * the key, checks that the session streams, and binds again without it when the session fails.
+     */
+    suspend fun bind(owner: LifecycleOwner, previewView: PreviewView, inSensorZoom: Boolean): Camera =
+        withContext(Dispatchers.Main) {
+            val provider = ProcessCameraProvider.getInstance(context).await()
+            val vendorKey = findVendorKey(provider)
+            var state = InSensorZoomLogic.plan(inSensorZoom, vendorKey.presence)
+            var bound =
+                bindUseCases(
+                    provider,
+                    owner,
+                    previewView,
+                    vendorKey.key.takeIf {
+                        InSensorZoomLogic.setsVendorParameter(state)
+                    }
+                )
+            if (state == InSensorZoomState.ON) {
+                val stable = InSensorZoomLogic.isStable(watchSession(owner, bound, previewView))
+                state = InSensorZoomLogic.afterSessionCheck(state, stable)
+                if (state == InSensorZoomState.FALLBACK) {
+                    Log.w(Constants.Log.TAG, Constants.Messages.IN_SENSOR_ZOOM_FALLBACK)
+                    bound = bindUseCases(provider, owner, previewView, vendorKey = null)
+                }
+            }
+            inSensorZoomState = state
+            Log.i(
+                Constants.Log.TAG,
+                "In-sensor zoom: requested=$inSensorZoom, sessionKey=${vendorKey.presence.inSessionKeys}, " +
+                    "requestKey=${vendorKey.presence.inRequestKeys}, state=$state"
+            )
+            bound
+        }
+
+    private fun bindUseCases(
+        provider: ProcessCameraProvider,
+        owner: LifecycleOwner,
+        previewView: PreviewView,
+        vendorKey: CaptureRequest.Key<IntArray>?
+    ): Camera {
+        val previewBuilder = Preview.Builder()
+        vendorKey?.let { setVendorParameter(previewBuilder, it) }
+        val preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        imageCapture = buildImageCapture(vendorKey)
         provider.unbindAll()
-        provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture).also {
-            this@CameraController.owner = owner
+        return provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture).also {
+            this.owner = owner
             camera = it
         }
+    }
+
+    private fun buildImageCapture(vendorKey: CaptureRequest.Key<IntArray>?): ImageCapture {
+        val builder = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+        vendorKey?.let { setVendorParameter(builder, it) }
+        return builder.build().also { it.targetRotation = rotation.effectiveRotation }
+    }
+
+    /** CameraX passes a request option that is in the session keys to the session parameters too. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun <T> setVendorParameter(builder: ExtendableBuilder<T>, key: CaptureRequest.Key<IntArray>) {
+        Camera2Interop.Extender(builder).setCaptureRequestOption(key, intArrayOf(Constants.InSensorZoom.ENABLED_VALUE))
+    }
+
+    private class VendorKey(val presence: VendorKeyPresence, val key: CaptureRequest.Key<IntArray>?)
+
+    /** Finds the vendor key in the session and request key lists of the back camera. Never throws. */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun findVendorKey(provider: ProcessCameraProvider): VendorKey = try {
+        val info = CameraSelector.DEFAULT_BACK_CAMERA.filter(provider.availableCameraInfos).first()
+        val cameraId = Camera2CameraInfo.from(info).cameraId
+        val manager = context.getSystemService(CameraManager::class.java)
+        val characteristics = manager.getCameraCharacteristics(cameraId)
+        val sessionKeys = characteristics.availableSessionKeys.orEmpty()
+        val requestKeys = characteristics.availableCaptureRequestKeys.orEmpty()
+        val presence = InSensorZoomLogic.presence(sessionKeys.map { it.name }, requestKeys.map { it.name })
+
+        // The framework gives vendor keys an array type: int32 becomes int[]. A plain Int fails in
+        // CameraMetadataNative with "Not an array" (seen on 7fad170e), and CameraX only logs it.
+        @Suppress("UNCHECKED_CAST")
+        val key = (sessionKeys + requestKeys).firstOrNull { it.name == Constants.InSensorZoom.VENDOR_KEY }
+            as CaptureRequest.Key<IntArray>?
+        VendorKey(presence, key)
+    } catch (cause: Exception) {
+        Log.w(Constants.Log.TAG, cause)
+        VendorKey(VendorKeyPresence(inSessionKeys = false, inRequestKeys = false), key = null)
+    }
+
+    /** Collects preview and camera error signals of a new session for the check window. */
+    private suspend fun watchSession(
+        owner: LifecycleOwner,
+        bound: Camera,
+        previewView: PreviewView
+    ): Set<SessionEvent> {
+        val events = mutableSetOf<SessionEvent>()
+        val streamObserver = Observer<PreviewView.StreamState> { state ->
+            if (state == PreviewView.StreamState.STREAMING) events += SessionEvent.PREVIEW_STREAMING
+        }
+        val cameraObserver = Observer<CameraState> { state ->
+            state.error?.let {
+                Log.w(Constants.Log.TAG, "Camera error during the in-sensor zoom check: code=${it.code}", it.cause)
+                events += SessionEvent.CAMERA_ERROR
+            }
+        }
+        previewView.previewStreamState.observe(owner, streamObserver)
+        bound.cameraInfo.cameraState.observe(owner, cameraObserver)
+        try {
+            delay(Constants.InSensorZoom.SESSION_CHECK_MILLIS)
+        } finally {
+            previewView.previewStreamState.removeObserver(streamObserver)
+            bound.cameraInfo.cameraState.removeObserver(cameraObserver)
+        }
+        return events
     }
 
     /**

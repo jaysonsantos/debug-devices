@@ -1,6 +1,7 @@
 package dev.jayson.debugdevices.camera
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -20,6 +21,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -31,6 +33,10 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : ComponentActivity() {
     private lateinit var camera: CameraController
+    private var bindJob: Job? = null
+
+    /** In-sensor zoom experiment. Off at process start; `--ez in_sensor_zoom true|false` changes it. */
+    private var inSensorZoom = false
     private lateinit var server: ApiServer
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
@@ -74,12 +80,35 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch(Dispatchers.IO) { server.start() }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+        inSensorZoom = readInSensorZoom(intent)
+        if (hasCameraPermission()) {
             bindCamera()
         } else {
             permissionRequest.launch(Manifest.permission.CAMERA)
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val next = readInSensorZoom(intent)
+        if (next != inSensorZoom) {
+            inSensorZoom = next
+            if (hasCameraPermission()) bindCamera()
+        }
+    }
+
+    private fun readInSensorZoom(intent: Intent?): Boolean {
+        val extra = Constants.InSensorZoom.INTENT_EXTRA
+        return InSensorZoomLogic.requested(
+            current = inSensorZoom,
+            extraPresent = intent?.hasExtra(extra) == true,
+            extraValue = intent?.getBooleanExtra(extra, false) == true
+        )
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
     override fun onResume() {
         super.onResume()
@@ -98,11 +127,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun bindCamera() {
-        lifecycleScope.launch {
+        bindJob?.cancel()
+        bindJob = lifecycleScope.launch {
             // No error from bind or the start state may escape this coroutine: it runs on the main thread,
             // so an escaped error kills the app. A coroutine cancel (activity destroyed) goes through.
             try {
-                val boundCamera = camera.bind(this@MainActivity, previewView)
+                val boundCamera = camera.bind(this@MainActivity, previewView, inSensorZoom)
                 observe(boundCamera)
                 camera.applyStartState(boundCamera)
             } catch (cause: CancellationException) {

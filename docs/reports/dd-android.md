@@ -53,6 +53,58 @@ The activity is `singleTask` and handles configuration changes itself, so a seco
 - Foreground rule: `activeCamera()` now needs lifecycle `RESUMED` (was `STARTED`). Status, zoom, torch, rotation, and snapshot give 503 `camera_not_ready` ("Camera is not active") in the background. `/v1/health` stays 200.
 - New unit tests: `RotationStateTest` (4), `OrientationLogicTest` +2 (request to rotation, bad requests), `ApiServerTest` +3 (lock and unlock, 8 bad bodies, 503 before the start state and 405 on GET). 63 tests in total.
 
+### Round: in-sensor zoom experiment
+
+Brief: option B of `docs/research/phone-lenses.md`. Result: **no detail gain. The HAL accepts the vendor parameter from our app, but it does not switch to in-sensor zoom.** The code stays in the app, off by default.
+
+Code (no contract change):
+
+- `InSensorZoom.kt` (pure): `InSensorZoomState` (`OFF`, `ON`, `UNSUPPORTED`, `FALLBACK`), `SessionEvent`, `VendorKeyPresence`, `InSensorZoomLogic` (intent extra, key presence in the session and request key lists, plan, session stability, fallback).
+- `CameraController.bind(owner, previewView, inSensorZoom)`:
+  1. Finds the back camera ID (`Camera2CameraInfo`) and reads `availableSessionKeys` and `availableCaptureRequestKeys` from `CameraManager`. It takes the framework key object with the vendor name.
+  2. `OFF` or `UNSUPPORTED`: binds as before. `ON`: sets the key with `Camera2Interop.Extender.setCaptureRequestOption` on the Preview and ImageCapture builders.
+  3. `ON`: watches the new session for 4 s (`SESSION_CHECK_MILLIS`). Stable = the preview streamed and no `CameraState` error. When the session is not stable, the state is `FALLBACK`, and the app binds again without the key.
+  4. Logs `In-sensor zoom: requested=..., sessionKey=..., requestKey=..., state=...` (tag `DebugCamera`, level I), and the fallback with level W.
+- `ImageCapture` is built again on each bind (the parameter is on the builder). It keeps the current snapshot rotation.
+- `MainActivity`: off at process start. `am start ... --ez in_sensor_zoom true|false` sets it (`onCreate` and `onNewIntent`), and a change binds the camera again. Without the extra, the current value stays. The rebind runs the start state again (zoom at min, torch off).
+- Constants in `Constants.InSensorZoom`. ktlint passes.
+- New unit tests: `InSensorZoomLogicTest` (7). 70 tests in total, all pass (`nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest`).
+
+Two bugs found on the phone and fixed:
+
+1. **Crash at start** (first install of this round, 12:39). `imageCapture` was built in the constructor before the `rotation` field existed, so `buildImageCapture` read a null `RotationState` (`NullPointerException` in `CameraController.<init>`). Fix: declare `rotation` before `imageCapture`. The JVM unit tests do not construct `CameraController`, so they did not catch it. The app was down for about 2 minutes. Note: my `adb logcat -c` also cleared the crash buffer, so the crash counts below start at 12:41.
+2. **The parameter never reached the HAL** (first "on" run). CameraX (CameraPipe back end, log tag `CXCP`) logged for each request: `Failed to set [org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom: 1] on CaptureRequest.Builder` with `java.lang.IllegalArgumentException: Not an array: class java.lang.Integer` (from `MarshalQueryableArray`). The framework gives this vendor key the type `int[]`, not `int`. CameraX only logs the error, so the session streamed and the app said `state=ON`, but `dumpsys` showed `EnableInsensorZoom = 0`. Fix: `CaptureRequest.Key<IntArray>` with the value `intArrayOf(1)`. After the fix: 0 `CXCP` set failures, and `dumpsys` shows 1. I did not use the images of that run.
+
+Device test on `7fad170e` (APK installed at 12:45, phone in landscape on a stand, fixed scene: a red laptop main board at about 25-30 cm; flag on first, then off, back to back; each snapshot 2.5 s after the zoom change):
+
+`dumpsys media.camera`, camera 0, "Last request sent" and "Latest received frame":
+
+| Flag | Zoom | `EnableInsensorZoom` | `control.zoomRatio` | `scaler.cropRegion` | `inSensorZoom.InSensorZoomState` | `inSensorZoom.SensorSwitched` | `xiaomi.superResolution.inSensorZoomState` |
+|---|---|---|---|---|---|---|---|
+| on | 1x | 1 | 1.0 | 0 0 4080 3060 | 0 | 0 | 0 |
+| on | 2x | 1 | 2.0 | 0 0 4080 3060 | 0 | 0 | 0 |
+| on | 4x | 1 | 4.0 | 0 0 4080 3060 | 0 | 0 | 0 |
+| off | 1x / 2x / 4x | 0 | 1.0 / 2.0 / 4.0 | 0 0 4080 3060 | 0 | 0 | 0 |
+
+- The streams stay the same with the flag on and off: preview 1600 x 1200, still capture 4080 x 3060 (JPEG). The operation mode is `NORMAL`.
+- The HAL result tags for in-sensor zoom stay 0 at 2x and 4x. The sensor never switches to the full-resolution mode.
+
+Sharpness, 800 x 800 center crop of each 4080 x 3060 snapshot (variance of the Laplacian, and the mean squared gradient):
+
+| Zoom | Off: Laplacian var / gradient | On: Laplacian var / gradient |
+|---|---|---|
+| 1x | 419.3 / 242.7 | 392.4 / 228.1 |
+| 2x | 55.0 / 129.7 | 58.6 / 138.4 |
+| 4x | 7.2 / 41.3 | 7.8 / 44.9 |
+
+- The differences are 5-8%, in both directions. That is normal frame-to-frame noise (focus, a small shift of the framing). A real in-sensor zoom would give much more at 4x.
+- I looked at the 2x and 4x crops side by side (Read tool). The detail is the same: the "000" markings of the resistors, the pad edges, and the soft upscaled edges at 4x look equal.
+- Images and dumps: only in my scratch directory (`.../scratchpad/isz/`). Not committed, not sent to any service.
+
+Stability: the session with the flag on streamed and gave snapshots (about 0.84 s each). There was no camera error, no fallback, and no crash after 12:41. At the end, zoom is 1x, the torch is off, and the flag is off (`state=OFF`). No Gradle daemon runs (all builds used `--no-daemon`).
+
+Decision: **keep the code, off by default. Do not propose a contract change.** It has no effect when off, and the key type fix is useful for any later vendor key. Next test that is still possible (not done): the HAL can start in-sensor zoom only on `SCALER_CROP_REGION` zoom, or with the Xiaomi feature tag `com.xiaomi.camera.supportedfeatures.insensorzoom`. CameraX always uses `CONTROL_ZOOM_RATIO` on this phone, so that test needs a Camera2 request option for the crop region. If nobody plans that test, remove the code.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:
