@@ -19,3 +19,5 @@ local.properties
 .mcp.json
 # Personal bench instructions for the agents (see instructions.example.md)
 instructions.md
+# Orchestrator briefs for the agents (working notes)
+docs/briefs/
