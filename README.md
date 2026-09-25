@@ -63,7 +63,7 @@ Choose one:
 
 ### 4. Debug
 
-**Phone position:** put the phone close to the board, near the minimum focus distance of the camera (about 10-12 cm on many phones). On many phones, zoom is only a digital crop: it frames the area, but it adds no detail. On the test phone, 10-12 cm gives about 25-29 px/mm, and 25-30 cm only about 11 px/mm. Distance gives detail; zoom only frames. See [docs/research/phone-lenses.md](docs/research/phone-lenses.md).
+**Phone position:** put the phone close to the board, near the minimum focus distance of the camera (about 10-12 cm on many phones). On many phones, zoom is only a digital crop: it frames the area, but it adds no detail. On the test phone, 10-12 cm gives about 25-29 px/mm, and 25-30 cm only about 11 px/mm. Distance gives detail; zoom only frames, unless a test shows a detail gain at zoom on your phone. See [docs/research/phone-lenses.md](docs/research/phone-lenses.md) and the documentation check in [docs/research/zoom-docs-claude.md](docs/research/zoom-docs-claude.md).
 
 A normal session:
 
@@ -168,7 +168,7 @@ scripts/dev-monitor.sh
 
 Open http://127.0.0.1:18766/ one time. The page connects again after each restart. The script gives its arguments to the server, for example `scripts/dev-monitor.sh --adb-serial <serial>`.
 
-Only one process can read the webcam. When this monitor runs, other MCP servers (for example Claude Code sessions) take their webcam frames from it. See "More than one MCP server" in [mcp/README.md](mcp/README.md).
+Only one process can read the webcam. When this monitor runs, other MCP servers (for example Claude Code and Codex sessions) take their webcam frames from it. They also send their tool calls to it, so this one page shows the activity of every agent, with the sender on each row. See "More than one MCP server" in [mcp/README.md](mcp/README.md).
 
 ### Reload inside an MCP client
 

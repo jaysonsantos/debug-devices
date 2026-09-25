@@ -54,7 +54,8 @@ EVIDENCE_RULES = "\n".join(
         "supporting location evidence, not proof of what appears in a physical photo. Phone zoom is often only a "
         "digital crop: it frames the area but adds no detail. When a marking or a small part is too small to read, "
         "ask the user to move the phone closer (near the minimum focus distance of the camera, about 10-12 cm on "
-        "most phones), then use zoom only to frame. Distance gives detail; zoom does not.",
+        "most phones), then use zoom only to frame. Unless a test on the connected phone shows a detail gain at "
+        "zoom, assume that distance gives detail and zoom does not.",
         "7. Opposite board side: when boardview puts the target on the side that the phone does not see, say that the "
         "current photo cannot confirm it. Before the user turns or handles the board, tell them to isolate the power "
         "safely (disconnect the charger and the battery or bench supply) and wait for their confirmation.",
