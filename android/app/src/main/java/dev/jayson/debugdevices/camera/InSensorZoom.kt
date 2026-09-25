@@ -76,7 +76,7 @@ object InSensorZoomLogic {
     /**
      * Vendor int32 parameters for an [InSensorZoomState.ON] session, set as session parameters and as request
      * options. `xiaomi.app.module = 163` is what the Xiaomi camera app sends in photo mode; without it, the HAL
-     * keeps `InSensorZoomState = 0` in the vendor session (seen on 7fad170e). Empty for the other states.
+     * keeps `InSensorZoomState = 0` in the vendor session (seen on the test phone). Empty for the other states.
      */
     fun vendorParameters(state: InSensorZoomState): Map<String, Int> = if (state == InSensorZoomState.ON) {
         mapOf(

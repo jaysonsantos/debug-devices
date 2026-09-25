@@ -2,7 +2,7 @@
 
 Date: 2026-09-25, 20:11-20:17. Author: dd-research (Claude Code).
 
-Phone: adb serial `7fad170e` only. The user opened the Xiaomi camera app (`com.android.camera/.Camera`) and allowed input to it for this task. The phone stayed still and pointed at the laptop board (the same board as in `docs/reports/dd-android.md`). The lens focus distance at 1x was 3.41 diopters (about 29 cm).
+Phone: adb serial `0a1b2c3d` only. The user opened the Xiaomi camera app (`com.android.camera/.Camera`) and allowed input to it for this task. The phone stayed still and pointed at the laptop board (the same board as in `docs/reports/dd-android.md`). The lens focus distance at 1x was 3.41 diopters (about 29 cm).
 
 What I did:
 

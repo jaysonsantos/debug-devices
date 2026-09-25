@@ -14,10 +14,11 @@ from debug_devices_mcp.config import Settings
 from debug_devices_mcp.process import CommandResult
 from debug_devices_mcp.server import Services, build_server
 from debug_devices_mcp.ui.app import create_app
-from debug_devices_mcp.ui.board import NO_REGISTRATION, OTHER_SIDE, STALE_REGISTRATION, BoardPanel
+from debug_devices_mcp.ui.board import NO_REGISTRATION, OTHER_SIDE, STALE_REGISTRATION
 from debug_devices_mcp.ui.events import CallSource, CallStatus, ToolCallEvent
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore
+from debug_devices_mcp.ui.setup import connect_services
 
 from .conftest import FakeRunner, make_jpeg
 from .test_board import fixture
@@ -52,8 +53,7 @@ class Bench:
         )
         self.monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
         self.monitor.instrument(build_server(self.services))
-        self.services.scene.add_listener(self.monitor.scene_changed)
-        self.monitor.board_panel = BoardPanel(self.services, self.monitor.call_from_ui)
+        connect_services(self.monitor, self.services)
         self.client = TestClient(create_app(self.monitor), base_url=BASE_URL)
         self.board_file = tmp_path / "markings.cad"
         self.board_file.write_text("the fake obv-dump does not read this")
@@ -101,7 +101,7 @@ def test_search_a_part_without_a_registration(bench: Bench) -> None:
     assert result["part"]["side"] == "top"
     assert result["part"]["pin_count"] == 8
     assert "PP_SYN_1V0" in result["part"]["nets"]
-    assert result["highlight"] == {"shown": False, "message": NO_REGISTRATION}
+    assert result["highlight"] == {"shown": False, "message": NO_REGISTRATION, "tracking": False}
     image = bench.client.get(f"/api/calls/{result['render_call_id']}/images/0")
     assert image.status_code == 200
     assert image.headers["content-type"].startswith("image/")
@@ -126,7 +126,8 @@ def test_register_then_highlight_and_the_other_side(bench: Bench) -> None:
     assert len(bench.monitor.bus.phone.highlights) == 1
 
     other = bench.search("U7303")
-    assert other["highlight"] == {"shown": False, "message": OTHER_SIDE.format(side="bottom")}
+    assert other["highlight"]["shown"] is False
+    assert other["highlight"]["message"] == f"U7303: {OTHER_SIDE}"
     assert other["render_call_id"]
 
 
@@ -150,7 +151,7 @@ def test_a_moved_board_needs_a_new_registration(bench: Bench) -> None:
     anyio.run(bench.services.scene.mark_changed)
     assert bench.client.get("/api/board").json()["registration"]["stale"] is True
     result = bench.search("U7301")
-    assert result["highlight"] == {"shown": False, "message": STALE_REGISTRATION}
+    assert result["highlight"] == {"shown": False, "message": STALE_REGISTRATION, "tracking": False}
     assert result["render_call_id"]  # the board drawing stays
     again = bench.register()
     assert again["stale"] is False

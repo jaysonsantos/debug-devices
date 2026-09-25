@@ -111,10 +111,12 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
     "preview_flip_horizontal": bool,
     "preview_flip_vertical": bool,
     "overlay_boxes": int,
+    "overlay_arrows": int,
 }
 PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
 # Objects in CameraStatus, checked by expect_focus and expect_optics.
-CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom")
+CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom", "af_mode")
+AF_MODES = ("continuous", "macro")
 IN_SENSOR_ZOOM_STATES = ("off", "on", "unsupported", "fallback")
 # After POST /v1/camera: a phone can say that it cannot (unsupported) or that the vendor session failed (fallback).
 IN_SENSOR_ZOOM_AFTER_ON = ("on", "unsupported", "fallback")
@@ -176,6 +178,7 @@ class CameraStatus:
     preview_flip_horizontal: bool
     preview_flip_vertical: bool
     overlay_boxes: int
+    overlay_arrows: int
 
 
 class ContractError(AssertionError):
@@ -273,6 +276,7 @@ def expect_status(resp: Response) -> CameraStatus:
     expect_optics(data["optics"])
     zoom_mode = data["in_sensor_zoom"]
     expect(zoom_mode in IN_SENSOR_ZOOM_STATES, f"in_sensor_zoom {zoom_mode!r} is not in {IN_SENSOR_ZOOM_STATES}")
+    expect(data["af_mode"] in AF_MODES, f"af_mode {data['af_mode']!r} is not in {AF_MODES}")
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -575,6 +579,10 @@ def check_after_start(ctx: Context) -> None:
     expect(mode == "off", f"after the app start: in_sensor_zoom is {mode!r}, expected off")
     boxes = expect_json(ctx.client.get(Route.STATUS))["overlay_boxes"]
     expect(boxes == 0, f"after the app start: overlay_boxes is {boxes!r}, expected 0")
+    af_mode = expect_json(ctx.client.get(Route.STATUS))["af_mode"]
+    expect(af_mode == "continuous", f"after the app start: af_mode is {af_mode!r}, expected continuous")
+    arrows = expect_json(ctx.client.get(Route.STATUS))["overlay_arrows"]
+    expect(arrows == 0, f"after the app start: overlay_arrows is {arrows!r}, expected 0")
 
 
 def check_rotation(ctx: Context) -> None:
@@ -596,6 +604,36 @@ BAD_CAMERA_BODIES: list[tuple[str, bytes]] = [
     ("in_sensor_zoom is null", b'{"in_sensor_zoom": null}'),
     ("unknown field", b'{"in_sensor_zoom": true, "mode": "hdr"}'),
 ]
+
+
+BAD_AF_MODE_BODIES: list[tuple[str, bytes]] = [
+    ("af_mode in upper case", b'{"af_mode": "MACRO"}'),
+    ("af_mode is a number", b'{"af_mode": 1}'),
+    ("af_mode is null", b'{"af_mode": null}'),
+    ("af_mode is unknown", b'{"af_mode": "manual"}'),
+    ("af_mode and an unknown field", b'{"af_mode": "macro", "mode": "hdr"}'),
+]
+
+
+def check_af_mode(ctx: Context) -> None:
+    """af_mode macro and back to continuous; zoom, torch, and the in-sensor zoom stay; bad bodies are refused."""
+    before = expect_json(ctx.client.get(Route.STATUS))
+    raw = ctx.client.post_json(Route.CAMERA, {"af_mode": "macro"})
+    expect_status(raw)
+    after = expect_json(raw)
+    expect(after["af_mode"] in AF_MODES, f"af_mode after macro: {after['af_mode']!r}")
+    ctx.notes.append(f"af_mode macro gives {after['af_mode']!r}")
+    for name in ("zoom_ratio", "torch_enabled", "in_sensor_zoom"):
+        expect(after[name] == before[name], f"{name} changed after af_mode: {before[name]!r} -> {after[name]!r}")
+    expect(expect_json(ctx.client.get(Route.STATUS))["af_mode"] == after["af_mode"], "GET status shows another af_mode")
+    raw = ctx.client.post_json(Route.CAMERA, {"af_mode": "continuous"})
+    expect_status(raw)
+    expect(expect_json(raw)["af_mode"] == "continuous", "af_mode continuous: the mode did not come back")
+    for name, body in BAD_AF_MODE_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.CAMERA, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"camera {name}: {err}") from err
 
 
 def check_camera(ctx: Context) -> None:
@@ -892,6 +930,41 @@ BAD_OVERLAY_BODIES: list[tuple[str, bytes]] = [
 ]
 
 
+OVERLAY_MAX_ARROWS = 4
+ARROW = {"angle_deg": 45.0, "label": "J4 ~4 cm"}
+BAD_ARROW_BODIES: list[tuple[str, bytes]] = [
+    ("5 arrows", json.dumps({"boxes": [], "arrows": [ARROW] * (OVERLAY_MAX_ARROWS + 1)}).encode()),
+    ("arrows is not a list", json.dumps({"boxes": [], "arrows": ARROW}).encode()),
+    ("a string angle", json.dumps({"boxes": [], "arrows": [{**ARROW, "angle_deg": "45"}]}).encode()),
+    ("label of 33 characters", json.dumps({"boxes": [], "arrows": [{**ARROW, "label": "L" * 33}]}).encode()),
+    ("an unknown arrow field", json.dumps({"boxes": [], "arrows": [{**ARROW, "color": "red"}]}).encode()),
+]
+
+
+def arrow_count(raw: Response, what: str) -> int:
+    expect_status(raw)
+    count = expect_json(raw).get("overlay_arrows")
+    expect(isinstance(count, int) and not isinstance(count, bool), f"{what}: overlay_arrows {count!r}")
+    return count
+
+
+def check_overlay_arrows(ctx: Context) -> None:
+    """Arrows appear in overlay_arrows, any angle is taken modulo 360, a body without arrows removes them."""
+    arrows = [ARROW, {"angle_deg": 450.0, "label": ""}, {"angle_deg": -90, "label": "U7 ~12 cm"}]
+    shown = arrow_count(ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX], "arrows": arrows}), "3 arrows")
+    expect(shown == len(arrows), f"3 arrows: overlay_arrows is {shown}")
+    expect(arrow_count(ctx.client.get(Route.STATUS), "GET status") == len(arrows), "GET status: another overlay_arrows")
+    for name, body in BAD_ARROW_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.OVERLAY, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"overlay {name}: {err}") from err
+    only_boxes = arrow_count(ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX]}), "no arrows field")
+    expect(only_boxes == 0, f"a body without arrows: overlay_arrows is {only_boxes}")
+    raw = ctx.client.post_json(Route.OVERLAY, {"boxes": [], "arrows": []})
+    expect(arrow_count(raw, "clear") == 0 and overlay_count(raw, "clear") == 0, "clear: boxes or arrows stay")
+
+
 def overlay_count(raw: Response, what: str) -> int:
     expect_status(raw)
     count = expect_json(raw).get("overlay_boxes")
@@ -939,8 +1012,10 @@ READY_CHECKS: list[Check] = [
     check_rotation,
     check_preview,
     check_camera,
+    check_af_mode,
     check_focus,
     check_overlay,
+    check_overlay_arrows,
     check_rotation_bad_request,
     check_post_needs_json_content_type,
     check_snapshot,

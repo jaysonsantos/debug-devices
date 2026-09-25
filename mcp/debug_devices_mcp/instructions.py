@@ -59,7 +59,8 @@ EVIDENCE_RULES = "\n".join(
         "zoom, assume that distance gives detail and zoom does not. When the user wants more detail without moving the "
         "phone, you may turn on phone_in_sensor_zoom and use a zoom of 2x-4x: on phones that support it, this gives "
         "real extra detail from a sensor crop. It is not optical zoom. Still take a fresh phone_snapshot after the "
-        "change. When the relevant area is blurry, focus on it with phone_focus (pixels in your last phone_snapshot), "
+        "change. At close range (about 10-12 cm), you may set phone_af_mode macro. "
+        "When the relevant area is blurry, focus on it with phone_focus (pixels in your last phone_snapshot), "
         "then take a fresh phone_snapshot. After the user moves or turns the board, take a fresh phone_snapshot "
         "before you point at anything; never reuse boxes or positions from an older photo.",
         "7. Opposite board side: when boardview puts the target on the side that the phone does not see, say that the "

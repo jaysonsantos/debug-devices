@@ -175,6 +175,7 @@ async def test_evidence_rules_in_instructions_and_descriptions(settings: Setting
         "It is not optical zoom. Still take a fresh phone_snapshot after the change.",
         "focus on it with phone_focus",
         "you may call phone_highlight",
+        "you may set phone_af_mode macro",
         "never reuse boxes or positions from an older photo",
     ):
         assert phrase in EVIDENCE_RULES

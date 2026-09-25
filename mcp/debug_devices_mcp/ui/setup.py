@@ -17,6 +17,14 @@ from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, stat
 from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
 
 
+def connect_services(monitor: Monitor, services: Services) -> None:
+    """The page follows the MCP server: scene changes, the boxes and arrows, the live tracking, and the Board panel."""
+    services.scene.add_listener(monitor.scene_changed)
+    services.add_overlay_listener(monitor.overlay_changed)
+    services.pointing.add_listener(monitor.tracking_changed)
+    monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
+
+
 def build_monitor(settings: Settings, services: Services) -> Monitor:
     """The monitor owns the webcam from now on: the webcam tools take their frames from its stream.
 
@@ -70,10 +78,13 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             forward_remover=remove_forward,
             orientation=services.orientation,
             in_sensor_zoom=services.in_sensor_zoom,
+            af_mode=services.af_mode,
         ),
     )
     monitor.bus.update_phone(in_sensor_zoom_choice=services.in_sensor_zoom.enabled)
     services.in_sensor_zoom.add_listener(monitor.in_sensor_zoom_changed)
+    monitor.bus.update_phone(af_mode_choice=services.af_mode.mode)
+    services.af_mode.add_listener(monitor.af_mode_changed)
     monitor.bus.update_phone(orientation=services.orientation.current)
     services.orientation.add_listener(monitor.orientation_changed)
     if settings.phone_screen:
@@ -94,8 +105,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
         # The scene watcher reuses the page fallback decoder when it runs, else it runs a small one of its own.
         own = ScreenTranscoder(monitor.screen, settings.ffmpeg_path, options=SCENE_TRANSCODE)
         monitor.scene_watcher = SceneWatcher(services.scene, screen_feed(monitor.screen_mjpeg, own))
-    services.scene.add_listener(monitor.scene_changed)
-    monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
+    connect_services(monitor, services)
     # When another server has the page on the configured port, this server sends its calls there.
     monitor.forwarder = CallForwarder(
         monitor.bus, RemoteMonitor(settings.ui_port, settings.webcam_timeout), monitor.is_secondary, monitor.origin

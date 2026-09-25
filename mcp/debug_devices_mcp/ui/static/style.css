@@ -426,3 +426,15 @@ form label { display: block; margin-bottom: 8px; }
 #snapshot.picking { cursor: crosshair; }
 
 /* endregion: board panel */
+
+/* An arrow toward a searched part outside the view (phone_point_to), at the snapshot edge. */
+.pointer-arrow { position: absolute; width: 0; height: 0; }
+.pointer-arrow-head {
+  position: absolute;
+  font-size: 40px;
+  line-height: 1;
+  color: #00e640;
+  text-shadow: 0 0 3px #000, 0 0 3px #000;
+}
+.pointer-arrow-label { bottom: auto; top: 22px; left: -20px; }
+#board-tracking { color: #00a040; }

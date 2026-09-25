@@ -22,11 +22,11 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
 from debug_devices_mcp.board.tools import BoardSummary
-from debug_devices_mcp.camera_choice import InSensorZoomChoice
+from debug_devices_mcp.camera_choice import AfModeChoice, InSensorZoomChoice
 from debug_devices_mcp.constants import images
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.orientation import OrientationState
-from debug_devices_mcp.phone_api import CameraStatus, OverlayBox, PhoneError
+from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
 from debug_devices_mcp.scene import SceneWatcher
@@ -53,10 +53,8 @@ STATUS_POLL_SECONDS = 1
 # The whole cleanup at exit: web server, webcam stream, scrcpy, phone screen (adb forward --remove).
 STOP_TIMEOUT_SECONDS = 15
 TEXT_SEPARATOR = "\n"
-HIGHLIGHT_TOOLS = frozenset({tools.PHONE_HIGHLIGHT, tools.BOARD_LOCATE_IN_PHOTO})
-# board_locate_in_photo has the phone_highlight result in this field; phone_highlight is the result itself.
-HIGHLIGHT_FIELD = "highlight"
-HIGHLIGHT_BOXES_FIELD = "boxes"
+# PhoneState.tracking while the live tracker follows the board (a move is then no scene change for the page).
+TRACKING_FOLLOWING = "following"
 BOARD_PATH_ARGUMENT = "path"
 PHONE_STATUS_TOOLS = frozenset(
     {
@@ -66,6 +64,7 @@ PHONE_STATUS_TOOLS = frozenset(
         tools.PHONE_ROTATION,
         tools.PHONE_IN_SENSOR_ZOOM,
         tools.PHONE_FOCUS,
+        tools.PHONE_AF_MODE,
     }
 )
 
@@ -127,6 +126,8 @@ class MonitorParts:
     orientation: OrientationState | None = None
     # The in-sensor zoom choice (shared with the tools).
     in_sensor_zoom: InSensorZoomChoice | None = None
+    # The autofocus mode choice (shared with the tools).
+    af_mode: AfModeChoice | None = None
     clock: Clock = field(default=time.monotonic)
 
 
@@ -214,6 +215,7 @@ class Monitor:
         self.status_reader = parts.status_reader
         self.orientation = parts.orientation
         self.in_sensor_zoom = parts.in_sensor_zoom
+        self.af_mode = parts.af_mode
         # Rendered page images of the raw snapshot: (snapshot number, orientation, full size) -> JPEG.
         self._rendered: dict[tuple[int, SnapshotOrientation, bool], bytes] = {}
         self._forward_remover = parts.forward_remover
@@ -312,6 +314,11 @@ class Monitor:
                 self._full_snapshots.pop(call.id, None)
         return call, result
 
+    def af_mode_changed(self, mode: str) -> None:
+        """Listener for `AfModeChoice`: the page shows the Macro focus toggle state."""
+        self.saved = self.saved.model_copy(update={"af_mode": mode})
+        self.bus.update_phone(af_mode_choice=mode)
+
     def in_sensor_zoom_changed(self, enabled: bool) -> None:
         """Listener for `InSensorZoomChoice`: the page shows the toggle state."""
         self.saved = self.saved.model_copy(update={"in_sensor_zoom": enabled})
@@ -381,8 +388,6 @@ class Monitor:
             await self._phone_connected(call, structured)
         elif call.tool in PHONE_STATUS_TOOLS and structured is not None:
             self._phone_status(structured)
-        elif call.tool in HIGHLIGHT_TOOLS and structured is not None:
-            self._highlights(structured)
         elif call.tool == tools.BOARD_OPEN and structured is not None and self.board_panel is not None:
             with contextlib.suppress(ValidationError):
                 self.board_panel.summary = BoardSummary.model_validate(structured)
@@ -393,18 +398,12 @@ class Monitor:
             self._rendered.clear()
             self.bus.update_phone(has_snapshot=True, snapshot_seq=self.bus.phone.snapshot_seq + 1)
 
-    def _highlights(self, structured: dict[str, Any]) -> None:
-        """phone_highlight, or board_locate_in_photo with `highlight`: the page draws the same boxes."""
-        nested = structured.get(HIGHLIGHT_FIELD)
-        result = nested if isinstance(nested, dict) else structured
-        if HIGHLIGHT_BOXES_FIELD not in result:
-            return
-        try:
-            boxes = [OverlayBox.model_validate(box) for box in result[HIGHLIGHT_BOXES_FIELD]]
-        except ValidationError as exc:
-            logger.warning("unexpected highlight result: %s", exc)
-            return
-        self.bus.update_phone(highlights=boxes)
+    async def overlay_changed(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
+        """The boxes and arrows on the phone changed: the page draws the same ones on its snapshot."""
+        self.bus.update_phone(highlights=boxes, arrows=arrows)
+
+    async def tracking_changed(self, state: str) -> None:
+        self.bus.update_phone(tracking=str(state))
 
     def remote_board(self) -> RemoteBoard | None:
         """The last board that another MCP server opened (its board_open call came to this page)."""
@@ -415,8 +414,9 @@ class Monitor:
         return None
 
     async def scene_changed(self, changed_at: datetime) -> None:
-        """The board or the phone moved: the server cleared the boxes; the page drops them and shows a note."""
-        self.bus.update_phone(highlights=[], scene_changed_at=changed_at)
+        """The board or the phone moved: the page shows a note, unless the live tracking follows the move."""
+        if self.bus.phone.tracking != TRACKING_FOLLOWING:
+            self.bus.update_phone(scene_changed_at=changed_at)
 
     def _start_scene_watch(self) -> None:
         if self.scene_watcher is not None:
@@ -467,6 +467,8 @@ class Monitor:
             saved = saved.model_copy(update={"snapshot_orientation": self.orientation.current})
         if self.in_sensor_zoom is not None:
             saved = saved.model_copy(update={"in_sensor_zoom": self.in_sensor_zoom.enabled})
+        if self.af_mode is not None:
+            saved = saved.model_copy(update={"af_mode": self.af_mode.mode})
         old = self.effective
         self._store.save(saved)
         self.saved = saved

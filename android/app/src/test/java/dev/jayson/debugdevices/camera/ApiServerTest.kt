@@ -31,9 +31,23 @@ class ApiServerTest {
         var focusTarget: FocusTarget? = null
         var overlay: List<OverlayBox> = emptyList()
 
-        override suspend fun setOverlay(boxes: List<OverlayBox>): CameraStatus = gate.control {
-            overlay = boxes
-            status().copy(overlayBoxes = boxes.size).also { status = it }
+        var arrows: List<OverlayArrow> = emptyList()
+        var macroSupported = true
+
+        override suspend fun setOverlay(boxes: List<OverlayBox>, arrows: List<OverlayArrow>): CameraStatus =
+            gate.control {
+                overlay = boxes
+                this.arrows = arrows
+                status().copy(overlayBoxes = boxes.size, overlayArrows = arrows.size).also { status = it }
+            }
+
+        override suspend fun setCameraSettings(inSensorZoom: Boolean?, afMode: AfMode?): CameraStatus {
+            inSensorZoom?.let { setInSensorZoom(it) }
+            return gate.control {
+                val current = status()
+                val mode = afMode?.let { CameraSettingsLogic.effectiveAfMode(it, macroSupported) } ?: current.afMode
+                current.copy(afMode = mode).also { status = it }
+            }
         }
 
         override suspend fun focusAt(target: FocusTarget): CameraStatus = gate.control {
@@ -112,7 +126,9 @@ class ApiServerTest {
         ),
         optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080),
         inSensorZoom = InSensorZoomState.OFF,
-        overlayBoxes = 0
+        overlayBoxes = 0,
+        overlayArrows = 0,
+        afMode = AfMode.CONTINUOUS
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -144,7 +160,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0,"overlay_arrows":0,"af_mode":"continuous"}""",
             body
         )
     }
@@ -451,6 +467,78 @@ class ApiServerTest {
                 }}]}"""
             ).status
         )
+    }
+
+    @Test
+    fun `overlay arrows set, count, and clear`() {
+        val camera = ready(ready)
+        api(camera) {
+            val body = """{"boxes":[],"arrows":[{"angle_deg":45,"label":"J4 ~4 cm"},{"angle_deg":-90.5,"label":""}]}"""
+            val set = postJson(Constants.Paths.OVERLAY, body).status()
+            assertEquals(2, set.overlayArrows)
+            assertEquals(45f, camera.arrows.first().angleDeg)
+            // A body without arrows removes them.
+            assertEquals(0, postJson(Constants.Paths.OVERLAY, """{"boxes":[]}""").status().overlayArrows)
+        }
+    }
+
+    @Test
+    fun `overlay bad arrows are 400`() = api(ready(ready)) {
+        val five = (1..5).joinToString(",") { """{"angle_deg":0,"label":"a"}""" }
+        val bodies = listOf(
+            """{"boxes":[],"arrows":[$five]}""",
+            """{"boxes":[],"arrows":[{"angle_deg":"45","label":"a"}]}""",
+            """{"boxes":[],"arrows":[{"angle_deg":1e400,"label":"a"}]}""",
+            """{"boxes":[],"arrows":[{"angle_deg":0,"label":"${"x".repeat(33)}"}]}""",
+            """{"boxes":[],"arrows":[{"angle_deg":0}]}""",
+            """{"boxes":[],"arrows":[{"angle_deg":0,"label":"a","color":"red"}]}""",
+            """{"arrows":[]}"""
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.OVERLAY, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+        val four = (1..4).joinToString(",") { """{"angle_deg":720,"label":"a"}""" }
+        assertEquals(HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, """{"boxes":[],"arrows":[$four]}""").status)
+    }
+
+    @Test
+    fun `af mode macro and back, alone or with in-sensor zoom`() {
+        val camera = ready(ready.copy(zoomRatio = 2f))
+        api(camera) {
+            val macro = postJson(Constants.Paths.CAMERA, """{"af_mode":"macro"}""").status()
+            assertEquals(AfMode.MACRO, macro.afMode)
+            assertEquals(InSensorZoomState.OFF, macro.inSensorZoom)
+            assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""af_mode":"macro""""))
+            val both = postJson(Constants.Paths.CAMERA, """{"in_sensor_zoom":true,"af_mode":"continuous"}""").status()
+            assertEquals(AfMode.CONTINUOUS, both.afMode)
+            assertEquals(InSensorZoomState.ON, both.inSensorZoom)
+            assertEquals(2f, both.zoomRatio)
+        }
+    }
+
+    @Test
+    fun `af mode macro on a phone without it is 200 and stays continuous`() {
+        val camera = ready(ready).apply { macroSupported = false }
+        api(camera) {
+            val response = postJson(Constants.Paths.CAMERA, """{"af_mode":"macro"}""")
+            assertEquals(HttpStatusCode.OK, response.status)
+            assertEquals(AfMode.CONTINUOUS, response.status().afMode)
+        }
+    }
+
+    @Test
+    fun `camera settings bad af mode is 400`() = api(ready(ready)) {
+        for (body in listOf(
+            """{"af_mode":"MACRO"}""",
+            """{"af_mode":"auto"}""",
+            """{"af_mode":1}""",
+            """{"af_mode":null}"""
+        )) {
+            val response = postJson(Constants.Paths.CAMERA, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+        }
     }
 
     @Test

@@ -43,8 +43,8 @@ def test_parse_version() -> None:
 
 
 def test_server_args_ask_for_raw_h264_only() -> None:
-    args = server_args("adb", "7fad170e", "4.1", 0x1A2B3C4D, 1280)
-    assert args[:4] == ["adb", "-s", "7fad170e", "shell"]
+    args = server_args("adb", "0a1b2c3d", "4.1", 0x1A2B3C4D, 1280)
+    assert args[:4] == ["adb", "-s", "0a1b2c3d", "shell"]
     assert args[4:9] == [
         "CLASSPATH=/data/local/tmp/debug-devices-scrcpy-server.jar",
         "app_process",
@@ -120,8 +120,8 @@ async def test_session_streams_to_subscribers(tmp_path: Path) -> None:
     )
     phone_screen = PhoneScreen(options, runner, spawner=spawner, on_state=states.append)
     with phone_screen.subscribe() as subscriber:
-        assert phone_screen.ensure_running("7fad170e")
-        assert not phone_screen.ensure_running("7fad170e")
+        assert phone_screen.ensure_running("0a1b2c3d")
+        assert not phone_screen.ensure_running("0a1b2c3d")
         for _ in range(200):
             if any(state.status == ScreenStatus.ERROR for state in states):
                 break
@@ -136,11 +136,11 @@ async def test_session_streams_to_subscribers(tmp_path: Path) -> None:
     assert kinds == [MessageKind.CONFIG, MessageKind.KEY, MessageKind.DELTA, MessageKind.DELTA, MessageKind.KEY]
     assert messages[0][1] == b'{"codec":"avc1.640020"}'
     assert messages[1][1] == stream(SPS, PPS, IDR)
-    assert spawned[0][:4] == ["adb", "-s", "7fad170e", "shell"]
+    assert spawned[0][:4] == ["adb", "-s", "0a1b2c3d", "shell"]
     assert "4.1" in spawned[0]
     commands = [" ".join(call) for call in runner.calls]
-    assert f"adb -s 7fad170e push {server_file} /data/local/tmp/debug-devices-scrcpy-server.jar" in commands
-    assert f"adb -s 7fad170e forward --remove tcp:{port}" in commands
+    assert f"adb -s 0a1b2c3d push {server_file} /data/local/tmp/debug-devices-scrcpy-server.jar" in commands
+    assert f"adb -s 0a1b2c3d forward --remove tcp:{port}" in commands
     # A page that opens now gets the config and the frames since the last key frame.
     with phone_screen.subscribe() as late:
         late_kinds = [kind for kind, _ in read_messages(late.queue)]
@@ -153,7 +153,7 @@ async def test_missing_server_is_an_error_state(tmp_path: Path) -> None:
         adb_path="adb", server_path=tmp_path / "missing", version="4.1", restart_delay=timedelta(seconds=10)
     )
     phone_screen = PhoneScreen(options, FakeRunner(lambda command: ok()), on_state=states.append)
-    phone_screen.ensure_running("7fad170e")
+    phone_screen.ensure_running("0a1b2c3d")
     for _ in range(100):
         if states and states[-1].status == ScreenStatus.ERROR:
             break
@@ -181,10 +181,10 @@ async def test_failed_start_removes_the_forward(tmp_path: Path) -> None:
         adb_path="adb", server_path=server_file, version="4.1", restart_delay=timedelta(seconds=10)
     )
     phone_screen = PhoneScreen(options, runner, spawner=spawner, on_state=states.append)
-    phone_screen.ensure_running("7fad170e")
+    phone_screen.ensure_running("0a1b2c3d")
     for _ in range(100):
         if states and states[-1].status == ScreenStatus.ERROR:
             break
         await asyncio.sleep(0.01)
     await phone_screen.stop()
-    assert ["adb", "-s", "7fad170e", "forward", "--remove", "tcp:40000"] in runner.calls
+    assert ["adb", "-s", "0a1b2c3d", "forward", "--remove", "tcp:40000"] in runner.calls

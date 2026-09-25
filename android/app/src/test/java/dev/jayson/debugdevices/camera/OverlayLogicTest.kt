@@ -13,6 +13,8 @@ class OverlayLogicTest {
         previewRotation = 90,
         imageWidth = 3f,
         imageHeight = 4f,
+        snapshotWidth = 3060f,
+        snapshotHeight = 4080f,
         viewWidth = 300f,
         viewHeight = 400f,
         fill = true,
@@ -100,5 +102,97 @@ class OverlayLogicTest {
         )
         // A box at the left edge is cut off by the FILL crop.
         assertNull(OverlayLogic.boxToView(OverlayBox(0f, 0.4f, 0.1f, 0.1f, "cut"), phone))
+    }
+
+    @Test
+    fun `arrow direction in portrait with and without flips`() {
+        fun dir(angle: Float, g: OverlayGeometry) = OverlayLogic.arrowDirection(angle, g)
+        assertPoint(PixelPoint(1f, 0f), dir(0f, portrait))
+        assertPoint(PixelPoint(0f, 1f), dir(90f, portrait))
+        assertPoint(PixelPoint(-1f, 0f), dir(180f, portrait))
+        assertPoint(PixelPoint(0f, -1f), dir(270f, portrait))
+        assertPoint(PixelPoint(0f, -1f), dir(-90f, portrait))
+        assertPoint(PixelPoint(-1f, 0f), dir(0f, portrait.copy(mirroredX = true)))
+        assertPoint(PixelPoint(0f, -1f), dir(90f, portrait.copy(mirroredY = true)))
+    }
+
+    @Test
+    fun `arrow direction for each snapshot rotation`() {
+        // Snapshot turned 0 from the surface (phone sideways): snapshot right = surface right = preview down.
+        assertPoint(
+            PixelPoint(0f, 1f),
+            OverlayLogic.arrowDirection(
+                0f,
+                portrait.copy(snapshotRotation = 0, snapshotWidth = 4080f, snapshotHeight = 3060f)
+            )
+        )
+        // 180: snapshot right = surface left = preview up.
+        assertPoint(
+            PixelPoint(0f, -1f),
+            OverlayLogic.arrowDirection(
+                0f,
+                portrait.copy(snapshotRotation = 180, snapshotWidth = 4080f, snapshotHeight = 3060f)
+            )
+        )
+        // 270: upside down against the preview: snapshot right = preview left.
+        assertPoint(PixelPoint(-1f, 0f), OverlayLogic.arrowDirection(0f, portrait.copy(snapshotRotation = 270)))
+    }
+
+    @Test
+    fun `a diagonal keeps its angle in pixels`() {
+        // 45 degrees in snapshot pixels stays 45 degrees on the view (uniform scale).
+        val d = OverlayLogic.arrowDirection(45f, portrait)
+        assertEquals(d.x, d.y, delta)
+    }
+
+    @Test
+    fun `arrow at the edge of the shown area`() {
+        val area = PixelRect(0f, 0f, 300f, 400f)
+        val right = OverlayLogic.arrowAtEdge(PixelPoint(1f, 0f), area, inset = 10f, length = 50f)
+        assertPoint(PixelPoint(290f, 200f), right.tip)
+        assertPoint(PixelPoint(240f, 200f), right.tail)
+        val up = OverlayLogic.arrowAtEdge(PixelPoint(0f, -1f), area, inset = 10f, length = 50f)
+        assertPoint(PixelPoint(150f, 10f), up.tip)
+        // The diagonal of a tall area leaves through the side.
+        val s = (1 / Math.sqrt(2.0)).toFloat()
+        val diagonal = OverlayLogic.arrowAtEdge(PixelPoint(s, s), area, inset = 0f, length = 0f)
+        assertPoint(PixelPoint(300f, 350f), diagonal.tip)
+    }
+
+    @Test
+    fun `shown area is the view for FILL and the letterbox for FIT`() {
+        val phone = portrait.copy(viewWidth = 1280f, viewHeight = 2772f)
+        val fill = OverlayLogic.shownArea(phone)
+        assertEquals(PixelRect(0f, 0f, 1280f, 2772f), fill)
+        val fit = OverlayLogic.shownArea(phone.copy(fill = false))
+        val top = (2772f - 1280f * 4f / 3f) / 2f
+        assertEquals(top, fit.top, delta)
+        assertEquals(2772f - top, fit.bottom, delta)
+    }
+
+    @Test
+    fun `labels sit at the viewer's top left and turn with the viewer`() {
+        val rect = PixelRect(10f, 20f, 110f, 70f)
+        assertPoint(PixelPoint(10f, 20f), OverlayLogic.viewerTopLeft(rect, 0))
+        assertPoint(PixelPoint(110f, 20f), OverlayLogic.viewerTopLeft(rect, 90))
+        assertPoint(PixelPoint(110f, 70f), OverlayLogic.viewerTopLeft(rect, 180))
+        assertPoint(PixelPoint(10f, 70f), OverlayLogic.viewerTopLeft(rect, 270))
+        // A 40 x 10 label above the anchor; turned 90 it lies to the right of the anchor, going down.
+        assertEquals(PixelRect(100f, 90f, 140f, 100f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 0))
+        assertEquals(PixelRect(100f, 100f, 110f, 140f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 90))
+        assertEquals(PixelRect(60f, 100f, 100f, 110f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 180))
+        assertEquals(PixelRect(90f, 60f, 100f, 100f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 270))
+    }
+
+    @Test
+    fun `labels move inside the view`() {
+        assertPoint(PixelPoint(5f, 0f), OverlayLogic.shiftInside(PixelRect(-5f, 10f, 35f, 20f), 300f, 400f))
+        assertPoint(PixelPoint(-10f, 3f), OverlayLogic.shiftInside(PixelRect(270f, -3f, 310f, 7f), 300f, 400f))
+        assertPoint(PixelPoint(0f, 0f), OverlayLogic.shiftInside(PixelRect(10f, 10f, 20f, 20f), 300f, 400f))
+    }
+
+    private fun assertPoint(expected: PixelPoint, actual: PixelPoint) {
+        assertEquals(expected.x, actual.x, delta)
+        assertEquals(expected.y, actual.y, delta)
     }
 }

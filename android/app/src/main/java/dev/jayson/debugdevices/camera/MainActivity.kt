@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
         setContentView(R.layout.activity_main)
         previewView = findViewById(R.id.preview)
         // A TextureView follows scaleX and scaleY, so the preview flip works. The default SurfaceView ignores them
-        // (seen on 7fad170e: the label said "flip H", but the preview did not change).
+        // (seen on the test phone: the label said "flip H", but the preview did not change).
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         statusView = findViewById(R.id.status)
         focusRing = findViewById(R.id.focus_ring)
@@ -87,7 +87,7 @@ class MainActivity : ComponentActivity() {
             onFocusTap = { point -> showFocusRing(point) },
             onOverlayChanged = { overlayView.invalidate() }
         )
-        overlayView.boxes = { width, height -> camera.overlayRects(width, height) }
+        overlayView.scene = { width, height, inset, length -> camera.overlayScene(width, height, inset, length) }
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.
         orientationListener = object : OrientationEventListener(this) {

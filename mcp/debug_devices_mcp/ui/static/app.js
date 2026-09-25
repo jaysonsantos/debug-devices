@@ -23,6 +23,7 @@ const API = {
   phoneRotation: "/api/phone/rotation",
   phoneOrientation: "/api/phone/orientation",
   phoneInSensorZoom: "/api/phone/in-sensor-zoom",
+  phoneAfMode: "/api/phone/af-mode",
   phoneFocus: "/api/phone/focus",
   phoneClearHighlights: "/api/phone/highlight/clear",
   board: "/api/board",
@@ -80,6 +81,16 @@ const TOOL_ERROR_PREFIX = /^Error executing tool \w+: /;
 // A click on the snapshot that moves less than this (px) picks a registration point; more is a pan.
 const PICK_MAX_MOVE_PX = 5;
 const REGISTER_MIN_POINTS = 4;
+const AF_MACRO = "macro";
+const AF_CONTINUOUS = "continuous";
+const AF_MODE_TEXT = { continuous: "continuous autofocus", macro: "macro (close range)", unknown: "unknown" };
+// Closer than this, the page suggests the macro focus mode.
+const MACRO_HINT_CM = 15;
+// A pick waits this long: a double-click (full screen) comes before it and cancels it.
+const PICK_CLICK_DELAY_MS = 250;
+// An arrow toward a part outside the view sits this far inside the picture edge (px).
+const ARROW_INSET_PX = 34;
+const DEGREES_PER_HALF_TURN = 180;
 const BOARD_TOOL_PREFIX = "board_";
 // The note "Scene changed: highlights cleared" shows this long.
 const SCENE_NOTE_MS = 4000;
@@ -307,6 +318,8 @@ function applyPhone(phone) {
   showFocus(phone.focus);
   showFocusTap(phone.focus);
   showHighlights(phone);
+  showTracking(phone);
+  showAfMode(phone);
   showSceneChange(phone.scene_changed_at);
   showInSensorZoom(phone);
   showLiveZoom(phone.status, false);
@@ -352,6 +365,32 @@ async function toggleInSensorZoom() {
   }
 }
 
+// The Macro focus toggles (panel and both full-screen bars) share one choice, like the sensor zoom toggles.
+async function toggleAfMode() {
+  const toggles = document.querySelectorAll("[data-af]");
+  for (const toggle of toggles) toggle.disabled = true;
+  const mode = state.phone?.af_mode_choice === AF_MACRO ? AF_CONTINUOUS : AF_MACRO;
+  try {
+    await phoneAction(API.phoneAfMode, { mode });
+  } finally {
+    for (const toggle of toggles) toggle.disabled = false;
+  }
+}
+
+function showAfMode(phone) {
+  for (const button of document.querySelectorAll("[data-af]")) {
+    button.setAttribute("aria-pressed", String(phone.af_mode_choice === AF_MACRO));
+  }
+  const status = phone.status;
+  const mode = status?.af_mode;
+  $("phone-af-state").textContent = !status ? "–" : mode ? AF_MODE_TEXT[mode] ?? mode : "not in this app";
+  // Close to the board with the normal autofocus: suggest the macro mode.
+  const distance = phone.focus?.distance_cm;
+  const hint = $("phone-af-hint");
+  hint.hidden = !(mode === AF_CONTINUOUS && distance != null && distance < MACRO_HINT_CM);
+  hint.textContent = hint.hidden ? "" : "close range: try Macro focus";
+}
+
 let snapshotBusy = false;
 
 // A new phone snapshot. It arrives as a phone update with a new snapshot number: the image reloads (full size in
@@ -372,6 +411,9 @@ async function takeSnapshot() {
 function setupPhone() {
   for (const button of document.querySelectorAll("[data-isz]")) {
     button.addEventListener("click", toggleInSensorZoom);
+  }
+  for (const button of document.querySelectorAll("[data-af]")) {
+    button.addEventListener("click", toggleAfMode);
   }
   $("phone-connect").addEventListener("click", (e) => phoneAction(API.phoneConnect, undefined, e.currentTarget));
   $("phone-refresh").addEventListener("click", (e) => phoneAction(API.phoneStatus, undefined, e.currentTarget));
@@ -1133,7 +1175,9 @@ function drawHighlights() {
   const img = $("snapshot");
   const boxes = state.phone?.highlights ?? [];
   layer.replaceChildren();
-  if ((!boxes.length && !register.points.length) || !img.naturalWidth || $("snapshot-view").hidden) return;
+  const arrows = state.phone?.arrows ?? [];
+  if ((!boxes.length && !arrows.length && !register.points.length) || !img.naturalWidth) return;
+  if ($("snapshot-view").hidden) return;
   const view = $("snapshot-view").getBoundingClientRect();
   const picture = snapshotPicture();
   const { width, height } = picture;
@@ -1157,6 +1201,28 @@ function drawHighlights() {
     }
     layer.append(element);
   }
+  // Arrows toward parts outside the view: at the picture edge, in the shown orientation (a flip is its own inverse).
+  for (const arrow of arrows) {
+    const angle = shownAngle(arrow.angle_deg, flips);
+    const radians = (angle * Math.PI) / DEGREES_PER_HALF_TURN;
+    const [dx, dy] = [Math.cos(radians), Math.sin(radians)];
+    const halfWidth = Math.max(width / 2 - ARROW_INSET_PX, 0);
+    const halfHeight = Math.max(height / 2 - ARROW_INSET_PX, 0);
+    const reach = Math.min(dx ? halfWidth / Math.abs(dx) : Infinity, dy ? halfHeight / Math.abs(dy) : Infinity);
+    const element = document.createElement("div");
+    element.className = "pointer-arrow";
+    element.style.left = `${left + width / 2 + dx * reach}px`;
+    element.style.top = `${top + height / 2 + dy * reach}px`;
+    const head = document.createElement("span");
+    head.className = "pointer-arrow-head";
+    head.textContent = "➜";
+    head.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
+    const label = document.createElement("span");
+    label.className = "highlight-label pointer-arrow-label";
+    label.textContent = arrow.label;
+    element.append(head, label);
+    layer.append(element);
+  }
   // The registration points that the user picked (already in the shown orientation).
   for (const point of register.points) {
     const mark = document.createElement("div");
@@ -1168,6 +1234,14 @@ function drawHighlights() {
     mark.append(label);
     layer.append(mark);
   }
+}
+
+// An angle on the true-orientation snapshot -> the same direction on the shown (flipped) snapshot.
+function shownAngle(angle, flips) {
+  let shown = angle;
+  if (flips.flip_horizontal) shown = DEGREES_PER_HALF_TURN - shown;
+  if (flips.flip_vertical) shown = -shown;
+  return ((shown % 360) + 360) % 360;
 }
 
 // The shown picture of the snapshot in page pixels: after the zoom transform, inside the panel border, and without
@@ -1220,7 +1294,7 @@ function setupHighlights() {
 // region: board panel
 
 const board = { names: { parts: [], nets: [] }, partKeys: new Map(), sha: null, loading: false };
-const register = { points: [], pick: null, down: null };
+const register = { points: [], pick: null, down: null, timer: null };
 
 function showBoardError(message) {
   const error = $("board-error");
@@ -1367,24 +1441,37 @@ function startPick() {
   showRegisterPoints();
 }
 
+function placePoint(x, y) {
+  if (!register.pick) return;
+  register.points.push({ refdes: register.pick, x, y });
+  $("register-status").textContent = `${register.pick} placed. Pick the next part.`;
+  register.pick = null;
+  showRegisterPoints();
+}
+
+function showTracking(phone) {
+  const text = { following: "live tracking: following the board", lost: "live tracking lost: register again" };
+  $("board-tracking").textContent = text[phone.tracking] ?? "";
+}
+
 function setupSnapshotPick() {
   const img = $("snapshot");
   img.addEventListener("pointerdown", (event) => {
     register.down = { x: event.clientX, y: event.clientY };
   });
   img.addEventListener("click", (event) => {
+    clearTimeout(register.timer);
     const down = register.down;
-    if (!register.pick || !down) return;
+    // The second click of a double-click: full screen, not a point.
+    if (!register.pick || !down || event.detail > 1) return;
     if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > PICK_MAX_MOVE_PX) return;
     const picture = snapshotPicture();
     const x = (event.clientX - picture.left) / picture.width;
     const y = (event.clientY - picture.top) / picture.height;
     if (x < 0 || y < 0 || x > 1 || y > 1) return;
-    register.points.push({ refdes: register.pick, x, y });
-    $("register-status").textContent = `${register.pick} placed. Pick the next part.`;
-    register.pick = null;
-    showRegisterPoints();
+    register.timer = setTimeout(() => placePoint(x, y), PICK_CLICK_DELAY_MS);
   });
+  img.addEventListener("dblclick", () => clearTimeout(register.timer));
 }
 
 async function sendRegistration(event) {

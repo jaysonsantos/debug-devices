@@ -23,6 +23,7 @@ import androidx.camera.camera2.impl.Camera2ImplConfig
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.camera2.interop.applyCamera2InteropAsync
 import androidx.camera.camera2.interop.camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
@@ -125,12 +126,19 @@ class CameraController(
 
     /** The one place of the overlay boxes, and the zoom when they came. Main thread only. */
     private var overlayBoxes: List<OverlayBox> = emptyList()
+    private var overlayArrows: List<OverlayArrow> = emptyList()
     private var overlayZoomAtCall = Constants.Zoom.UNIT_RATIO
     private val overlayHandler = Handler(Looper.getMainLooper())
     private val clearOverlay = Runnable {
         overlayBoxes = emptyList()
+        overlayArrows = emptyList()
         onOverlayChanged()
     }
+
+    /** The autofocus mode: requested, and the one that runs (MACRO only when the camera has it). Main thread only. */
+    private var afModeRequested = AfMode.CONTINUOUS
+    private var afModeActive = AfMode.CONTINUOUS
+    private var macroSupported = false
 
     /** When the last tap focus started (elapsed realtime), or null. Main thread only. */
     private var focusHoldStartedAt: Long? = null
@@ -265,7 +273,7 @@ class CameraController(
      * Workaround for CameraX 1.7.0-alpha03: `SessionConfigCamera2Interop.setSessionType` writes
      * `camera2.cameraCaptureSession.sessionType`, but `SessionConfig.Builder.build()` reads
      * `camerax.core.useCase.sessionType`, and the session option unpacker does not copy the Camera2 key. This fix
-     * alone did not change the mode on 7fad170e (still NORMAL); [setPreviewSessionType] did. Not tested alone
+     * alone did not change the mode on the test phone (still NORMAL); [setPreviewSessionType] did. Not tested alone
      * without this one. Library-internal API: experiment only.
      */
     @SuppressLint("RestrictedApi")
@@ -282,6 +290,8 @@ class CameraController(
     @OptIn(ExperimentalCamera2Interop::class)
     private fun readStaticOptics(bound: Camera) {
         val info = Camera2CameraInfo.from(bound.cameraInfo)
+        macroSupported = info.getCameraCharacteristic(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+            ?.contains(CameraCharacteristics.CONTROL_AF_MODE_MACRO) == true
         focusStatic = FocusStatic(
             calibration = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION),
             minDistanceDiopters = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
@@ -343,7 +353,7 @@ class CameraController(
         val presence = InSensorZoomLogic.presence(sessionKeys.map { it.name }, requestKeys.map { it.name })
 
         // The framework gives vendor keys an array type: int32 becomes int[]. A plain Int fails in
-        // CameraMetadataNative with "Not an array" (seen on 7fad170e), and CameraX only logs it.
+        // CameraMetadataNative with "Not an array" (seen on the test phone), and CameraX only logs it.
         val names = InSensorZoomLogic.vendorParameters(InSensorZoomState.ON).keys
 
         @Suppress("UNCHECKED_CAST")
@@ -392,6 +402,8 @@ class CameraController(
                 bound.cameraControl.enableTorch(restore.torchEnabled).await()
             }
         }
+        // A new session has no Camera2 request options: set the autofocus mode again.
+        if (afModeRequested != AfMode.CONTINUOUS) applyAfMode(bound)
     }
 
     /** Sets the zoom through [InSensorZoomLogic.zoomPath], with a short settle time between the steps. */
@@ -425,6 +437,47 @@ class CameraController(
             "Rebind ($reason) at zoom ${restore.zoomRatio}: ${SystemClock.elapsedRealtime() - started} ms, " +
                 "state=$inSensorZoomState"
         )
+    }
+
+    override suspend fun setCameraSettings(inSensorZoom: Boolean?, afMode: AfMode?): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            activeCamera()
+            if (inSensorZoom != null &&
+                InSensorZoomLogic.needsReconfigure(inSensorZoomRequested, inSensorZoomState, inSensorZoom)
+            ) {
+                inSensorZoomRequested = inSensorZoom
+                reconfigure(Constants.Messages.REBIND_REASON_API)
+            }
+            if (afMode != null && afMode != afModeRequested) {
+                afModeRequested = afMode
+                applyAfMode(activeCamera())
+            }
+            readStatus(activeCamera())
+        }
+    }
+
+    /**
+     * Sets the autofocus mode on the running session: MACRO as a Camera2 request option (it also wins over the AF
+     * mode of a tap focus, and MACRO takes the tap's trigger), then one centre scan, because MACRO moves the lens on a
+     * trigger only. CONTINUOUS clears the option, so CameraX runs its continuous autofocus again.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applyAfMode(target: Camera) {
+        afModeActive = CameraSettingsLogic.effectiveAfMode(afModeRequested, macroSupported)
+        if (afModeActive == AfMode.MACRO) {
+            target.cameraControl.applyCamera2InteropAsync {
+                setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_MACRO)
+            }
+            val centre = SurfaceOrientedMeteringPointFactory(NORMALIZED_SIZE, NORMALIZED_SIZE)
+                .createPoint(Constants.Focus.CENTRE, Constants.Focus.CENTRE)
+            target.cameraControl.startFocusAndMetering(
+                FocusMeteringAction.Builder(centre, FocusMeteringAction.FLAG_AF).disableAutoCancel().build()
+            )
+        } else {
+            target.cameraControl.applyCamera2InteropAsync { clearCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE) }
+            // The MACRO centre scan has no auto cancel, and CameraX keeps AF mode AUTO while an action runs.
+            target.cameraControl.cancelFocusAndMetering()
+        }
     }
 
     override suspend fun setInSensorZoom(enabled: Boolean): CameraStatus = gate.control {
@@ -462,41 +515,61 @@ class CameraController(
         readStatus(activeCamera())
     }
 
-    override suspend fun setOverlay(boxes: List<OverlayBox>): CameraStatus = gate.control {
+    override suspend fun setOverlay(boxes: List<OverlayBox>, arrows: List<OverlayArrow>): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
             overlayBoxes = boxes
+            overlayArrows = arrows
             overlayZoomAtCall = camera.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO
             overlayHandler.removeCallbacks(clearOverlay)
-            if (boxes.isNotEmpty()) overlayHandler.postDelayed(clearOverlay, Constants.Overlay.TTL_MILLIS)
+            if (boxes.isNotEmpty() || arrows.isNotEmpty()) {
+                overlayHandler.postDelayed(clearOverlay, Constants.Overlay.TTL_MILLIS)
+            }
             onOverlayChanged()
             readStatus(camera)
         }
     }
 
-    /** The overlay boxes in the pixels of a view with the preview's bounds. Main thread only. */
-    fun overlayRects(viewWidth: Float, viewHeight: Float): List<Pair<PixelRect, String>> {
-        val camera = camera ?: return emptyList()
-        val view = previewView ?: return emptyList()
-        if (overlayBoxes.isEmpty() || viewWidth <= 0f || viewHeight <= 0f) return emptyList()
-        val resolution = imageCapture.resolutionInfo?.resolution ?: return emptyList()
+    /**
+     * The overlay in the pixels of a view with the preview's bounds. [arrowInset] and [arrowLength] are in the same
+     * pixels. Main thread only.
+     */
+    fun overlayScene(viewWidth: Float, viewHeight: Float, arrowInset: Float, arrowLength: Float): OverlayScene {
+        val camera = camera ?: return OverlayScene.EMPTY
+        val view = previewView ?: return OverlayScene.EMPTY
+        if ((overlayBoxes.isEmpty() && overlayArrows.isEmpty()) || viewWidth <= 0f || viewHeight <= 0f) {
+            return OverlayScene.EMPTY
+        }
+        val resolution = imageCapture.resolutionInfo?.resolution ?: return OverlayScene.EMPTY
         val previewRotation = camera.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0)
-        val sideways = previewRotation % (2 * Constants.Orientation.BUCKET_DEGREES) != 0
+        val snapshotRotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation)
         val geometry = OverlayGeometry(
             zoomAtCall = overlayZoomAtCall,
             zoomNow = camera.cameraInfo.zoomState.value?.zoomRatio ?: overlayZoomAtCall,
-            snapshotRotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation),
+            snapshotRotation = snapshotRotation,
             previewRotation = previewRotation,
-            imageWidth = (if (sideways) resolution.height else resolution.width).toFloat(),
-            imageHeight = (if (sideways) resolution.width else resolution.height).toFloat(),
+            imageWidth = (if (isSideways(previewRotation)) resolution.height else resolution.width).toFloat(),
+            imageHeight = (if (isSideways(previewRotation)) resolution.width else resolution.height).toFloat(),
+            snapshotWidth = (if (isSideways(snapshotRotation)) resolution.height else resolution.width).toFloat(),
+            snapshotHeight = (if (isSideways(snapshotRotation)) resolution.width else resolution.height).toFloat(),
             viewWidth = viewWidth,
             viewHeight = viewHeight,
             fill = view.scaleType.name.startsWith(FILL_SCALE_PREFIX),
             mirroredX = view.scaleX < 0f,
             mirroredY = view.scaleY < 0f
         )
-        return overlayBoxes.mapNotNull { box -> OverlayLogic.boxToView(box, geometry)?.let { it to box.label } }
+        val area = OverlayLogic.shownArea(geometry)
+        return OverlayScene(
+            boxes = overlayBoxes.mapNotNull { box -> OverlayLogic.boxToView(box, geometry)?.let { it to box.label } },
+            arrows = overlayArrows.map { arrow ->
+                val direction = OverlayLogic.arrowDirection(arrow.angleDeg, geometry)
+                OverlayLogic.arrowAtEdge(direction, area, arrowInset, arrowLength) to arrow.label
+            },
+            viewerDegrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
+        )
     }
+
+    private fun isSideways(degrees: Int): Boolean = degrees % (2 * Constants.Orientation.BUCKET_DEGREES) != 0
 
     override suspend fun focusAt(target: FocusTarget): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
@@ -666,7 +739,9 @@ class CameraController(
             focus = focusInfo(),
             optics = readOptics(),
             inSensorZoom = inSensorZoomState,
-            overlayBoxes = overlayBoxes.size
+            overlayBoxes = overlayBoxes.size,
+            overlayArrows = overlayArrows.size,
+            afMode = afModeActive
         )
     }
 

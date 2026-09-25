@@ -68,6 +68,22 @@ class Optics(BaseModel):
     output_width_px: int
 
 
+class AfMode(StrEnum):
+    """The autofocus mode (CameraStatus.af_mode). `macro`: the camera's close-range mode."""
+
+    CONTINUOUS = "continuous"
+    MACRO = "macro"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> AfMode:
+        return cls.UNKNOWN
+
+
+# The modes that a client can ask for (POST /v1/camera `af_mode`).
+type AfModeName = Literal["continuous", "macro"]
+
+
 class InSensorZoom(StrEnum):
     """The vendor in-sensor zoom: real extra detail at 2x or more from a sensor crop, on phones that have it."""
 
@@ -101,6 +117,10 @@ class CameraStatus(BaseModel):
     in_sensor_zoom: InSensorZoom | None = None
     # The number of highlight boxes on the phone screen. None: an app from before POST /v1/overlay.
     overlay_boxes: int | None = None
+    # The number of arrows on the phone screen. None: an app from before the overlay arrows.
+    overlay_arrows: int | None = None
+    # None: an app from before `af_mode`.
+    af_mode: AfMode | None = None
 
 
 class ApiErrorCode(StrEnum):
@@ -179,12 +199,33 @@ class OverlayBox(BaseModel):
         return self
 
 
+class OverlayArrow(BaseModel):
+    """An arrow at the preview edge: the target is outside the view in this direction.
+
+    `angle_deg` is on the true-orientation snapshot image: 0 = right, 90 = down, 180 = left, 270 = up.
+    """
+
+    angle_deg: float
+    label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
+
+
 class OverlayRequest(BaseModel):
     boxes: Annotated[list[OverlayBox], Field(max_length=phone.OVERLAY_MAX_BOXES)]
+    # Without arrows, the app removes its arrows.
+    arrows: Annotated[list[OverlayArrow], Field(max_length=phone.OVERLAY_MAX_ARROWS)] = []
 
 
 class CameraSettingsRequest(BaseModel):
-    in_sensor_zoom: bool
+    """POST /v1/camera: at least one field. A None field is not sent."""
+
+    in_sensor_zoom: bool | None = None
+    af_mode: AfModeName | None = None
+
+    @model_validator(mode="after")
+    def _one_field(self) -> CameraSettingsRequest:
+        if self.in_sensor_zoom is None and self.af_mode is None:
+            raise ValueError("give in_sensor_zoom, af_mode, or both")
+        return self
 
 
 class PreviewFlipRequest(BaseModel):
@@ -286,7 +327,8 @@ class PhoneClient:
         return _parse(CameraStatus, phone.PATH_PREVIEW, body)
 
     async def camera(self, request: CameraSettingsRequest) -> CameraStatus:
-        """Turn the in-sensor zoom on or off. The app binds the camera again: on takes about 5 s, off about 1 s."""
+        """Set the in-sensor zoom and/or the autofocus mode. The app binds the camera again for the in-sensor zoom:
+        on takes about 5 s, off about 1 s."""
         try:
             body = await self._request(
                 HTTPMethod.POST, phone.PATH_CAMERA, request, timeout=defaults.PHONE_RECONFIGURE_TIMEOUT
@@ -294,7 +336,7 @@ class PhoneClient:
         except PhoneApiError as exc:
             if exc.status == HTTPStatus.NOT_FOUND:
                 raise CameraSettingsNotSupportedError(
-                    f"the phone app has no {phone.PATH_CAMERA}; update the phone app to use the in-sensor zoom"
+                    f"the phone app has no {phone.PATH_CAMERA}; update the phone app to change the camera settings"
                 ) from exc
             raise
         return _parse(CameraStatus, phone.PATH_CAMERA, body)
@@ -329,7 +371,7 @@ class PhoneClient:
     async def _request(
         self, method: HTTPMethod, path: str, body: BaseModel | None = None, timeout: timedelta | None = None
     ) -> bytes:
-        content = body.model_dump_json().encode() if body is not None else None
+        content = body.model_dump_json(exclude_none=True).encode() if body is not None else None
         headers = {CONTENT_TYPE_HEADER: JSON_CONTENT_TYPE} if body is not None else None
         extra = {"timeout": timeout.total_seconds()} if timeout is not None else {}
         try:

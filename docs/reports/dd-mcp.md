@@ -23,8 +23,8 @@
   - `webcam_snapshot` returns a real 1920x1080 JPEG from `/dev/video0` (about 70 KB).
   - `phone_connect` returns a tool error. The error lists the two Fire TV devices and asks for `--adb-serial`. The server ran only `adb devices -l`.
   - `multimeter_read` returns a tool error that names `OPENROUTER_API_KEY`. No network call.
-- Real phone test before the app install, with `--adb-serial 7fad170e`: `phone_connect` returned a clear error: "the camera app dev.jayson.debugdevices.camera is not installed on 7fad170e. Build and install android/ first."
-- Real phone test after the app install. Driver: `mcp.Client` over stdio, `debug-devices-mcp --adb-serial 7fad170e`. Only `7fad170e` got commands. dd-qa used the phone at the same time, so each result shows the state at that moment only.
+- Real phone test before the app install, with `--adb-serial 0a1b2c3d`: `phone_connect` returned a clear error: "the camera app dev.jayson.debugdevices.camera is not installed on 0a1b2c3d. Build and install android/ first."
+- Real phone test after the app install. Driver: `mcp.Client` over stdio, `debug-devices-mcp --adb-serial 0a1b2c3d`. Only `0a1b2c3d` got commands. dd-qa used the phone at the same time, so each result shows the state at that moment only.
 
   | Call | Result | Time |
   |---|---|---|
@@ -78,11 +78,11 @@
 
 ## Live test after the fixes
 
-One stdio session with the settings from `.env` (model `openai/gpt-6-luna`, serial `7fad170e`). The key did not go into any output.
+One stdio session with the settings from `.env` (model `openai/gpt-6-luna`, serial `0a1b2c3d`). The key did not go into any output.
 
 | Call | Result |
 |---|---|
-| `phone_connect` | OK, serial `7fad170e` |
+| `phone_connect` | OK, serial `0a1b2c3d` |
 | `phone_snapshot save_path=...` | OK. Returned 1176x1568, 124,228 bytes. Saved file 3060x4080, 2,012,826 bytes. |
 | `webcam_snapshot save_path=...` | OK. Returned 1568x882, 131,641 bytes. Saved file 1920x1080, 209,422 bytes. |
 | `multimeter_read` (the one allowed live call) | OK after 13.0 s. OpenRouter accepted the strict schema. |
@@ -136,7 +136,7 @@ Model `openai/gpt-6-luna`, reasoning effort low, no crop, full 1920x1080 frames.
 - No request failed. No `finish_reason: length`. The strict schema and the reasoning settings work.
 - Call 1: the saved frame shows a blank LCD at that time. `readable: false` is correct.
 - Calls 2 and 3: the saved frames show `0.01` clearly, with the dial on a voltage position. `readable: false` is wrong (a false negative). Notes from the model: "The LCD is too blurred and dim to reliably read the digits".
-- Two more `multimeter_read` calls in the `--no-ui` session failed at once: "Device or resource busy". The monitor (pid 227982, `debug-devices-mcp --adb-serial 7fad170e`) holds `/dev/video0` with its ffmpeg stream. The calls did not reach OpenRouter. As the orchestrator told me, I then took the frames from the monitor endpoint (driver script in my scratch directory).
+- Two more `multimeter_read` calls in the `--no-ui` session failed at once: "Device or resource busy". The monitor (pid 227982, `debug-devices-mcp --adb-serial 0a1b2c3d`) holds `/dev/video0` with its ffmpeg stream. The calls did not reach OpenRouter. As the orchestrator told me, I then took the frames from the monitor endpoint (driver script in my scratch directory).
 
 ### Why the model does not read a visible display (not tested)
 
@@ -211,7 +211,7 @@ Notes:
 
 Skipped. Before the call, I took one phone snapshot (`GET /v1/snapshot`). The phone points at a circuit board, not at the meter. No OpenRouter call.
 
-Before that snapshot: the phone had reconnected over USB (the ADB transport id changed from 19 to 20), and the ADB forward `tcp:18765` was gone. `/v1/health` on 18765 gave "connection refused". I ran `adb -s 7fad170e forward tcp:18765 tcp:8765` again (the same command that `phone_connect` runs). The monitor state still showed the phone as connected. Proposal for dd-ui: when a phone call gives `PhoneUnreachableError`, run the forward again one time. Another option: show "phone disconnected" in the monitor.
+Before that snapshot: the phone had reconnected over USB (the ADB transport id changed from 19 to 20), and the ADB forward `tcp:18765` was gone. `/v1/health` on 18765 gave "connection refused". I ran `adb -s 0a1b2c3d forward tcp:18765 tcp:8765` again (the same command that `phone_connect` runs). The monitor state still showed the phone as connected. Proposal for dd-ui: when a phone call gives `PhoneUnreachableError`, run the forward again one time. Another option: show "phone disconnected" in the monitor.
 
 ## Round 4: snapshot rotation
 

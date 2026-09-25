@@ -61,6 +61,7 @@ class phone:
     PATH_OVERLAY = "/v1/overlay"
     # POST /v1/overlay limits (docs/phone-api.md).
     OVERLAY_MAX_BOXES = 8
+    OVERLAY_MAX_ARROWS = 4
     OVERLAY_MAX_LABEL = 32
     PATH_SNAPSHOT = "/v1/snapshot"
 

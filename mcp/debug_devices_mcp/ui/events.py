@@ -16,7 +16,7 @@ from pydantic import BaseModel, JsonValue
 
 from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.images import SnapshotOrientation
-from debug_devices_mcp.phone_api import CameraStatus, OverlayBox
+from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox
 from debug_devices_mcp.ui.constants import defaults
 
 MILLISECONDS_PER_SECOND = 1000
@@ -93,8 +93,14 @@ class PhoneState(BaseModel):
     focus: FocusReport | None = None
     # The user's in-sensor zoom choice. The state of the phone is `status.in_sensor_zoom`.
     in_sensor_zoom_choice: bool = False
+    # The user's autofocus mode choice: continuous or macro. The state of the phone is `status.af_mode`.
+    af_mode_choice: str = "continuous"
     # The highlight boxes on the phone (phone_highlight): on the true-orientation snapshot, from 0 to 1.
     highlights: list[OverlayBox] = []
+    # The arrows toward searched parts outside the view (phone_point_to): angles on the true-orientation snapshot.
+    arrows: list[OverlayArrow] = []
+    # The live tracking of the newest photo registration: off, following, or lost.
+    tracking: str = "off"
     # The last time the board or the phone moved (the scene watcher). The page shows a short note.
     scene_changed_at: datetime | None = None
     # The phone screen stream in the page: off, starting, streaming, or error.

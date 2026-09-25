@@ -39,12 +39,12 @@ class FakeSpawner:
 
 
 def test_scrcpy_args() -> None:
-    assert scrcpy_args("scrcpy", "7fad170e") == [
+    assert scrcpy_args("scrcpy", "0a1b2c3d") == [
         "scrcpy",
         "-s",
-        "7fad170e",
+        "0a1b2c3d",
         "--window-title",
-        "debug-devices: phone 7fad170e",
+        "debug-devices: phone 0a1b2c3d",
         "--no-audio",
         "--stay-awake",
     ]
@@ -53,11 +53,11 @@ def test_scrcpy_args() -> None:
 async def test_starts_once_per_serial_and_stops() -> None:
     spawner = FakeSpawner()
     launcher = ScrcpyLauncher(ScrcpyOptions(adb_path="/opt/adb"), spawner=spawner, environ={"PATH": "/bin"})
-    assert await launcher.ensure_running("7fad170e")
-    assert not await launcher.ensure_running("7fad170e")
+    assert await launcher.ensure_running("0a1b2c3d")
+    assert not await launcher.ensure_running("0a1b2c3d")
     assert len(spawner.calls) == 1
     assert spawner.calls[0][1] == {"PATH": "/bin", "ADB": "/opt/adb"}
-    assert launcher.serial == "7fad170e"
+    assert launcher.serial == "0a1b2c3d"
     await launcher.stop()
     assert spawner.processes[0].terminated
     assert not launcher.running
@@ -66,9 +66,9 @@ async def test_starts_once_per_serial_and_stops() -> None:
 async def test_restarts_after_the_window_closes() -> None:
     spawner = FakeSpawner()
     launcher = ScrcpyLauncher(spawner=spawner, environ={})
-    await launcher.ensure_running("7fad170e")
+    await launcher.ensure_running("0a1b2c3d")
     spawner.processes[0].returncode = 0
-    assert await launcher.ensure_running("7fad170e")
+    assert await launcher.ensure_running("0a1b2c3d")
     assert len(spawner.calls) == 2
 
 

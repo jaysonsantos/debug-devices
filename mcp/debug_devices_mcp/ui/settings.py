@@ -5,6 +5,7 @@ import os
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -40,6 +41,8 @@ class UiSettings(BaseModel):
     snapshot_orientation: SnapshotOrientation | None = None
     # The in-sensor zoom choice. `InSensorZoomChoice` owns it, like the flips.
     in_sensor_zoom: bool | None = None
+    # The autofocus mode choice. `AfModeChoice` owns it.
+    af_mode: Literal["continuous", "macro"] | None = None
 
 
 class EffectiveSettings(BaseModel):

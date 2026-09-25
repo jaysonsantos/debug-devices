@@ -75,7 +75,7 @@ Two bugs found on the phone and fixed:
 1. **Crash at start** (first install of this round, 12:39). `imageCapture` was built in the constructor before the `rotation` field existed, so `buildImageCapture` read a null `RotationState` (`NullPointerException` in `CameraController.<init>`). Fix: declare `rotation` before `imageCapture`. The JVM unit tests do not construct `CameraController`, so they did not catch it. The app was down for about 2 minutes. Note: my `adb logcat -c` also cleared the crash buffer, so the crash counts below start at 12:41.
 2. **The parameter never reached the HAL** (first "on" run). CameraX (CameraPipe back end, log tag `CXCP`) logged for each request: `Failed to set [org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom: 1] on CaptureRequest.Builder` with `java.lang.IllegalArgumentException: Not an array: class java.lang.Integer` (from `MarshalQueryableArray`). The framework gives this vendor key the type `int[]`, not `int`. CameraX only logs the error, so the session streamed and the app said `state=ON`, but `dumpsys` showed `EnableInsensorZoom = 0`. Fix: `CaptureRequest.Key<IntArray>` with the value `intArrayOf(1)`. After the fix: 0 `CXCP` set failures, and `dumpsys` shows 1. I did not use the images of that run.
 
-Device test on `7fad170e` (APK installed at 12:45, phone in landscape on a stand, fixed scene: a red laptop main board at about 25-30 cm; flag on first, then off, back to back; each snapshot 2.5 s after the zoom change):
+Device test on `0a1b2c3d` (APK installed at 12:45, phone in landscape on a stand, fixed scene: a red laptop main board at about 25-30 cm; flag on first, then off, back to back; each snapshot 2.5 s after the zoom change):
 
 `dumpsys media.camera`, camera 0, "Last request sent" and "Latest received frame":
 
@@ -148,7 +148,7 @@ Code:
 - `/v1/snapshot` is not changed: `ImageCapture` does not see the view scale.
 - New unit tests: `PreviewFlipLogicTest` (4) and `ApiServerTest` +3 (set and read both fields while the snapshot bytes stay the same, 9 bad bodies, 503 before the start state and 405 on GET). 77 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Check on `7fad170e` (APK installed at about 19:50, phone flat, rotation 0):
+Check on `0a1b2c3d` (APK installed at about 19:50, phone flat, rotation 0):
 
 | Request | Result |
 |---|---|
@@ -157,7 +157,7 @@ Check on `7fad170e` (APK installed at about 19:50, phone flat, rotation 0):
 | `{}`, only `flip_horizontal`, `"true"` as a string, an extra field `mirror` | 400 `bad_request` |
 | `GET /v1/preview` | 405 `method_not_allowed` |
 
-Screenshots (`adb -s 7fad170e exec-out screencap -p`, only in my scratch directory):
+Screenshots (`adb -s 0a1b2c3d exec-out screencap -p`, only in my scratch directory):
 
 - None / H / V / H+V: the preview is mirrored left-right, upside down, and both ways. The logo on the board reads backwards in the H image. The label is readable in each image: `zoom 1.00x · torch off · flip H · listening on 127.0.0.1:8765`, `... · flip V ...`, `... · flip H · flip V ...`.
 - Rotation locked to 90 with flip H: the label turns sideways and stays readable, and the preview is mirrored along the screen Y axis (left-right for a viewer who holds the phone sideways). Then `{"auto": true}` again.
@@ -179,7 +179,7 @@ Code:
 - `MainActivity`: the label shows ` · ≈ NN cm`, and a coroutine reads it again every second while the app is visible (`repeatOnLifecycle(STARTED)`).
 - New unit tests: `FocusLogicTest` (6) and `ApiServerTest` +1 (the full JSON shape, `"focus":null`, `"distance_diopters":null`). 84 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Check on `7fad170e` (APK installed at 20:06, the phone at the same position as the in-sensor zoom rerun):
+Check on `0a1b2c3d` (APK installed at 20:06, the phone at the same position as the in-sensor zoom rerun):
 
 - `GET /v1/status`: `focus` = `{"distance_diopters": 3.2467532, "state": "focused", "calibration": "approximate", "min_distance_diopters": 10.0}`, `optics` = `{"focal_length_mm": 6.07, "sensor_width_mm": 9.1392, "output_width_px": 4080}`.
 - Distance: 100 / 3.247 = **31 cm**. Detail: 4080 x 6.07 / (9.139 x 308) = **8.8 px/mm**. The minimum focus distance is 10 cm (10 diopters). So a move to 10-12 cm gives about 3x more detail.
@@ -197,7 +197,7 @@ Brief: open our session with the vendor operation mode `CUSTOM (36869)` = `0x900
 
 Way chosen: **CameraX 1.7.0-alpha03** (the only 1.7 release; no rc or stable yet). It is the smallest change: CameraX still runs zoom, torch, preview flip, focus data, rotation, and the snapshot. The session is bound as a `SessionConfig(preview, imageCapture)`, because the session type is a session-level option. A plain Camera2 path would replace the whole capture pipeline.
 
-What was necessary (each step checked with `dumpsys media.camera` on `7fad170e`):
+What was necessary (each step checked with `dumpsys media.camera` on `0a1b2c3d`):
 
 1. `SessionConfig.Builder(...).camera2Interop { setSessionType(0x9005) }` alone: the session stayed `NORMAL (0)`. Cause in the 1.7.0-alpha03 sources: the interop writes `camera2.cameraCaptureSession.sessionType`, `SessionConfig.Builder.build()` reads `camerax.core.useCase.sessionType`, and `SupportedSurfaceCombination` gives each stream spec `SESSION_TYPE_REGULAR` anyway. This looks like a CameraX bug.
 2. Workaround (library-internal API, `@SuppressLint("RestrictedApi")`): the Preview gets its own default session config (the CameraX default template `TEMPLATE_PREVIEW`) with `Camera2ImplConfig.SESSION_TYPE_OPTION = 0x9005`. `UseCaseCameraConfig` reads that option first. Result: `Operation mode: CUSTOM (36869)`. A second write to `UseCaseConfig.OPTION_SESSION_TYPE` is also in the code. It did not help alone. I did not test the first workaround without it.
@@ -210,7 +210,7 @@ Code:
 - CameraX 1.6.2 -> 1.7.0-alpha03 for all camera artifacts. It deprecates `Camera2Interop.Extender` and `Camera2CameraInfo` (warnings only, still used).
 - New unit tests (`InSensorZoomLogicTest`): plan with Android support, vendor parameters, session type, bind fallback. 87 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Device test on `7fad170e` (20:40-20:43, the phone on the stand at about 28 cm, the same scene; flag on 1x, 2x, 4x, then off 1x, 2x, 4x, back to back; rotation locked to 0 for the six snapshots):
+Device test on `0a1b2c3d` (20:40-20:43, the phone on the stand at about 28 cm, the same scene; flag on 1x, 2x, 4x, then off 1x, 2x, 4x, back to back; rotation locked to 0 for the six snapshots):
 
 | Flag | Zoom | Operation mode | `EnableInsensorZoom` | `InSensorZoomState` | `rawCropRegion` | `sensorModeMask` / `sensorModeCache[0]` |
 |---|---|---|---|---|---|---|
@@ -256,7 +256,7 @@ Proposal (no contract change made):
 
 Brief: get the Xiaomi app's quarter-field mode at 4x (`rawCropRegion 1530 1152 1020 756`, `sensorModeMask 96`) by a rebind at the 4x boundary. Result: **the quarter-field mode is not reachable with our streams, and a rebind at 4x makes it worse. What works: keep the half-field mode from 2x up, also at 4x and 6x.** The automatic rebind is removed again.
 
-What I found on `7fad170e` (vendor session on, `dumpsys media.camera`, complete frame dumps only):
+What I found on `0a1b2c3d` (vendor session on, `dumpsys media.camera`, complete frame dumps only):
 
 1. I implemented the rebind at the 4x boundary (zoom bands, a 600 ms debounce, through `ControlGate`, keeping zoom and torch). A session that is created at 4x or 6x gives `InSensorZoomState = 0`, the full raw crop `0 4 4080 3052`, and mask 0: no in-sensor zoom at all. Rebinds took 4.8-8.4 s.
 2. Probes in one session: zoom 3.9 -> half field (state 2, mask 48). A session created at 1x, then 1x -> 2x -> 4x -> 6x: the half field stays at 4x and 6x. A direct jump 1x -> 5x: state 1, mask 0 (not entered). 1x -> 3x -> 5x: half field at 5x.
@@ -297,7 +297,7 @@ Code:
 - `MainActivity`: the intent extra stays as an adb helper and goes through `setInSensorZoom` (keeps zoom and torch). The label observes the zoom and torch of the new `CameraInfo` after a rebind, and removes the old observers.
 - New unit tests: `ApiServerTest` +4 (on and off keep zoom and torch, `unsupported` is 200, 6 bad bodies, 503 before the start state and 405 on GET), `InSensorZoomLogicTest` (zoom path, reconfigure rule, state words). 94 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Checks on `7fad170e` with curl (local port 18765):
+Checks on `0a1b2c3d` with curl (local port 18765):
 
 | Request | Result |
 |---|---|
@@ -329,7 +329,7 @@ Code:
 - Optional focus ring: a white 72 dp ring at the screen point for 0.8 s. It sits outside the preview view, so it is never mirrored, and it shows in the screen stream.
 - New unit tests: `FocusTapLogicTest` (7: pairs, range, mapping, flips, offset and bounds, all four rotations with known points) and `ApiServerTest` +3 (screen and snapshot targets, 9 bad bodies plus "outside the preview", 503 and 405). 103 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Check on `7fad170e` (APK installed at about 21:5x; the phone now at about 11 cm, focus distance 9.3 diopters; board with a raised heat pipe and shield):
+Check on `0a1b2c3d` (APK installed at about 21:5x; the phone now at about 11 cm, focus distance 9.3 diopters; board with a raised heat pipe and shield):
 
 - **The mapping is exact** (AF/AE regions in "Last request sent", active array 4080 x 3060, sensor orientation 90):
   - Snapshot (0.92, 0.80): expected region centre (3264, 245), sent `[2958 15 3570 473]` = centre (3264, 244). Snapshot (0.10, 0.10): expected (408, 2754), sent centre (408, 2754).
@@ -356,7 +356,7 @@ Code:
 - `CameraController`: the boxes, the zoom at the call, and the 10-minute timer (`Handler`) in one place, through `ControlGate`. `overlayRects` builds the geometry from the camera: zoom now, snapshot rotation, preview rotation (`getSensorRotationDegrees(ROTATION_0)`), the ImageCapture resolution, and the preview scale type and flips. The view redraws on a zoom change, a rotation change, a flip change, and an overlay change. An app start clears the boxes (in memory only).
 - New unit tests: `OverlayLogicTest` (7: straight mapping, inverse rotation, landscape snapshot on the portrait preview, flips, zoom rescale, hidden when outside, FILL crop and FIT letterbox on the phone's 1280 x 2772 view) and `ApiServerTest` +3 (set and clear, 12 bad bodies plus the 32-character and 8-box limits, 503 and 405). 113 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
 
-Check on `7fad170e` (the board moved since the last round; a new scene at about 11 cm):
+Check on `0a1b2c3d` (the board moved since the last round; a new scene at about 11 cm):
 
 - Two boxes from a 1x snapshot: "BAT1" around the battery connector (x 0.43-0.55, y 0.455-0.505) and "QR" around a QR label (x 0.65-0.82, y 0.505-0.57). `overlay_boxes` 2.
 - Screenshot at 1x: "BAT1" is around the connector. "QR" is around the label at the right edge. The preview shows only the middle 62% of the image width, so it is cut off there.
@@ -369,6 +369,39 @@ Check on `7fad170e` (the board moved since the last round; a new scene at about 
 
 End state: no boxes, zoom 1x, torch off, flips false. In-sensor zoom was `on` before the test (set by a person). My reinstall reset it to `off`, so I turned it `on` again.
 
+
+### Round: overlay arrows and upright labels
+
+Brief: `docs/briefs/arrow-app.md` part 1. Contract: optional `arrows` in `POST /v1/overlay`, `CameraStatus.overlay_arrows`, upright labels. **Build and unit tests only: the phone was drained and not connected (`adb -s 0a1b2c3d get-state`: not found). The device check waits for the user (decision file L1).**
+
+Code:
+
+- `OverlayArrow` (`angle_deg` strict float, `label`); `OverlayRequest.arrows` defaults to empty, so a body without `arrows` removes them. `validate`: at most 4 arrows, a finite angle (`1e400` is 400), labels <= 32 characters. A string angle, a missing label, or an unknown field is 400 through `ApiJson`.
+- `OverlayLogic.arrowDirection`: the angle is a direction in snapshot pixels. It maps the centre and a small step in that direction (with the snapshot width and height, so the image aspect counts) through the box mapping. So rotation, the FILL/FIT scale, and the flips are included.
+- `OverlayLogic.shownArea` (the whole view for FILL, the letterbox for FIT) and `arrowAtEdge`: where the ray from the centre of that area leaves it, the tip 12 dp inside the edge, the tail 56 dp further in.
+- Upright labels: `viewerTopLeft` picks the box corner that is the top left for the viewer (the viewer turn = `surfaceDegrees(effectiveRotation)`, the same value that turns the status label). `labelRect` gives the label's screen rectangle after the turn, and `shiftInside` moves it into the view. `OverlayView` draws each label with `canvas.rotate(viewerDegrees)`, and each arrow as a green 3 dp line with a head; the arrow label sits at the tail. This fixes the limit of the last round (box labels turned when the phone is sideways).
+- `CameraController.overlayScene` replaces `overlayRects` and adds the arrows and the viewer turn. The 10-minute TTL and the start rule also cover the arrows.
+- New unit tests: `OverlayLogicTest` +7 (direction at 0/90/180/270 and negative angles, each flip, each snapshot rotation, a 45-degree diagonal, edge intersection including a diagonal through the side, FILL/FIT shown area, label corner and turned rectangle for 0/90/180/270, shift inside) and `ApiServerTest` +2 (arrows set/count/clear, 7 bad bodies plus the 4-arrow limit).
+
+### Round: autofocus MACRO mode (`af_mode`)
+
+Brief: `docs/briefs/arrow-app.md` part 2 (user decision D3). Contract (added by the orchestrator during the work): `POST /v1/camera` takes `in_sensor_zoom` and/or `af_mode` (`continuous` | `macro`), at least one; `CameraStatus.af_mode`; a phone without MACRO returns 200 and stays `continuous`. **The implementation follows this text; I found no mismatch.** Build and unit tests only (the phone is not connected).
+
+Code:
+
+- `AfMode.kt`: `AfMode` with the API words, `CameraSettingsLogic.validate` (at least one field) and `effectiveAfMode` (MACRO only when the camera has it). `CameraSettingsRequest` fields are both optional now. An unknown value (`"MACRO"`, `"auto"`, a number, `null`) is 400.
+- `CameraController.setCameraSettings` (through `ControlGate`): in-sensor zoom first (a rebind when it changes), then the AF mode. `applyAfMode`: MACRO sets `CONTROL_AF_MODE_MACRO` as a runtime Camera2 option (`CameraControl.applyCamera2InteropAsync`, CameraX 1.7) and starts one centre AF scan without auto cancel, because MACRO moves the lens on a trigger only. CONTINUOUS clears the option and cancels that scan, so CameraX runs continuous AF again. `macroSupported` comes from `CONTROL_AF_AVAILABLE_MODES` (the research lists MACRO for camera 0).
+- With tap to focus: the Camera2 option wins over the AF mode that a tap focus sets (AUTO), so a tap runs a MACRO scan with the tap's trigger and region. The 5 s hold then ends without leaving MACRO.
+- With in-sensor zoom: a rebind starts a session without runtime options, so `restoreState` sets MACRO again after zoom and torch.
+- The adb intent extra and `setInSensorZoom` still work.
+- New unit tests: `CameraSettingsLogicTest` (3) and `ApiServerTest` +3 (macro and back alone and with in-sensor zoom, keeping the zoom; no MACRO -> 200 and `continuous`; 4 bad values). 128 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Open for the device check (both rounds), when the phone is back:
+
+1. Arrows: `{"boxes":[],"arrows":[{"angle_deg":0,"label":"right"},{"angle_deg":90,"label":"down"}]}` in portrait, with flip H, and with the phone sideways; screenshot: the arrows at the right and bottom edges (mirrored with flip H), the labels upright.
+2. Box labels upright with the phone sideways.
+3. `af_mode` `macro`: `dumpsys media.camera` "Last request sent" shows `android.control.afMode = MACRO`; `focus.distance_diopters` after the centre scan at 10-12 cm; a tap focus in MACRO (the region and the trigger in the request); `continuous` again (`afMode = CONTINUOUS_PICTURE`). Then MACRO together with in-sensor zoom on, and after a rebind.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:
@@ -378,13 +411,13 @@ nix develop .. --command ./gradlew assembleDebug testDebugUnitTest
 # BUILD SUCCESSFUL
 ```
 
-On the phone `7fad170e` (Xiaomi 2510ERA8BG, API 36):
+On the phone `0a1b2c3d` (Xiaomi 2510ERA8BG, API 36):
 
 ```sh
-adb -s 7fad170e install -r app/build/outputs/apk/debug/app-debug.apk   # Success (second try, see below)
-adb -s 7fad170e shell pm grant dev.jayson.debugdevices.camera android.permission.CAMERA
-adb -s 7fad170e shell am start -n dev.jayson.debugdevices.camera/.MainActivity
-adb -s 7fad170e forward tcp:18765 tcp:8765
+adb -s 0a1b2c3d install -r app/build/outputs/apk/debug/app-debug.apk   # Success (second try, see below)
+adb -s 0a1b2c3d shell pm grant dev.jayson.debugdevices.camera android.permission.CAMERA
+adb -s 0a1b2c3d shell am start -n dev.jayson.debugdevices.camera/.MainActivity
+adb -s 0a1b2c3d forward tcp:18765 tcp:8765
 ```
 
 | Request | Result |
@@ -400,7 +433,7 @@ adb -s 7fad170e forward tcp:18765 tcp:8765
 | `DELETE /v1/status` | 405 with `bad_request` body |
 | `GET /v1/snapshot` | 200 `image/jpeg`, 1.88 MB, 3060x4080, about 1.2 s, real scene (not black) |
 
-Round 2 check on `7fad170e` (after the SDK 37 build). The old app was at zoom 3.0 with the torch on. Then I reinstalled, did `am force-stop` and `am start`:
+Round 2 check on `0a1b2c3d` (after the SDK 37 build). The old app was at zoom 3.0 with the torch on. Then I reinstalled, did `am force-stop` and `am start`:
 
 | Request | Result |
 |---|---|
@@ -415,7 +448,7 @@ Round 2 check on `7fad170e` (after the SDK 37 build). The old app was at zoom 3.
 
 The server answered about 3 s after `am start`. Before that, curl through the forward got no response (`000`). Clients must retry `/v1/health` after a start.
 
-Round 3 check on `7fad170e` (new APK installed at about 18:40).
+Round 3 check on `0a1b2c3d` (new APK installed at about 18:40).
 
 Bug 1 repro, 5 runs of `am force-stop`, `am start`, then `POST /v1/zoom {"ratio":3}` every 20 ms (script: scratchpad `repro.sh`):
 
@@ -427,7 +460,7 @@ Bug 1 repro, 5 runs of `am force-stop`, `am start`, then `POST /v1/zoom {"ratio"
 | 4 | tries 1-41 | 42 | 66 |
 | 5 | tries 1-41 | 42 | 68 |
 
-Each run ended with status `zoom_ratio` 3.0, `torch_enabled` false. The app PID stayed 16164 after the last start. `adb -s 7fad170e logcat -b crash -d` has only one FATAL entry: 18:28:44 PID 4630, the old APK crash that dd-qa found. There is no new entry (checked at 18:45 and after the checks below). `logcat -s DebugCamera:E` is empty.
+Each run ended with status `zoom_ratio` 3.0, `torch_enabled` false. The app PID stayed 16164 after the last start. `adb -s 0a1b2c3d logcat -b crash -d` has only one FATAL entry: 18:28:44 PID 4630, the old APK crash that dd-qa found. There is no new entry (checked at 18:45 and after the checks below). `logcat -s DebugCamera:E` is empty.
 
 Bugs 2 and 4 on the phone:
 
@@ -442,7 +475,7 @@ Bugs 2 and 4 on the phone:
 
 I cannot trigger `internal_error` on the phone without a bug. A unit test covers it.
 
-Round 4 check on `7fad170e` (APK installed at 19:13):
+Round 4 check on `0a1b2c3d` (APK installed at 19:13):
 
 - Accelerometer (`dumpsys sensorservice`): `0.29, -0.78, 9.77`. The phone lies flat, screen up. `OrientationEventListener` gives `ORIENTATION_UNKNOWN` in this position, so the rotation stays `ROTATION_0` and no rotation log line appears.
 - `GET /v1/snapshot`: 200, 2.87 MB. `exiftool`: `Orientation: Unknown (0)`, 3060x4080. This phone (with CameraX) writes the rotation into the pixels. It does not use the EXIF tag. So for a landscape check, look at the pixel size: portrait gives 3060x4080, landscape must give 4080x3060 (or EXIF 6/8 with 3060x4080).
@@ -455,7 +488,7 @@ Round 4 check on `7fad170e` (APK installed at 19:13):
 - Not checked: upside-down (180). The unit tests cover its mapping.
 - Overlay fix (user report: the label was cut). Cause: the label turned around its own center in the top-left corner, so in landscape most of it went off the screen. The top of the screen also has the status bar and the camera cutout. Fix: the label is inside a full-screen `overlay` that turns as one piece. When the phone is sideways, the overlay takes the safe area size with width and height swapped (`OrientationLogic.isSideways`), so the label stays in the viewer's top-left corner. A `safe_area` parent gets padding from the system bar and cutout insets. The label animation was removed. Screenshot at 19:36 (landscape, rotation 90): the full label is visible, below the status bar. New unit test `sideways rotations` (54 tests in total).
 
-Round 5 check on `7fad170e` (APK installed at about 19:42, phone in landscape, accelerometer `7.57, 0.23, 6.16`):
+Round 5 check on `0a1b2c3d` (APK installed at about 19:42, phone in landscape, accelerometer `7.57, 0.23, 6.16`):
 
 | Request | Result |
 |---|---|
@@ -470,12 +503,12 @@ Round 5 check on `7fad170e` (APK installed at about 19:42, phone in landscape, a
 
 Crash buffer: no FATAL entry. `logcat -s DebugCamera:E`: empty.
 
-The Fire TV devices were not touched. Only `-s 7fad170e` was used.
+The Fire TV devices were not touched. Only `-s 0a1b2c3d` was used.
 
 ## Open items and notes
 
 1. The first `adb install` failed with `INSTALL_FAILED_USER_RESTRICTED` (Xiaomi "Install via USB" check). The second try succeeded, probably after a person accepted the prompt on the phone. The README tells how to fix it.
-2. Local port 8765 on the PC is in use by another process (`python`, pid 1117704, listens on 127.0.0.1:8765, answers `{"error": "auth required"}` 401). `adb forward tcp:8765 tcp:8765` fails with `Address already in use`. dd-mcp: use a different local port by default (for example 18765), or pick a free port. The forward `tcp:18765 -> tcp:8765` on 7fad170e is still active.
+2. Local port 8765 on the PC is in use by another process (`python`, pid 1117704, listens on 127.0.0.1:8765, answers `{"error": "auth required"}` 401). `adb forward tcp:8765 tcp:8765` fails with `Address already in use`. dd-mcp: use a different local port by default (for example 18765), or pick a free port. The forward `tcp:18765 -> tcp:8765` on 0a1b2c3d is still active.
 3. Done in round 2: compileSdk/targetSdk 37 and `androidx.core` 1.19.0.
 4. Proposals for `docs/phone-api.md` (not changed):
    - Zoom ratios are 32-bit floats. A step can give values such as `3.375` or `1.6500001` in JSON.

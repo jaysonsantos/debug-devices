@@ -69,7 +69,7 @@ object Constants {
         /**
          * The HAL enters the half-field sensor mode only when the zoom lands in [HALF_FIELD_RATIO, QUARTER_FIELD_RATIO)
          * and then keeps it above QUARTER_FIELD_RATIO. A direct jump from below 2x to 4x or more never enters it
-         * (seen on 7fad170e). So such a jump goes through ENTRY_RATIO first and waits ENTRY_SETTLE_MILLIS.
+         * (seen on the test phone). So such a jump goes through ENTRY_RATIO first and waits ENTRY_SETTLE_MILLIS.
          */
         const val HALF_FIELD_RATIO = 2f
         const val QUARTER_FIELD_RATIO = 4f
@@ -83,6 +83,10 @@ object Constants {
     object Overlay {
         const val MAX_BOXES = 8
         const val MAX_LABEL_LENGTH = 32
+        const val MAX_ARROWS = 4
+
+        /** Step in snapshot pixels to measure an arrow direction (any size works: the mapping is linear). */
+        const val DIRECTION_STEP = 10f
 
         /** Float rounding: a box may end this much past 1.0 (x + width, y + height). */
         const val EDGE_TOLERANCE = 1e-4f
@@ -105,6 +109,9 @@ object Constants {
         /** `LENS_INFO_MINIMUM_FOCUS_DISTANCE` of a fixed-focus lens. */
         const val FIXED_FOCUS_DIOPTERS = 0f
         const val CM_PER_METER = 100f
+
+        /** The normalized centre of the image, for the focus scan after a switch to MACRO. */
+        const val CENTRE = 0.5f
 
         /** Placeholders when the camera does not publish a value. */
         const val UNKNOWN_MM = 0f
@@ -134,8 +141,11 @@ object Constants {
         const val REBIND_REASON_API = "in_sensor_zoom request"
         const val REBIND_FAILED = "In-sensor zoom rebind failed"
         const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
+        const val CAMERA_SETTINGS_EMPTY = "Send at least one of 'in_sensor_zoom' and 'af_mode'"
         const val OVERLAY_TOO_MANY = "At most 8 boxes"
         const val OVERLAY_BAD_BOX = "A box must be inside the snapshot, with width and height above 0"
+        const val OVERLAY_TOO_MANY_ARROWS = "At most 4 arrows"
+        const val OVERLAY_BAD_ARROW = "An arrow needs a finite angle_deg"
         const val OVERLAY_LABEL_TOO_LONG = "A label has at most 32 characters"
         const val FOCUS_NEEDS_ONE_PAIR = "Send exactly one pair: screen_x and screen_y, or snapshot_x and snapshot_y"
         const val FOCUS_OUT_OF_RANGE = "Focus coordinates must be numbers in [0, 1]"

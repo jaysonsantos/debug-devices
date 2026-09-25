@@ -11,7 +11,7 @@ Sources that I read:
 - source.android.com: the multi-camera guide, and the Android 16 CDD (section 2.2.7.2).
 - The androidx source (`androidx/androidx` on GitHub): the CameraX zoom code and API files.
 - The Xiaomi HyperOS developer platform (`dev.mi.com`): the "Camera Engine" (相机引擎) pages.
-- A new read-only `adb -s 7fad170e shell dumpsys media.camera` and `getprop`, to check specific keys.
+- A new read-only `adb -s 0a1b2c3d shell dumpsys media.camera` and `getprop`, to check specific keys.
 
 ## Summary
 
@@ -194,7 +194,7 @@ I found no public Qualcomm documentation for `org.codeaurora.qcamera3.sessionPar
 
 ## 5. Comparison with the device findings
 
-New read-only check on `7fad170e` (2026-09-25), camera 0 (`dumpsys media.camera`, HAL static information):
+New read-only check on `0a1b2c3d` (2026-09-25), camera 0 (`dumpsys media.camera`, HAL static information):
 
 | Item | Value |
 |---|---|

@@ -142,6 +142,10 @@ TIFF_FIRST_IFD_OFFSET = 8
 # region: state
 
 
+# The autofocus mode after an app start (CameraStatus.af_mode).
+AF_CONTINUOUS = "continuous"
+
+
 @dataclass
 class CameraStatus:
     zoom_ratio: float
@@ -157,6 +161,8 @@ class CameraStatus:
     optics: dict | None = None
     in_sensor_zoom: str = "off"
     overlay_boxes: int = 0
+    overlay_arrows: int = 0
+    af_mode: str = AF_CONTINUOUS
 
 
 # The body of POST /v1/preview: exactly these fields, both booleans.
@@ -169,9 +175,15 @@ NEWER_STATUS_FIELDS = (
     "optics",
     "in_sensor_zoom",
     "overlay_boxes",
+    "overlay_arrows",
+    "af_mode",
 )
 # The body of POST /v1/camera: exactly this field, a boolean.
 CAMERA_FIELD = "in_sensor_zoom"
+# POST /v1/camera can also set the autofocus mode. The body needs at least one of the two fields.
+AF_MODE_FIELD = "af_mode"
+CAMERA_FIELDS = frozenset({CAMERA_FIELD, AF_MODE_FIELD})
+AF_MODES = frozenset({AF_CONTINUOUS, "macro"})
 IN_SENSOR_ZOOM_ON = "on"
 IN_SENSOR_ZOOM_OFF = "off"
 IN_SENSOR_ZOOM_UNSUPPORTED = "unsupported"
@@ -199,6 +211,9 @@ OVERLAY_MAX_LABEL = 32
 OVERLAY_BOX_FIELDS = frozenset({"snapshot_x", "snapshot_y", "width", "height", "label"})
 # x + width and y + height may be this much above 1 (float rounding).
 OVERLAY_TOLERANCE = 1e-9
+# Optional arrows: at most this many, each with exactly these fields.
+OVERLAY_MAX_ARROWS = 4
+OVERLAY_ARROW_FIELDS = frozenset({"angle_deg", "label"})
 # A test-only route (not in the contract): change the focus distance, like moving the phone.
 FAKE_FOCUS_FIELD = "distance_diopters"
 
@@ -223,6 +238,9 @@ class FakeConfig:
     focus_diopters: float = DEFAULT_FOCUS_DIOPTERS
     # A phone without the vendor in-sensor zoom: POST /v1/camera answers 200 with "unsupported".
     in_sensor_zoom_unsupported: bool = False
+    # A phone without the macro autofocus mode: POST /v1/camera af_mode "macro" answers 200, and the mode stays
+    # "continuous".
+    no_macro: bool = False
 
 
 class ApiError(Exception):
@@ -258,6 +276,7 @@ class FakeCamera:
         # The last focus point (the request fields) and the end of its scan: tests read them.
         self.last_focus: dict[str, float] | None = None
         self.last_overlay: list[dict[str, Any]] = []
+        self.last_arrows: list[dict[str, Any]] = []
         self._scan_until = 0.0
 
     def _require_ready(self) -> None:
@@ -309,13 +328,16 @@ class FakeCamera:
             self._status.rotation_degrees = self.config.physical_rotation if degrees is None else degrees
         return self.status()
 
-    def camera(self, in_sensor_zoom: bool) -> CameraStatus:
-        """Turn the in-sensor zoom on or off (the real app binds the camera again). Zoom and torch stay."""
+    def camera(self, in_sensor_zoom: bool | None, af_mode: str | None = None) -> CameraStatus:
+        """Set the in-sensor zoom (the real app binds the camera again) and/or the autofocus mode. Zoom and torch
+        stay."""
         self._require_ready()
         with self._lock:
-            if self.config.in_sensor_zoom_unsupported:
+            if af_mode is not None:
+                self._status.af_mode = AF_CONTINUOUS if self.config.no_macro else af_mode
+            if in_sensor_zoom is not None and self.config.in_sensor_zoom_unsupported:
                 self._status.in_sensor_zoom = IN_SENSOR_ZOOM_UNSUPPORTED
-            else:
+            elif in_sensor_zoom is not None:
                 self._status.in_sensor_zoom = IN_SENSOR_ZOOM_ON if in_sensor_zoom else IN_SENSOR_ZOOM_OFF
         return self.status()
 
@@ -329,12 +351,14 @@ class FakeCamera:
             self._scan_until = time.monotonic() + FOCUS_SCAN_SECONDS
         return self.status()
 
-    def overlay(self, boxes: list[dict[str, Any]]) -> CameraStatus:
-        """Show the boxes over the preview (the fake keeps only their number and the last list for tests)."""
+    def overlay(self, boxes: list[dict[str, Any]], arrows: list[dict[str, Any]]) -> CameraStatus:
+        """Show the boxes and arrows over the preview (the fake keeps their number and the last lists for tests)."""
         self._require_ready()
         with self._lock:
             self.last_overlay = list(boxes)
+            self.last_arrows = list(arrows)
             self._status.overlay_boxes = len(boxes)
+            self._status.overlay_arrows = len(arrows)
         return self.status()
 
     def move_to(self, diopters: float) -> CameraStatus:
@@ -399,6 +423,16 @@ def check_overlay_box(box: Any) -> None:
     if width <= 0 or height <= 0 or not inside:
         raise ApiError(ErrorCode.BAD_REQUEST, "A box needs width and height > 0 and must be inside the image")
     label = box["label"]
+    if not isinstance(label, str) or len(label) > OVERLAY_MAX_LABEL:
+        raise ApiError(ErrorCode.BAD_REQUEST, f'"label" must be a string of at most {OVERLAY_MAX_LABEL} characters')
+
+
+def check_overlay_arrow(arrow: Any) -> None:
+    if not isinstance(arrow, dict) or set(arrow) != OVERLAY_ARROW_FIELDS:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"Each arrow needs exactly {sorted(OVERLAY_ARROW_FIELDS)}")
+    if not is_number(arrow["angle_deg"]):
+        raise ApiError(ErrorCode.BAD_REQUEST, '"angle_deg" must be a number')
+    label = arrow["label"]
     if not isinstance(label, str) or len(label) > OVERLAY_MAX_LABEL:
         raise ApiError(ErrorCode.BAD_REQUEST, f'"label" must be a string of at most {OVERLAY_MAX_LABEL} characters')
 
@@ -522,9 +556,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def camera_settings(self) -> None:
         data = parse_body(self._read_body())
-        if set(data) != {CAMERA_FIELD} or not isinstance(data[CAMERA_FIELD], bool):
-            raise ApiError(ErrorCode.BAD_REQUEST, f'Send exactly "{CAMERA_FIELD}": true or false')
-        self._send_status(self.camera.camera(data[CAMERA_FIELD]))
+        if not data or not set(data) <= CAMERA_FIELDS:
+            raise ApiError(ErrorCode.BAD_REQUEST, f'Send "{CAMERA_FIELD}" and/or "{AF_MODE_FIELD}", nothing else')
+        zoom, af_mode = data.get(CAMERA_FIELD), data.get(AF_MODE_FIELD)
+        if CAMERA_FIELD in data and not isinstance(zoom, bool):
+            raise ApiError(ErrorCode.BAD_REQUEST, f'"{CAMERA_FIELD}" must be true or false')
+        if AF_MODE_FIELD in data and af_mode not in AF_MODES:
+            raise ApiError(ErrorCode.BAD_REQUEST, f'"{AF_MODE_FIELD}" must be one of {sorted(AF_MODES)}')
+        self._send_status(self.camera.camera(zoom, af_mode))
 
     def focus(self) -> None:
         data = parse_body(self._read_body())
@@ -536,14 +575,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def overlay(self) -> None:
         data = parse_body(self._read_body())
-        boxes = data.get("boxes")
-        if set(data) != {"boxes"} or not isinstance(boxes, list):
-            raise ApiError(ErrorCode.BAD_REQUEST, 'Send exactly "boxes": a list')
+        boxes, arrows = data.get("boxes"), data.get("arrows", [])
+        if not set(data) <= {"boxes", "arrows"} or not isinstance(boxes, list) or not isinstance(arrows, list):
+            raise ApiError(ErrorCode.BAD_REQUEST, 'Send "boxes": a list, and optionally "arrows": a list')
         if len(boxes) > OVERLAY_MAX_BOXES:
             raise ApiError(ErrorCode.BAD_REQUEST, f"At most {OVERLAY_MAX_BOXES} boxes")
+        if len(arrows) > OVERLAY_MAX_ARROWS:
+            raise ApiError(ErrorCode.BAD_REQUEST, f"At most {OVERLAY_MAX_ARROWS} arrows")
         for box in boxes:
             check_overlay_box(box)
-        self._send_status(self.camera.overlay(boxes))
+        for arrow in arrows:
+            check_overlay_arrow(arrow)
+        self._send_status(self.camera.overlay(boxes, arrows))
 
     def fake_focus(self) -> None:
         data = parse_body(self._read_body())
@@ -657,6 +700,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--internal-error", action="store_true", help="camera endpoints return 500 internal_error")
     parser.add_argument(
+        "--no-macro",
+        action="store_true",
+        help='a phone without the macro autofocus mode: af_mode "macro" stays "continuous"',
+    )
+    parser.add_argument(
         "--in-sensor-zoom-unsupported",
         action="store_true",
         help='a phone without the vendor in-sensor zoom: POST /v1/camera gives "unsupported"',
@@ -704,6 +752,7 @@ def main(argv: list[str] | None = None) -> int:
         no_preview=args.no_preview,
         focus_diopters=args.focus_diopters,
         in_sensor_zoom_unsupported=args.in_sensor_zoom_unsupported,
+        no_macro=args.no_macro,
         background=args.background,
         physical_rotation=args.physical_rotation,
         start_delay=args.start_delay,

@@ -39,7 +39,7 @@ I did not edit `android/` or `mcp/`. I did not commit.
 | `python3 scripts/fake_phone.py --port 18765 --snapshot /tmp/dd-qa/frame_1080p.jpg` then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict` | 11/11 checks pass. The snapshot check reads 1920x1080. |
 | `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18766 --expect not-ready` (fake phone with `--not-ready`) | 2/2 checks pass |
 | `python3 scripts/qa_contract.py` with no server | 0/11, each check reports `Connection refused`, exit code 1, no traceback |
-| `scripts/fake_adb.py -s 192.168.0.43:5555 shell input tap 1 1` | `error: device '192.168.0.43:5555' not found`, exit 1 |
+| `scripts/fake_adb.py -s 192.0.2.43:5555 shell input tap 1 1` | `error: device '192.0.2.43:5555' not found`, exit 1 |
 | `uvx ruff format scripts/ && uvx ruff check scripts/` | Clean, with the repo `pyproject.toml` settings |
 | `nix run nixpkgs#shellcheck -- scripts/multimeter_capture.sh` | Clean |
 | `printf '\n\n' \| scripts/multimeter_capture.sh /tmp/dd-qa/acc 2` | 2 frames and `readings.csv` |
@@ -48,14 +48,14 @@ I did not edit `android/` or `mcp/`. I did not commit.
 
 ### What I did
 
-- Ran `scripts/qa_contract.py --strict` against the real phone `7fad170e`, before and after the new APK (installed 18:26).
+- Ran `scripts/qa_contract.py --strict` against the real phone `0a1b2c3d`, before and after the new APK (installed 18:26).
 - Changed `scripts/fake_phone.py` and `scripts/qa_contract.py` to match the new `docs/phone-api.md` (proposals 1-5, 405 `method_not_allowed`).
 - Wrote `scripts/qa_mcp_stdio.py`: MCP tool tests over stdio with the fake phone, the fake adb, and a mock OpenRouter.
 - Ran the MCP over stdio against the real phone, with one live `webcam_snapshot` and one live `multimeter_read`.
 - Ran the Android unit tests and the MCP unit tests.
 - Reviewed both sides against the contract.
 
-I used only `adb -s 7fad170e`. No command went to the Fire TVs. I did not edit `android/` or `mcp/`. I did not commit.
+I used only `adb -s 0a1b2c3d`. No command went to the Fire TVs. I did not edit `android/` or `mcp/`. I did not commit.
 
 ### Changes to the QA tools
 
@@ -74,12 +74,12 @@ I used only `adb -s 7fad170e`. No command went to the Fire TVs. I did not edit `
 | Same, new APK, `--after-start`, run at 18:27 | 3/14. The app crashed after `status` (bug 1) |
 | Same, new APK, `--after-start`, 6 s after `am start` | 13/14. Fail: `zoom_bad_request` (bug 2). `method_not_allowed`, `snapshot_keeps_torch`, and `after_start` pass. Snapshot 3060x4080, about 1.45 MB, about 0.85 s. |
 | `uv run python scripts/qa_mcp_stdio.py --snapshot /tmp/dd-qa/frame_1080p.jpg --real-adb-several-devices` | 19/19 (see the list below) |
-| MCP over stdio against `7fad170e` (scratch driver, settings from `.env`) | 11/11 phone calls OK: connect, status, zoom in x2, ratio 100 gives 10.0, ratio 1, torch on, snapshot (torch stays on), torch off |
+| MCP over stdio against `0a1b2c3d` (scratch driver, settings from `.env`) | 11/11 phone calls OK: connect, status, zoom in x2, ratio 100 gives 10.0, ratio 1, torch on, snapshot (torch stays on), torch off |
 | `nix develop .. --command ./gradlew :app:testDebugUnitTest --rerun` (in `android/`) | BUILD SUCCESSFUL. `ApiServerTest` 18/18, `ZoomLogicTest` 15/15 |
 | `./gradlew testDebugUnitTest` outside the dev shell | Fails: no Java 17 toolchain. Use `nix develop`. |
 | `uv run pytest -q` | 48 passed |
 | `uv run ruff check` | 8 findings, all in new dd-mcp files (`scrcpy.py`, `ui/`, `webcam_stream.py`). `scripts/` is clean. |
-| `curl http://192.168.1.116:8765/v1/health` (phone Wi-Fi address) | No connection. The server listens on `127.0.0.1:8765` only. |
+| `curl http://192.0.2.116:8765/v1/health` (phone Wi-Fi address) | No connection. The server listens on `127.0.0.1:8765` only. |
 
 `qa_mcp_stdio.py` cases: stdout is JSON-RPC only; 7 tools listed; `phone_connect` forwards `tcp:<port> tcp:8765` with the fake serial; status; zoom (ratio, step, clamp, both or neither argument gives a tool error); torch; snapshot (default and `max_side=0`); `save_path`; 409, 503, and 500 become tool errors with the code; mock `multimeter_read` (model `openai/gpt-6-luna`, `json_schema` with `strict: true`, one JPEG data URL, bearer token sent); text that is not JSON gives a tool error; JSON in a code fence is accepted; `webcam_snapshot` 1568x882; phone down gives a tool error and the server stays up; empty key gives a tool error that names `OPENROUTER_API_KEY`; missing webcam gives a tool error with the path; real adb with no serial and 3 devices gives "several adb devices" and sends no command to a device.
 
@@ -117,7 +117,7 @@ Severity: high = crash or wrong data, medium = contract break, low = small.
 
 ### Notes
 
-- dd-mcp tested the phone at the same time. My restarts of the app (`am force-stop`, `am start` on `7fad170e`) can make their calls fail for a few seconds. Their traffic probably caused the crash at 18:28:44.
+- dd-mcp tested the phone at the same time. My restarts of the app (`am force-stop`, `am start` on `0a1b2c3d`) can make their calls fail for a few seconds. Their traffic probably caused the crash at 18:28:44.
 - dd-mcp ran `ruff --fix` on my files at 18:24. I checked them: ruff is clean, and the self-check passes.
 - `origin` is not set in this repository. I could not make sure that the branch is current with `origin/main`.
 - Not done: the manual phone steps in `docs/qa.md` section 3 that need a person (preview, LED, lock screen, permission), and the multimeter accuracy check (section 4). The meter now faces the webcam, so the accuracy check can start.
@@ -145,7 +145,7 @@ Severity: high = crash or wrong data, medium = contract break, low = small.
 | `am force-stop`, `am start`, then at once `qa_contract.py --strict --expect starting-race` (3 runs) | 15/15 each time. 13, 14, and 15 x 503 before the first 200 zoom. The app stayed up. |
 | `am force-stop`, `am start`, then at once `qa_contract.py --strict --expect starting` | 15/15. 18 x 503, then the first 200 had zoom 1.0 (min) and torch off. |
 | `am force-stop`, `am start`, wait 6 s, `qa_contract.py --strict --after-start` | 15/15. Snapshot 3060x4080, 1.07 MB. |
-| `adb -s 7fad170e logcat -d -b crash` after these runs | No `FATAL` line |
+| `adb -s 0a1b2c3d logcat -d -b crash` after these runs | No `FATAL` line |
 | `curl` `{"ratio":"2"}` to `/v1/zoom`, `{"enabled":"true"}` to `/v1/torch` | 400 `bad_request` both |
 | `nix develop .. --command ./gradlew :app:testDebugUnitTest --rerun` | BUILD SUCCESSFUL. `ApiServerTest` 26/26, `ControlGateTest` 4/4, `ZoomLogicTest` 16/16 |
 | `uv run python scripts/qa_mcp_stdio.py --snapshot /tmp/dd-qa/frame_1080p.jpg --real-adb-several-devices --skip-webcam` | 14/15. The failure is finding R2-1. |
@@ -154,7 +154,7 @@ Severity: high = crash or wrong data, medium = contract break, low = small.
 
 | Bug | Status |
 |---|---|
-| 1. Crash on zoom during the start state | Fixed and verified on `7fad170e` (`starting-race` 3/3, no crash) |
+| 1. Crash on zoom during the start state | Fixed and verified on `0a1b2c3d` (`starting-race` 3/3, no crash) |
 | 2. `ratio` as a string | Fixed and verified (400) |
 | 3. `finish_reason: length` | Fixed in code: `MAX_TOKENS = 4000`, `REASONING_EFFORT = "low"`, a clear error for `length` (`mcp/debug_devices_mcp/multimeter.py:295`). No new live call, so it is not verified live. |
 | 4. Two requests cancel each other | Fixed and verified (`concurrent_zoom` passes on the phone) |
@@ -166,7 +166,7 @@ Severity: high = crash or wrong data, medium = contract break, low = small.
 ### New findings
 
 - **R2-1, low. `multimeter_read` opens the webcam before it checks the key.** `mcp/debug_devices_mcp/server.py:284-285` calls `capture_jpeg()`, then `read_multimeter()`. When the key is empty and the webcam is busy or missing, the caller gets a webcam error and not "OPENROUTER_API_KEY is not set". Proposal: check the key before the capture.
-- **R2-2, medium. With the UI on, one MCP process holds `/dev/video0` for the whole session.** Another agent ran `uv run debug-devices-mcp --adb-serial 7fad170e` with the UI on. Its child `ffmpeg ... -f v4l2 -i /dev/video0 -vf fps=10 ... -f mpjpeg pipe:1` kept the device open. Every other process then gets `Device or resource busy`: a second Claude session, `scripts/multimeter_capture.sh`, and the webcam cases of `qa_mcp_stdio.py`. Proposal: start the shared stream only while the monitor window is open or while a tool call needs a frame. Stop it after an idle time. Also put the busy case in the tool error ("the webcam is in use by PID ...").
+- **R2-2, medium. With the UI on, one MCP process holds `/dev/video0` for the whole session.** Another agent ran `uv run debug-devices-mcp --adb-serial 0a1b2c3d` with the UI on. Its child `ffmpeg ... -f v4l2 -i /dev/video0 -vf fps=10 ... -f mpjpeg pipe:1` kept the device open. Every other process then gets `Device or resource busy`: a second Claude session, `scripts/multimeter_capture.sh`, and the webcam cases of `qa_mcp_stdio.py`. Proposal: start the shared stream only while the monitor window is open or while a tool call needs a frame. Stop it after an idle time. Also put the busy case in the tool error ("the webcam is in use by PID ...").
 - I did not stop the process of the other agent. Thus the webcam cases of `qa_mcp_stdio.py` did not run in round 2. In round 1 they passed 4/4.
 
 ### Open
@@ -221,13 +221,13 @@ Severity: high = crash or wrong data, medium = contract break, low = small.
 |---|---|
 | `python3 scripts/fake_phone.py --self-check` | PASSED: default 19/19, fixed zoom 19/19, no flash 19/19, not ready 3/3, capture fails 17/17, starting 19/19, starting race 19/19, internal error 4/4, background 3/3, lying at 270 19/19 |
 | `uv run python scripts/qa_mcp_stdio.py --snapshot /tmp/dd-qa/frame_1080p.jpg --real-adb-several-devices` | 19/19. `webcam_snapshot` through the shared path (monitor). |
-| `am force-stop`, `am start`, wait 6 s, `qa_contract.py --strict --after-start` on `7fad170e` (APK 19:42:39) | 19/19. Auto rotation 90 (phone in landscape). Snapshot 4080x3060. |
+| `am force-stop`, `am start`, wait 6 s, `qa_contract.py --strict --after-start` on `0a1b2c3d` (APK 19:42:39) | 19/19. Auto rotation 90 (phone in landscape). Snapshot 4080x3060. |
 | `snapshot_rotation` on the phone | Displayed sizes 0: 3060x4080, 90: 4080x3060, 180: 3060x4080, 270: 4080x3060. The app turns the pixels. |
 | Visual check of lock 0 and lock 180 | The 180 snapshot is the 0 snapshot turned by a half turn. Correct. |
 | `am force-stop`, `am start`, at once `qa_contract.py --strict --expect starting-race` | 19/19. 17 x 503, then 200. No crash. |
 | Lock 180, HOME key, `qa_contract.py --strict --expect background` | 3/3: health 200, status, zoom, torch, rotation, and snapshot 503 `camera_not_ready` |
 | `am start` (back to the front), `GET /v1/status` | `rotation_degrees` 180, `rotation_locked` true: the lock stays through the background |
-| `adb -s 7fad170e logcat -d -b crash` | No `FATAL` line |
+| `adb -s 0a1b2c3d logcat -d -b crash` | No `FATAL` line |
 | `nix develop .. --command ./gradlew :app:testDebugUnitTest --rerun` | BUILD SUCCESSFUL. 63 tests: `ApiServerTest` 29, `ControlGateTest` 4, `OrientationLogicTest` 10, `RotationStateTest` 4, `ZoomLogicTest` 16 |
 
 At the end, I set the zoom to 1.0 and the rotation to auto. The app runs (PID 15447).

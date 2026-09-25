@@ -44,7 +44,7 @@
 
 - `flake.nix` now has `scrcpy` 4.1 in the Linux shells (`x86_64-linux`, `aarch64-linux`), next to `v4l-utils`. It is for the monitor feature. The `aarch64-darwin` shell does not have it.
 - Verify: `nix develop --command scrcpy --version` prints `scrcpy 4.1`. `nixfmt --check flake.nix` passes. I did not start scrcpy.
-- scrcpy uses the `adb` from the shell. Always give the serial: `scrcpy -s 7fad170e`. With more than one device and no serial, scrcpy stops with an error, and the Fire TV devices are also visible to adb.
+- scrcpy uses the `adb` from the shell. Always give the serial: `scrcpy -s 0a1b2c3d`. With more than one device and no serial, scrcpy stops with an error, and the Fire TV devices are also visible to adb.
 
 ## Changes outside my paths
 

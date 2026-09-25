@@ -24,12 +24,12 @@
 
 - `uv run pytest`: 84 passed. `uv run ruff check mcp/ scripts/` and `uv run ruff format --check mcp/ scripts/`: pass.
 - `uv build --wheel`: the wheel contains `ui/static/*`.
-- Real stdio run with `mcp.ClientSession` and `stdio_client`: `uv run --directory <repo> debug-devices-mcp --adb-serial 7fad170e`. `WAYLAND_DISPLAY` and `DISPLAY` were removed from the environment.
+- Real stdio run with `mcp.ClientSession` and `stdio_client`: `uv run --directory <repo> debug-devices-mcp --adb-serial 0a1b2c3d`. `WAYLAND_DISPLAY` and `DISPLAY` were removed from the environment.
   - The server wrote `monitor window: http://127.0.0.1:18766/`. Firefox opened the page in a new window.
-  - `phone_connect`: OK (101 ms). scrcpy started with the title `debug-devices: phone 7fad170e`.
+  - `phone_connect`: OK (101 ms). scrcpy started with the title `debug-devices: phone 0a1b2c3d`.
   - `phone_status`: OK (19 ms). `webcam_snapshot`: OK (2955 ms for the first frame after the stream start, 1920x1080).
   - `curl -sN http://127.0.0.1:18766/api/events` showed the `phone` and `call` events. `/api/state` listed all calls with source, status, duration, and the webcam frame image. The state did not contain the key.
-  - I took a screenshot with `spectacle -b -n -o <file>` (it needs `WAYLAND_DISPLAY=wayland-0`) and looked at it. It showed the live webcam, the phone panel (serial `7fad170e`, scrcpy "window open", zoom 1.00x (1–10)), and the settings. The KDE task bar showed the scrcpy window.
+  - I took a screenshot with `spectacle -b -n -o <file>` (it needs `WAYLAND_DISPLAY=wayland-0`) and looked at it. It showed the live webcam, the phone panel (serial `0a1b2c3d`, scrcpy "window open", zoom 1.00x (1–10)), and the settings. The KDE task bar showed the scrcpy window.
   - After the client closed, no `scrcpy` or `ffmpeg` process was left.
 - Crop check (separate state dir, `--no-ui-open-browser --no-scrcpy --ui-port 18799`): `PUT /api/settings` with crop `600,300,400,200`. Then `webcam_snapshot` returned 400x200, and the log image was the same 10,912 bytes. The settings file contained the crop.
 
@@ -131,8 +131,8 @@ uvicorn needs the `websockets` or the `wsproto` package for WebSockets, and neit
 ### What works
 
 - `uv run pytest`: 135 passed. `uv run ruff check mcp/ scripts/` and `uv run ruff format --check mcp/`: pass.
-- Manual test with the phone: the server on 7fad170e sent High profile H.264 (590x1280, `avc1.640020`). The parser found 65 access units. It gave the same result for the whole data and for chunks of 1 to 50 bytes.
-- Real stdio run: `debug-devices-mcp --adb-serial 7fad170e --ui-port 18820`, with a separate `XDG_STATE_HOME`.
+- Manual test with the phone: the server on 0a1b2c3d sent High profile H.264 (590x1280, `avc1.640020`). The parser found 65 access units. It gave the same result for the whole data and for chunks of 1 to 50 bytes.
+- Real stdio run: `debug-devices-mcp --adb-serial 0a1b2c3d --ui-port 18820`, with a separate `XDG_STATE_HOME`.
   - `phone_connect` returned OK, and the screen state became `streaming`.
   - `curl /api/phone/screen` returned the config message `{"codec":"avc1.640020"}` and then a key frame.
   - Screenshot of the page (`spectacle -b -n -a`): the phone panel showed the live phone screen (the camera app) on the canvas. The state was "Screen: streaming".
@@ -146,7 +146,7 @@ uvicorn needs the `websockets` or the `wsproto` package for WebSockets, and neit
 
 ### Note: one dd-monitor forward removed by mistake
 
-To remove the leaked forwards, I removed all `localabstract:scrcpy_*` forwards on 7fad170e two times. By then, the user had restarted dd-monitor (18:58:32) with the new code. My second cleanup also removed the forward of the dd-monitor stream (`scrcpy_67ba812c`). The open connection stays, and the stream still sent data afterwards (about 290 KB in 3 seconds). If that connection breaks, the stream starts again after 3 seconds with a new forward.
+To remove the leaked forwards, I removed all `localabstract:scrcpy_*` forwards on 0a1b2c3d two times. By then, the user had restarted dd-monitor (18:58:32) with the new code. My second cleanup also removed the forward of the dd-monitor stream (`scrcpy_67ba812c`). The open connection stays, and the stream still sent data afterwards (about 290 KB in 3 seconds). If that connection breaks, the stream starts again after 3 seconds with a new forward.
 
 ### The user must restart dd-monitor
 
@@ -971,3 +971,123 @@ The user's request: "on the web UI there should be a search for a part, and then
 - A double-click on the snapshot during Pick also places a point, because the first click picks. The hint says to use the full-screen button or `f`.
 - The panel uses the board session of the MCP server of this page. A board that only another server opened needs Open here. The panel offers its path.
 - The registration uses the size of the last snapshot. When the agent registers another photo size, the highlight scales the boxes if the shape is the same.
+
+## Round 24: live tracking and the direction arrow (`phone_point_to`)
+
+The user's request: "if I am looking for a component, it could show an arrow to which direction I should move if it is not in the view of the device". User decision D4: live tracking with image features. The phone is drained, so I built and tested everything with the fake phone and synthetic frames only.
+
+### What I did
+
+- **Dependency**: `opencv-python-headless>=4.12,<5` (4.14.0 is installed; `uv.lock` is updated). No nix change: uv manages the Python packages.
+- **Live tracking** (`tracking.py`, `LiveTracker`):
+  - At registration, it matches the snapshot with the current screen frame: ORB (3000 features), a ratio test (0.75), and a MAGSAC++ homography (3 px). Only the preview area of the frame counts (the app status text stays out). This gives `snapshot_to_frame`.
+  - Each new frame is matched with the reference frame, or, when the view moved far, with the last good frame (chained). A match is trusted with at least 25 inliers, at least 30 % of the matches, a scale of 0.25–4, no mirror, and small perspective terms. All thresholds are named constants.
+  - The map is `inv(snapshot_to_frame) @ motion @ snapshot_to_frame @ board_to_snapshot`. The snapshot and the preview crop around the same center, so this also follows a zoom.
+  - After 3 failed frames in a row, the tracking is lost.
+  - I compared settings on the synthetic tests. RANSAC at 480 px had errors up to 31 px. MAGSAC with 3000 features at 720 px had at most 2.8 px. One tracked frame takes about 34 ms on this PC.
+- **Frames**: `SceneState` now has `latest_frame` and frame listeners. The watcher gives about 4 frames per second to the listeners and still compares 2 per second for the scene check. Its own decoder is now 4 fps and 720 px wide (it was 2 fps and 160 px), because the features need the detail. It uses the page fallback decoder when that decoder runs.
+- **Registration** (`board_register_photo`): the result has `tracking`, with "live tracking on: …" or why not (no phone screen stream, or the snapshot does not match the live screen).
+- **Pointing** (`pointer.py`, `pointing.py`):
+  - `plan()` maps each part through the current map. A part with its center in the view gets a green box: its boardview outline, at least 8 px. A part outside the view gets an arrow from the image center toward the part. The angle is converted to the true-orientation snapshot for the flips, and the label is "U7301 ~4 cm": the board distance from the view edge to the part (one decimal below 1 cm). A part on the other side gets no box and no arrow, only the message "on the other side: isolate the power before you turn the board".
+  - `Pointing.point_to()` sets the target. On each tracked frame it computes the boxes and arrows again. It sends them only when a box edge moves by 1 % of the image, an arrow turns by 8°, or the set changes, and at most every 0.3 s.
+- **New tool** `phone_point_to(refdes, registration_id=None)`: one part or up to 8. Its description says: give the arrow and the distance, never left or right words (they depend on how the user holds the phone). It also says to isolate the power for the other side, and that the positions are estimates.
+- `board_locate_in_photo(highlight=true)` now uses the same pointing, so a located part outside the photo also gets an arrow.
+- **Scene change with tracking**: when the watcher sees a move and the tracker follows it, the tracked registration stays valid, and the pointed boxes and arrows stay and move. The other registrations become stale, and the page shows no "Scene changed" note. `phone_point_to` and `board_locate_in_photo` work for the tracked registration after a move. The agent's pixel boxes (`phone_highlight`) and snapshot-pixel `phone_focus` still need a fresh snapshot. When the tracking is lost, the registration becomes stale and the overlay is cleared.
+- **Overlay** (contract `arrows`, `overlay_arrows`):
+  - `OverlayArrow` (angle, label of at most 32 characters) and `OverlayRequest.arrows` (at most 4) are in the client. `Services.send_overlay()` is the one sender. It tells the page through overlay listeners, so the page shows the boxes and arrows that the phone got.
+  - `ui/setup.py` has `connect_services()` for this wiring. The tests use it too.
+- **Page**:
+  - The snapshot view draws each arrow at the picture edge (34 px inside), in the shown orientation (the flip is its own inverse), with its label. The arrows follow the zoom and pan like the boxes.
+  - A Board panel search now runs `phone_point_to`. The panel line shows one message per part, and the Register photo line shows the tracking state.
+- **Pick fix**: in Pick mode, a click waits 250 ms. The second click of a double-click, and the `dblclick` event, cancel it. A double-click only toggles full screen.
+- **Fake phone and `qa_contract.py`**:
+  - The fake phone takes `arrows`: at most 4, each exactly `angle_deg` (a number) and `label` (at most 32 characters). The status has `overlay_arrows`.
+  - `check_overlay_arrows` checks 3 arrows (one at 450° and one at −90°), five bad bodies, that a body without `arrows` removes them, and that an empty body clears everything. `overlay_arrows` is a required status field, and `--after-start` checks that it is 0.
+- `mcp/README.md`: the `phone_point_to` row, the parts "Live tracking" and "Arrows", and the Board panel text.
+
+### Tests
+
+- `mcp/tests/test_tracking.py` (8 tests):
+  - A synthetic board (invented parts, 2000x1500 px) is the snapshot. The frames are warps of it into a 480x1040 portrait screen, turned by 90° (the preview on a portrait display), with a status text that does not move.
+  - The start map matches the true map within 6 px. The tracking follows a slide, a move closer, a turn of 25°, and a move closer with a turn of −15°, within 6 snapshot px. Six steps far from the start stay within 12 px through the chaining.
+  - A covered camera loses the tracking after 3 frames. Another scene does not start a tracker.
+- `mcp/tests/test_pointing.py` (8 tests):
+  - `plan()`: a box in view; arrows at 0° "J4 ~5 cm" and 270° "U2 ~3 cm"; the other side message; no left or right words in the messages; the four flip conversions; "~0.4 cm".
+  - The tool without tracking: it needs a registration. With the board 700 px further right in the photo, U7301 gets an arrow toward the image left, and U7303 gets the other-side message. An unknown part gives an error.
+  - Live tracking through the MCP server (the synthetic texture as the snapshot, frames through `SceneState.frame`):
+    - `tracking` is on after the registration, and the U7301 box is within 8 px of the truth.
+    - After a slide and a turn of 12°, the box sent to the phone is within 8 px of the new true position.
+    - A scene change keeps the tracked registration valid, and `phone_point_to` still works.
+    - After a far move, the arrow angle is within 3° of the true direction, and the phone got the arrow.
+    - A covered camera marks the registration stale, clears the overlay, and `phone_point_to` is refused.
+- The updated `test_board_panel.py` and `test_highlight.py` pass with the pointing messages.
+- Playwright (headless Firefox; an in-process monitor with the real tools, the httpx fake phone, and the synthetic board):
+  - In Pick mode, a double-click opened full screen and placed no point. One click then placed one point.
+  - Without a screen stream, `tracking` said "no live tracking: the phone screen stream is not running".
+  - Search U7301 (outside the photo): the panel said "U7301: outside the view: follow the arrow, …". The page showed an arrow at 171.2° with the label "U7301 ~4 cm", in the panel and in full screen. The phone got the same arrow. After Flip H, the page arrow turned to 8.8° (the mirror direction).
+  - TP9: a box and no arrow. U7303: "on the other side: isolate the power before you turn the board".
+- `qa_contract.py --strict` against `scripts/fake_phone.py`: 23/23 passed, with `PASS overlay_arrows`. `fake_phone.py --self-check`: passed.
+- `uv run pytest`: 326 passed, 1 skipped. ruff check, ruff format, and `prek run --files` on the changed files: pass.
+
+### Limits and the real test
+
+- No test on the real phone: it is drained. On the real phone, check these things:
+  - that the snapshot matches the live screen (a 4:3 still against the preview crop);
+  - that autofocus hunting and motion blur do not lose the tracking too often;
+  - that the arrow on the phone points the same way as the page arrow.
+- The tracker assumes a flat board and the same camera for the snapshot and the preview. A strong zoom change (more than about 4x) or a hand that covers most of the view loses the tracking. Then the user must take a snapshot and register again.
+- Without the page server or the phone screen stream, there is no tracking. Then `phone_point_to` uses the registration as it is (static), and the scene-change rules apply as before.
+- The phone overlay also shows in the frames. The RANSAC step ignores these few lines. I did not test this with real frames.
+
+## Round 25: macro autofocus mode (`phone_af_mode`)
+
+The contract: `POST /v1/camera {"af_mode": "continuous" | "macro"}` (`in_sensor_zoom` is now optional), and `CameraStatus.af_mode`.
+
+### What I did
+
+- **Client** (`phone_api.py`):
+  - `AfMode` (continuous, macro, and unknown for any other value) and `CameraStatus.af_mode` (None for an older app).
+  - `CameraSettingsRequest` now has two optional fields, and at least one is required. The client sends a request body without None fields (`exclude_none`), so an in-sensor zoom request stays `{"in_sensor_zoom": true}`.
+  - The 404 message of `/v1/camera` now says "to change the camera settings".
+- **Choice and sync** (`camera_choice.py`), like the in-sensor zoom:
+  - `AfModeChoice` (default continuous) is saved in `ui-settings.json` as `af_mode`.
+  - `AfModeSync` sends the choice after `phone_connect` (also `bench_start`) and after an app restart (the status shows the other mode). It sends nothing to an app without `af_mode`.
+  - A phone without the macro mode answers 200 and stays continuous. Then the sync stops until the next `phone_connect`, so the 1 s status poll does not send it again and again.
+  - An app that answers 400 for the unknown field gives "update the phone app for the macro focus".
+  - `Services.sync_phone` runs the flips, the in-sensor zoom, and then the autofocus mode.
+- **Tool** `phone_af_mode(mode)`, with the description from the brief. The result is the phone status report. On a phone without macro, `advice_text` starts with "this phone has no macro autofocus mode: the camera stays in continuous autofocus". The tool counts as our own camera command for the scene watcher.
+- **Evidence rule 6** has a new clause: "At close range (about 10-12 cm), you may set phone_af_mode macro." The phrase test checks it.
+- **Page**:
+  - "Macro focus" is in the panel next to Sensor zoom, and "Macro" is in the full-screen live bar and the snapshot bar. The three toggles share one choice (`PhoneState.af_mode_choice`) and show it with `aria-pressed`.
+  - The panel line "Focus mode" shows the phone state: continuous autofocus, macro (close range), or "not in this app".
+  - When the phone is closer than 15 cm and the mode is continuous, the panel suggests "close range: try Macro focus".
+  - `POST /api/phone/af-mode {"mode"}` runs the tool. A save of the other settings keeps the choice.
+- **Fake phone**: `POST /v1/camera` takes `in_sensor_zoom` and/or `af_mode`. Anything else, an empty body, or a wrong value gives 400. The status has `af_mode` (continuous after start). `--no-macro` is a phone without the macro mode. An old app (`--no-preview`) sends no `af_mode`.
+- **`qa_contract.py`**: `af_mode` is a required status field (continuous or macro). The new `check_af_mode` checks these things:
+  - macro, then continuous again;
+  - zoom, torch, and in-sensor zoom stay;
+  - GET status shows the same mode;
+  - five bad bodies give 400.
+
+  `--after-start` also checks that `af_mode` is continuous.
+- `mcp/README.md`: the `phone_af_mode` row and the "Macro focus" page part.
+
+### Tests
+
+- New `mcp/tests/test_af_mode.py` (7 tests):
+  - The request bodies have only the given fields, and an empty request is refused.
+  - The tool sets macro, and the choice is saved and read again at a new start. A wrong mode is refused.
+  - A phone without macro: the result says so, and 3 status polls send nothing more.
+  - An app without `af_mode`: "update the phone app for the macro focus".
+  - The sync after `phone_connect` and after an app restart. A continuous choice sends nothing to a normal phone.
+  - The page route: 200 with the choice and the status, 400 for "MACRO", and a settings save keeps the choice.
+- Playwright (headless Firefox, an in-process monitor, the httpx fake phone at 12.5 cm):
+  - The three toggles are "Macro", "Macro focus", and "Macro". The state showed "continuous autofocus", and the hint "close range: try Macro focus" was visible.
+  - After the panel toggle, all three toggles were pressed, the state showed "macro (close range)", and the hint was hidden. The second toggle set continuous again. The phone got `{"af_mode": "macro"}` and then `{"af_mode": "continuous"}`.
+- `qa_contract.py --strict` against `scripts/fake_phone.py`: 24/24 passed, with `PASS af_mode (af_mode macro gives 'macro')`. With `--no-macro`: 24/24, and macro gives 'continuous'. `fake_phone.py --self-check`: passed.
+- `uv run pytest`: 333 passed, 1 skipped. ruff check, ruff format, and `prek run --files` on the changed files: pass.
+
+### Notes
+
+- The real app part is dd-android's task, and the phone is drained. I did not test against the phone.
+- The hint uses the lens focus distance. With an uncalibrated lens, the page has no distance, and there is no hint.

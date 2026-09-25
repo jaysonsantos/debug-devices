@@ -190,6 +190,8 @@ class tools:
     PHONE_IN_SENSOR_ZOOM = "phone_in_sensor_zoom"
     PHONE_FOCUS = "phone_focus"
     PHONE_HIGHLIGHT = "phone_highlight"
+    PHONE_POINT_TO = "phone_point_to"
+    PHONE_AF_MODE = "phone_af_mode"
     BOARD_LOCATE_IN_PHOTO = "board_locate_in_photo"
     BOARD_OPEN = "board_open"
     BOARD_FIND_PART = "board_find_part"

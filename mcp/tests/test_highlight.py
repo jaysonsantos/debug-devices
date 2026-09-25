@@ -32,6 +32,7 @@ from debug_devices_mcp.server import build_server
 from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore
+from debug_devices_mcp.ui.setup import connect_services
 
 from .conftest import FakeRunner, make_jpeg
 from .test_board import fixture
@@ -55,6 +56,7 @@ class OverlayPhone(FakePhone):
         self.old = old
         self.status["overlay_boxes"] = 0
         self.sent: list[list[dict]] = []
+        self.arrows_sent: list[list[dict]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if request.url.path != OVERLAY:
@@ -62,9 +64,12 @@ class OverlayPhone(FakePhone):
         self.requests.append((request.method, OVERLAY))
         if self.old:
             return httpx.Response(404, json={"error": "not_found", "message": "no route"})
-        boxes = json.loads(request.content)["boxes"]
+        body = json.loads(request.content)
+        boxes, arrows = body["boxes"], body.get("arrows", [])
         self.sent.append(boxes)
+        self.arrows_sent.append(arrows)
         self.status["overlay_boxes"] = len(boxes)
+        self.status["overlay_arrows"] = len(arrows)
         return httpx.Response(200, json=self.status)
 
 
@@ -296,7 +301,7 @@ def test_the_page_gets_the_boxes_and_clears_them(settings: Settings, tmp_path: P
     monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
     server = build_server(services)
     monitor.instrument(server)
-    services.scene.add_listener(monitor.scene_changed)
+    connect_services(monitor, services)
     client = TestClient(create_app(monitor), base_url=BASE_URL)
     assert client.post("/api/phone/snapshot").status_code == 200
     box = {"x": 10, "y": 10, "width": 20, "height": 20, "label": "R1"}

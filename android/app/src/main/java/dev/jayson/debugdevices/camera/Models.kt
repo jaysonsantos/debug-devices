@@ -28,7 +28,9 @@ data class CameraStatus(
     val focus: FocusInfo?,
     val optics: Optics,
     @SerialName("in_sensor_zoom") val inSensorZoom: InSensorZoomState,
-    @SerialName("overlay_boxes") val overlayBoxes: Int
+    @SerialName("overlay_boxes") val overlayBoxes: Int,
+    @SerialName("overlay_arrows") val overlayArrows: Int,
+    @SerialName("af_mode") val afMode: AfMode
 )
 
 @Serializable
@@ -52,12 +54,14 @@ data class RotationRequest(
     @Serializable(with = StrictBooleanSerializer::class) val auto: Boolean? = null
 )
 
-/** The field is required. `ApiJson` refuses unknown fields. */
+/** At least one field (see [CameraSettingsLogic.validate]). `ApiJson` refuses unknown fields and values. */
 @Serializable
 data class CameraSettingsRequest(
     @SerialName("in_sensor_zoom")
     @Serializable(with = StrictBooleanSerializer::class)
-    val inSensorZoom: Boolean
+    val inSensorZoom: Boolean? = null,
+    @SerialName("af_mode")
+    val afMode: AfMode? = null
 )
 
 /** Both fields are required. `ApiJson` refuses unknown fields. */

@@ -2,7 +2,7 @@
 
 Date of the check: 2026-09-24. Author: dd-research (Claude Code).
 
-Phone: adb serial `7fad170e`, model `2510ERA8BG` (Redmi Note 15 Pro+ 5G, global), product `flourite_eea`, Android API 36, HyperOS `OS3.0.307.0.WPREUXM`.
+Phone: adb serial `0a1b2c3d`, model `2510ERA8BG` (Redmi Note 15 Pro+ 5G, global), product `flourite_eea`, Android API 36, HyperOS `OS3.0.307.0.WPREUXM`.
 
 I used only read-only commands on this one serial: `getprop`, `dumpsys media.camera`, `pm list features`, `pm list libraries`, `dumpsys package dev.jayson.debugdevices.camera`. I did not open a camera, start an app, or send input. At the time of the check, our app (`dev.jayson.debugdevices.camera`) had camera ID 0 open.
 
@@ -141,8 +141,8 @@ Practical rules for this phone:
 
 ## Sources
 
-- `adb -s 7fad170e shell dumpsys media.camera` (81,082 lines; the facts above come from the service part, the HAL static information of IDs 0-5, and the dynamic information of device 0).
-- `adb -s 7fad170e shell getprop` (camera module properties).
-- `adb -s 7fad170e shell pm list features` and `pm list libraries`.
+- `adb -s 0a1b2c3d shell dumpsys media.camera` (81,082 lines; the facts above come from the service part, the HAL static information of IDs 0-5, and the dynamic information of device 0).
+- `adb -s 0a1b2c3d shell getprop` (camera module properties).
+- `adb -s 0a1b2c3d shell pm list features` and `pm list libraries`.
 - `android/app/src/main/java/dev/jayson/debugdevices/camera/CameraController.kt` (`CameraSelector.DEFAULT_BACK_CAMERA`, `setZoomRatio`).
 - Public specification: [GSMchoice, Redmi Note 15 Pro+ 5G 2510ERA8BG](https://www.gsmchoice.com/en/catalogue/redmi/note-15-proplus-5g/), [xiaomitime](https://xiaomitime.com/smartphones/redmi-note-15-pro-2/).

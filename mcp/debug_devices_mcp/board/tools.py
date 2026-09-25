@@ -34,7 +34,8 @@ from debug_devices_mcp.board.marking import (
 from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, TestPoint, on_side
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
 from debug_devices_mcp.constants import phone
-from debug_devices_mcp.highlight import HighlightResult, PixelBox
+from debug_devices_mcp.highlight import PixelBox
+from debug_devices_mcp.pointer import PointResult
 from debug_devices_mcp.process import CommandRunner
 
 PNG_FORMAT = "png"
@@ -158,6 +159,8 @@ class Registration(BaseModel):
     checked: bool
     # True after the board or the phone moved (scene change): the photo positions are for the old scene.
     stale: bool = False
+    # Live tracking of this registration in the phone screen stream (on, or why not).
+    tracking: str | None = None
 
 
 class LocatedPart(BaseModel):
@@ -187,16 +190,22 @@ class Locations(BaseModel):
     pins: list[LocatedPin]
     annotated: bool
     notes: list[str]
-    # With `highlight`: the result of phone_highlight for the located parts.
-    highlight: HighlightResult | None = None
+    # With `highlight`: the result of phone_point_to for the located parts (boxes in view, arrows outside).
+    highlight: PointResult | None = None
 
 
 # endregion: results
 
 
-type SceneGuard = Callable[[], None]
-# Boxes in pixels of a photo of the given size -> the phone_highlight result and the annotated snapshot.
-type Highlighter = Callable[[list[PixelBox], tuple[int, int]], Awaitable[tuple[HighlightResult, bytes]]]
+# Refuses photo work after a scene change, unless the live tracker follows that registration.
+type SceneGuard = Callable[[str | None], None]
+# (registration_id, refdes, boxes in pixels of the registered photo, its size) -> the pointing result and the
+# annotated snapshot.
+type Highlighter = Callable[
+    [str, list[str], list[PixelBox], tuple[int, int]], Awaitable[tuple[PointResult, bytes | None]]
+]
+# A new registration: start the live tracking. Returns its note.
+type RegistrationHook = Callable[[Registration], Awaitable[str]]
 
 STALE_REGISTRATION = (
     "registration {id!r} is from before the board or the phone moved: take a fresh phone_snapshot and call "
@@ -216,10 +225,11 @@ class BoardSession:
         # Set by the MCP server: refuse photo work after a scene change, and send highlight boxes to the phone.
         self.scene_guard: SceneGuard | None = None
         self.highlighter: Highlighter | None = None
+        self.on_registered: RegistrationHook | None = None
 
-    def check_scene(self) -> None:
+    def check_scene(self, registration_id: str | None = None) -> None:
         if self.scene_guard is not None:
-            self.scene_guard()
+            self.scene_guard(registration_id)
 
     def mark_registrations_stale(self) -> None:
         for registration in self.registrations.values():
@@ -634,7 +644,10 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         After the board or the phone moves, a registration is stale: take a fresh phone_snapshot and register again.
         """
         session.check_scene()
-        return register(session, side, photo_width_px, photo_height_px, pairs)
+        registration = register(session, side, photo_width_px, photo_height_px, pairs)
+        if session.on_registered is not None:
+            registration.tracking = await session.on_registered(registration)
+        return registration
 
     @server.tool()
     async def board_locate_in_photo(
@@ -649,11 +662,11 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
 
         With `photo_path` (for example a phone_snapshot save_path, any size of the same photo), the result also
         has the photo with circles on the parts and pins. Pins on the other side are left out.
-        `highlight: true` also draws green boxes around the located parts on the phone screen and the monitor page
-        (phone_highlight; the registered photo must be your last phone_snapshot). The boxes are boardview
-        estimates: say so, and clear them (phone_highlight clear) when done.
+        `highlight: true` also points to the parts on the phone screen and the monitor page (phone_point_to): a green
+        box in view, an arrow outside it (the registered photo must be your last phone_snapshot). The boxes are
+        boardview estimates: say so, and clear them (phone_highlight clear) when done.
         """
-        session.check_scene()
+        session.check_scene(registration_id)
         registration = session.registration(registration_id)
         if not refdes and not net:
             raise ToolError("give `refdes`, `net`, or both")
@@ -662,12 +675,14 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         if highlight:
             if session.highlighter is None:
                 raise ToolError("highlight boxes need the phone tools of this server")
+            names = [part.name for part in locations.parts][: phone.OVERLAY_MAX_BOXES]
+            if not names:
+                raise ToolError("no located part: nothing to highlight (a net alone has no boxes; give `refdes`)")
             boxes = part_boxes(session.current(), registration, locations)
-            if not boxes:
-                raise ToolError("no located part is in the photo on the registered side: nothing to highlight")
             size = (registration.photo_width_px, registration.photo_height_px)
-            locations.highlight, highlighted = await session.highlighter(boxes, size)
-            content.append(Image(data=highlighted, format=JPEG_FORMAT).to_image_content())
+            locations.highlight, highlighted = await session.highlighter(registration_id, names, boxes, size)
+            if highlighted is not None:
+                content.append(Image(data=highlighted, format=JPEG_FORMAT).to_image_content())
         if photo_path:
             try:
                 photo = await asyncio.to_thread(read_photo, photo_path)

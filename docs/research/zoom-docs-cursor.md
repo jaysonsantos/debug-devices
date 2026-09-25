@@ -1,6 +1,6 @@
 # Is phone zoom only a crop?
 
-Check date: 2026-09-25. Phone: adb serial `7fad170e`, model `2510ERA8BG`, API 36. This note uses the public Android and Xiaomi documents. The device facts come from `docs/research/phone-lenses.md` and the in-sensor zoom rounds in `docs/reports/dd-android.md`. One read-only `dumpsys media.camera` on this serial confirms the keys below. The command did not open a camera.
+Check date: 2026-09-25. Phone: adb serial `0a1b2c3d`, model `2510ERA8BG`, API 36. This note uses the public Android and Xiaomi documents. The device facts come from `docs/research/phone-lenses.md` and the in-sensor zoom rounds in `docs/reports/dd-android.md`. One read-only `dumpsys media.camera` on this serial confirms the keys below. The command did not open a camera.
 
 ## Conclusion
 

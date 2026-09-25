@@ -78,10 +78,10 @@ async def test_history_is_bounded_and_old_images_are_dropped() -> None:
 async def test_update_phone_publishes_state() -> None:
     bus = EventBus()
     with bus.subscribe() as queue:
-        bus.update_phone(serial="7fad170e")
+        bus.update_phone(serial="0a1b2c3d")
         [message] = drain(queue)
     assert message.kind == EventKind.PHONE
-    assert bus.phone.serial == "7fad170e"
+    assert bus.phone.serial == "0a1b2c3d"
 
 
 async def test_full_subscriber_queue_drops_messages() -> None:

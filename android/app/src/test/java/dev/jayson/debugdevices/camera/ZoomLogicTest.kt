@@ -23,7 +23,9 @@ class ZoomLogicTest {
         ),
         optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080),
         inSensorZoom = InSensorZoomState.OFF,
-        overlayBoxes = 0
+        overlayBoxes = 0,
+        overlayArrows = 0,
+        afMode = AfMode.CONTINUOUS
     )
 
     @Test

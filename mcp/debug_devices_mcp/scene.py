@@ -31,6 +31,7 @@ SCENE_CHANGED_MESSAGE = (
 )
 
 type SceneListener = Callable[[datetime], Awaitable[None]]
+type FrameListener = Callable[[bytes], Awaitable[None]]
 type Clock = Callable[[], float]
 type FrameFeed = Callable[[], AsyncIterator[bytes]]
 
@@ -39,6 +40,8 @@ type FrameFeed = Callable[[], AsyncIterator[bytes]]
 class SceneOptions:
     # One compared frame per interval: about 2 per second.
     interval: timedelta = timedelta(milliseconds=500)
+    # The frame listeners (live tracking) get about 4 frames per second.
+    frame_interval: timedelta = timedelta(milliseconds=250)
     # The camera preview part of the phone screen (fractions of the width and height): the app status text at the
     # top left and the system bars stay out.
     crop_left: float = 0.05
@@ -66,8 +69,9 @@ class SceneOptions:
 
 
 DEFAULT_OPTIONS = SceneOptions()
-# Our own small decoder when the page fallback decoder does not run: 2 frames per second, 160 px wide.
-SCENE_TRANSCODE = TranscodeOptions(fps=2, max_width=160, quality=8)
+# Our own decoder when the page fallback decoder does not run: 4 frames per second, 720 px wide (live tracking
+# needs the detail; the scene check reads 2 of them per second).
+SCENE_TRANSCODE = TranscodeOptions(fps=4, max_width=720, quality=6)
 
 
 # region: state
@@ -86,6 +90,9 @@ class SceneState:
         # A generation number: the watcher drops its reference when it changes.
         self.generation = 0
         self._listeners: list[SceneListener] = []
+        # The newest phone screen frame (JPEG), and the code that follows each frame (live tracking).
+        self.latest_frame: bytes | None = None
+        self._frame_listeners: list[FrameListener] = []
 
     @property
     def changed(self) -> bool:
@@ -93,6 +100,17 @@ class SceneState:
 
     def add_listener(self, listener: SceneListener) -> None:
         self._listeners.append(listener)
+
+    def add_frame_listener(self, listener: FrameListener) -> None:
+        self._frame_listeners.append(listener)
+
+    async def frame(self, jpeg: bytes) -> None:
+        self.latest_frame = jpeg
+        for listener in self._frame_listeners:
+            try:
+                await listener(jpeg)
+            except Exception:
+                logger.exception("a frame listener failed")
 
     def snapshot_taken(self) -> None:
         """A new phone_snapshot: the scene is the one in this photo. The next frame is the new reference."""
@@ -208,6 +226,7 @@ class SceneWatcher:
         self._generation = -1
         self._streak = 0
         self._next_at = 0.0
+        self._next_frame_at = 0.0
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -228,6 +247,9 @@ class SceneWatcher:
     async def _run(self) -> None:
         async for jpeg in self._feed():
             now = self._clock()
+            if now >= self._next_frame_at:
+                self._next_frame_at = now + self._options.frame_interval.total_seconds()
+                await self.state.frame(jpeg)
             if now < self._next_at:
                 continue
             self._next_at = now + self._options.interval.total_seconds()

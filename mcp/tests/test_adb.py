@@ -8,7 +8,7 @@ from .conftest import FakeRunner, failed, ok
 
 TWO_DEVICES = (
     b"List of devices attached\n"
-    b"192.168.0.43:5555      device product:raven model:AFTR device:raven transport_id:1\n"
+    b"192.0.2.43:5555      device product:raven model:AFTR device:raven transport_id:1\n"
     b"R5CT1234567            device usb:1-2 product:a55 model:SM_A556B device:a55 transport_id:3\n"
     b"\n"
 )
@@ -35,7 +35,7 @@ async def test_select_only_device() -> None:
 
 async def test_several_devices_need_a_serial() -> None:
     adb, _ = adb_with(TWO_DEVICES)
-    with pytest.raises(AdbError, match=r"several adb devices.*192\.168\.0\.43:5555.*R5CT1234567"):
+    with pytest.raises(AdbError, match=r"several adb devices.*192\.0\.2\.43:5555.*R5CT1234567"):
         await adb.select_device("")
 
 

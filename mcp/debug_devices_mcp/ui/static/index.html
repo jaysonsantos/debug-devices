@@ -34,6 +34,7 @@
               <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
               <button type="button" data-torch aria-label="Torch on or off">Torch</button>
               <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x">Sensor zoom</button>
+              <button type="button" data-af aria-pressed="false" title="Macro focus: the close-range autofocus mode">Macro</button>
               <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
               <span id="live-zoom" data-zoom-ratio class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
             </div>
@@ -50,6 +51,7 @@
             <dt>Rotation</dt><dd id="phone-rotation">–</dd>
             <dt>Distance</dt><dd><span id="phone-focus" class="focus-text">–</span><br><span id="phone-focus-advice" class="hint focus-advice" hidden></span></dd>
             <dt>Sensor zoom</dt><dd><span id="phone-isz-state">–</span><br><span id="phone-isz-hint" class="hint" hidden></span></dd>
+            <dt>Focus mode</dt><dd><span id="phone-af-state">–</span><br><span id="phone-af-hint" class="hint" hidden></span></dd>
             <dt>Preview flip</dt><dd id="phone-preview-flip" title="The phone mirrors its camera preview (live view)">–</dd>
           </dl>
           <div class="row">
@@ -67,6 +69,7 @@
           </div>
           <div class="row">
             <button type="button" data-isz aria-pressed="false" title="Real extra detail at 2x-4x from a sensor crop (not optics), on phones that support it. The preview stops about 1 s.">Sensor zoom (2x-4x detail)</button>
+            <button type="button" data-af aria-pressed="false" title="The camera's close-range autofocus mode, for work near the minimum focus distance (about 10-12 cm)">Macro focus</button>
           </div>
           <div class="row">
             <span>Screen view</span>
@@ -99,6 +102,7 @@
               <span class="live-zoom" data-zoom-ratio title="Phone camera zoom"></span>
               <button type="button" data-snapshot-zoom="in" aria-label="Phone camera zoom in" title="Phone camera zoom in (the next snapshot shows it)">+</button>
               <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x from a sensor crop (not optics); the preview stops about 1 s">Sensor zoom</button>
+              <button type="button" data-af aria-pressed="false" title="Macro focus: the close-range autofocus mode">Macro</button>
               <button type="button" data-new-snapshot title="Take a new phone snapshot (s)">New snapshot</button>
             <button type="button" data-clear-highlights disabled>Clear highlights</button>
             </div>
@@ -166,8 +170,8 @@
         <img id="board-render" alt="Board drawing from the boardview file (not a photo)">
       </div>
       <details id="board-register">
-        <summary>Register photo <small id="board-registration">none</small></summary>
-        <p class="hint">Take a phone snapshot. Type a reference part in the search box, press "Pick", then click the center of that part on the snapshot (panel or full screen). Use 4 or more large parts far apart; 5 or more also check the fit.</p>
+        <summary>Register photo <small id="board-registration">none</small> <small id="board-tracking"></small></summary>
+        <p class="hint">Take a phone snapshot. Type a reference part in the search box, press "Pick", then click the center of that part on the snapshot (panel or full screen; a double-click only toggles full screen). Use 4 or more large parts far apart; 5 or more also check the fit.</p>
         <div class="row">
           <label>Side <select id="register-side"><option value="top">top</option><option value="bottom">bottom</option></select></label>
           <button id="register-pick" type="button">Pick</button>

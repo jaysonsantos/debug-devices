@@ -6,8 +6,8 @@ This plan tests the phone app (`android/`), the MCP server (`mcp/`), and the con
 
 - The PC can have other ADB devices. Two Amazon Fire TV devices (model `AFTR`) are on the network. They are not test targets.
 - Do not install, start, or send input to a device that is not the test phone.
-- The target phone is adb serial `7fad170e` (model `2510ERA8BG`). Use only `adb -s 7fad170e`.
-- Always set `DEBUG_DEVICES_ADB_SERIAL=7fad170e` (or `--adb-serial 7fad170e`) when the real adb is in use.
+- The target phone is adb serial `0a1b2c3d` (model `2510ERA8BG`). Use only `adb -s 0a1b2c3d`.
+- Always set `DEBUG_DEVICES_ADB_SERIAL=0a1b2c3d` (or `--adb-serial 0a1b2c3d`) when the real adb is in use.
 - For tests without a phone, use `scripts/fake_adb.py`. It never calls the real adb.
 - Do not put a real `OPENROUTER_API_KEY` in a test. Tests mock the OpenRouter API.
 
@@ -97,8 +97,8 @@ The start state now also has `rotation_locked: false` (auto). `--after-start` an
 
 ### 1.3 Contract test of the real phone
 
-1. Connect the phone with USB. The target phone is serial `7fad170e`, model `2510ERA8BG`.
-2. Set `SERIAL=7fad170e`. Run `adb -s "$SERIAL" shell getprop ro.product.model` and make sure that it prints `2510ERA8BG`.
+1. Connect the phone with USB. The target phone is serial `0a1b2c3d`, model `2510ERA8BG`.
+2. Set `SERIAL=0a1b2c3d`. Run `adb -s "$SERIAL" shell getprop ro.product.model` and make sure that it prints `2510ERA8BG`.
 3. Install the app: `adb -s "$SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk`.
 4. Start the app: `adb -s "$SERIAL" shell am start -n dev.jayson.debugdevices.camera/.MainActivity`.
 5. Forward the port: `adb -s "$SERIAL" forward tcp:18765 tcp:8765`.

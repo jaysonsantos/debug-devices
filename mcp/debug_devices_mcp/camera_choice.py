@@ -7,12 +7,16 @@ sends for `unsupported` or `fallback`: the phone cannot do it, and a new request
 
 import logging
 from collections.abc import Callable
+from http import HTTPStatus
 
 from debug_devices_mcp.phone_api import (
+    AfMode,
+    AfModeName,
     CameraSettingsNotSupportedError,
     CameraSettingsRequest,
     CameraStatus,
     InSensorZoom,
+    PhoneApiError,
     PhoneClient,
     PhoneError,
 )
@@ -80,3 +84,85 @@ class InSensorZoomSync:
         except PhoneError as exc:
             logger.info("in-sensor zoom choice not sent: %s", exc)
         return status
+
+
+# region: autofocus mode
+
+type AfModeListener = Callable[[AfModeName], None]
+DEFAULT_AF_MODE: AfModeName = "continuous"
+AF_MODE_UNKNOWN_TO_APP = (
+    "the phone app does not know af_mode (POST /v1/camera answered 400); update the phone app for the macro focus"
+)
+AF_MODE_NOT_ON_PHONE = "this phone has no macro autofocus mode: the camera stays in continuous autofocus"
+
+
+class AfModeChoice:
+    """The autofocus mode choice (default continuous), saved in the settings file like the in-sensor zoom."""
+
+    def __init__(self, store: SettingsStore | None = None) -> None:
+        self._store = store
+        saved = store.load().af_mode if store is not None else None
+        self.mode: AfModeName = saved or DEFAULT_AF_MODE
+        self._listeners: list[AfModeListener] = []
+
+    def add_listener(self, listener: AfModeListener) -> None:
+        self._listeners.append(listener)
+
+    def set(self, mode: AfModeName) -> None:
+        self.mode = mode
+        if self._store is not None:
+            try:
+                saved = self._store.load()
+                self._store.save(saved.model_copy(update={"af_mode": mode}))
+            except OSError as exc:
+                logger.warning("cannot save the autofocus mode choice: %s", exc)
+        for listener in self._listeners:
+            listener(mode)
+
+
+class AfModeSync:
+    """Send the choice after phone_connect and after an app restart (the status shows `continuous` again).
+
+    A phone without the macro mode answers 200 and stays `continuous`: then the sync stops until the next
+    phone_connect, so it does not send again on each status poll. An app without `af_mode` is left alone.
+    """
+
+    def __init__(self, phone: PhoneClient, choice: AfModeChoice) -> None:
+        self._phone = phone
+        self._choice = choice
+        self._stopped = False
+
+    def reset(self) -> None:
+        self._stopped = False
+
+    def needs_send(self, status: CameraStatus) -> bool:
+        if status.af_mode is None or status.af_mode is AfMode.UNKNOWN:
+            return False
+        return status.af_mode.value != self._choice.mode
+
+    async def send(self) -> CameraStatus:
+        """Send the choice now. An app without `af_mode` raises PhoneError with a clear message."""
+        try:
+            status = await self._phone.camera(CameraSettingsRequest(af_mode=self._choice.mode))
+        except PhoneApiError as exc:
+            if exc.status == HTTPStatus.BAD_REQUEST:
+                raise PhoneError(AF_MODE_UNKNOWN_TO_APP) from exc
+            raise
+        self._stopped = self.needs_send(status)
+        return status
+
+    async def ensure(self, status: CameraStatus) -> CameraStatus:
+        if self._stopped or not self.needs_send(status):
+            return status
+        try:
+            return await self.send()
+        except CameraSettingsNotSupportedError as exc:
+            self._stopped = True
+            logger.warning("%s", exc)
+        except PhoneError as exc:
+            self._stopped = True
+            logger.info("autofocus mode choice not sent: %s", exc)
+        return status
+
+
+# endregion: autofocus mode

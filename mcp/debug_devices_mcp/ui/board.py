@@ -15,6 +15,7 @@ from debug_devices_mcp.board.tools import BoardSession, BoardSummary, Registrati
 from debug_devices_mcp.constants import phone
 from debug_devices_mcp.focus import SnapshotGeometry
 from debug_devices_mcp.orientation import OrientationState
+from debug_devices_mcp.pointer import OTHER_SIDE_MESSAGE, PointResult
 from debug_devices_mcp.ui.constants import tools
 from debug_devices_mcp.ui.events import CallStatus
 
@@ -28,7 +29,8 @@ RENDER_MAX_SIDE = 900
 NO_BOARD = "open a board first"
 NO_REGISTRATION = "register the photo first: 4 reference parts"
 STALE_REGISTRATION = "the board moved: register again"
-OTHER_SIDE = "on the {side} side: not visible now"
+# pointer.OTHER_SIDE_MESSAGE: no arrow for a part on the other board side (evidence rule 7).
+OTHER_SIDE = OTHER_SIDE_MESSAGE
 OTHER_BOARD = "the registration is for another board: register again"
 NO_SNAPSHOT = "take a phone snapshot first"
 ORIENTATION_CHANGED = "the snapshot flips changed after the snapshot: take a new snapshot"
@@ -125,6 +127,8 @@ class NetFacts(BaseModel):
 class Highlight(BaseModel):
     shown: bool
     message: str
+    # True when the live tracking moves the boxes and arrows with the board.
+    tracking: bool = False
 
 
 class SearchView(BaseModel):
@@ -172,8 +176,8 @@ def search_kind(board: Board, query: str) -> SearchKind:
     return SearchKind.NET if board.net_names(query) else SearchKind.PART
 
 
-def highlight_blocker(access: BoardAccess, sides: set[Side]) -> str | None:
-    """Why the searched item cannot get a box on the camera now, or None."""
+def highlight_blocker(access: BoardAccess) -> str | None:
+    """Why the searched item cannot get a box or an arrow on the camera now, or None."""
     registration = latest_registration(access.board)
     board = access.board.board
     if registration is None:
@@ -182,10 +186,15 @@ def highlight_blocker(access: BoardAccess, sides: set[Side]) -> str | None:
         return OTHER_BOARD
     if registration.stale:
         return STALE_REGISTRATION
-    if Side.BOTH not in sides and registration.side not in sides:
-        other = next(iter(sides)) if sides else registration.side
-        return OTHER_SIDE.format(side=other)
     return None
+
+
+def pointing_message(result: PointResult) -> str:
+    """One line per target, for example "J4: outside the view: follow the arrow, about ~4 cm"."""
+    lines = [f"{target.refdes}: {target.message}" for target in result.targets]
+    if result.tracking:
+        lines.append("live tracking: the boxes and arrows follow the board")
+    return " · ".join(lines)
 
 
 class BoardPanel:
@@ -252,7 +261,7 @@ class BoardPanel:
             tools.BOARD_RENDER,
             {"crop_to_part": facts.name, "highlight_parts": [facts.name], "green": True, "max_side": RENDER_MAX_SIDE},
         )
-        highlight = await self._highlight([facts.name], {facts.side})
+        highlight = await self._highlight([facts.name])
         return SearchView(
             query=query,
             kind=SearchKind.PART,
@@ -268,7 +277,6 @@ class BoardPanel:
         _, found = await self.run(tools.BOARD_FIND_NET, {"query": query, "limit": NET_PARTS_SHOWN})
         report = (found.structured_content or {})["nets"][0]
         parts = report["parts"]
-        sides = {Side(part["side"]) for part in parts}
         top = sum(part["side"] != Side.BOTTOM for part in parts)
         side = Side.TOP if top * 2 >= len(parts) else Side.BOTTOM
         facts = NetFacts(
@@ -283,28 +291,30 @@ class BoardPanel:
             {"side": side, "highlight_nets": [facts.name], "green": True, "max_side": RENDER_MAX_SIDE},
         )
         registration = latest_registration(self.session)
-        visible = [
-            part["name"] for part in parts if registration is None or part["side"] in {registration.side, Side.BOTH}
-        ][: phone.OVERLAY_MAX_BOXES]
-        highlight = await self._highlight(visible, sides)
+        # The parts on the registered side first: boxes and arrows for them, the note for the others.
+        on_side = [part["name"] for part in parts if registration and part["side"] in {registration.side, Side.BOTH}]
+        others = [part["name"] for part in parts if part["name"] not in on_side]
+        highlight = await self._highlight((on_side + others)[: phone.OVERLAY_MAX_BOXES])
         return SearchView(
             query=query, kind=SearchKind.NET, net=facts, render_call_id=str(render.id), highlight=highlight
         )
 
-    async def _highlight(self, refdes: list[str], sides: set[Side]) -> Highlight:
-        """A green box on the phone and the page snapshot, when a valid registration shows that side."""
-        blocker = highlight_blocker(self._access, sides)
+    async def _highlight(self, refdes: list[str]) -> Highlight:
+        """phone_point_to: a green box in view, an arrow toward a part outside it, on the phone and the page."""
+        blocker = highlight_blocker(self._access)
         if blocker is not None:
             return Highlight(shown=False, message=blocker)
         registration = latest_registration(self.session)
         assert registration is not None
-        arguments = {"registration_id": registration.registration_id, "refdes": refdes, "highlight": True}
+        arguments = {"refdes": refdes, "registration_id": registration.registration_id}
         try:
-            await self.run(tools.BOARD_LOCATE_IN_PHOTO, arguments)
+            _, result = await self.run(tools.PHONE_POINT_TO, arguments)
         except ToolError as exc:
             text = str(exc)
             return Highlight(shown=False, message=STALE_REGISTRATION if SCENE_MOVED in text else text)
-        return Highlight(shown=True, message=f"highlighted on the camera ({registration.side} side)")
+        pointed = PointResult.model_validate(result.structured_content)
+        shown = bool(pointed.boxes or pointed.arrows)
+        return Highlight(shown=shown, message=pointing_message(pointed), tracking=pointed.tracking)
 
     async def register(self, body: RegisterBody) -> RegistrationView:
         """Register the last snapshot from points that the user clicked on the page snapshot."""

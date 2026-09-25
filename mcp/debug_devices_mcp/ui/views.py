@@ -1,5 +1,7 @@
 """JSON shapes of the monitor web API."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, StrictBool, StrictFloat
 
 from debug_devices_mcp.phone_api import RotationDegrees, ZoomStep
@@ -51,6 +53,10 @@ class OrientationBody(BaseModel):
 class InSensorZoomBody(BaseModel):
     # Strict: "yes" or 1 must not turn a camera mode on.
     enabled: StrictBool
+
+
+class AfModeBody(BaseModel):
+    mode: Literal["continuous", "macro"]
 
 
 class FocusBody(BaseModel):

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,9 +18,15 @@ from debug_devices_mcp.adb import Adb, AdbError
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
 from debug_devices_mcp.board.tools import BoardSession, register_board_tools
-from debug_devices_mcp.camera_choice import InSensorZoomChoice, InSensorZoomSync
+from debug_devices_mcp.camera_choice import (
+    AF_MODE_NOT_ON_PHONE,
+    AfModeChoice,
+    AfModeSync,
+    InSensorZoomChoice,
+    InSensorZoomSync,
+)
 from debug_devices_mcp.config import Settings
-from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
+from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images, phone
 from debug_devices_mcp.focus import (
     FocusSource,
     PhoneStatusReport,
@@ -41,9 +47,11 @@ from debug_devices_mcp.instructions import register_instructions_tool, server_in
 from debug_devices_mcp.multimeter import MeterSource, MultimeterReading, VisionClient, VisionError
 from debug_devices_mcp.orientation import OrientationState, PreviewSync
 from debug_devices_mcp.phone_api import (
+    AfModeName,
     ApiErrorCode,
     CameraStatus,
     Health,
+    OverlayArrow,
     OverlayBox,
     OverlayRequest,
     PhoneApiError,
@@ -59,6 +67,8 @@ from debug_devices_mcp.phone_api import (
     ZoomStep,
     ZoomStepRequest,
 )
+from debug_devices_mcp.pointer import PointResult
+from debug_devices_mcp.pointing import Pointing
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.scene import SceneState
@@ -82,6 +92,8 @@ PHONE_SOURCE = "phone"
 NO_SNAPSHOT_YET = "take a phone_snapshot first: {what} are pixels in the last phone_snapshot image"
 
 logger = logging.getLogger(__name__)
+
+type OverlayListener = Callable[[list[OverlayBox], list[OverlayArrow]], Awaitable[None]]
 
 type MaxSide = Annotated[int, Field(ge=0, description="Long edge in pixels of the returned image. 0 = full size.")]
 
@@ -131,23 +143,69 @@ class Services:
     # The user's in-sensor zoom choice, and the sync that sends it again after an app start.
     in_sensor_zoom: InSensorZoomChoice = field(default_factory=InSensorZoomChoice)
     in_sensor_zoom_sync: InSensorZoomSync = field(init=False)
+    # The user's autofocus mode choice (continuous or macro), and its sync.
+    af_mode: AfModeChoice = field(default_factory=AfModeChoice)
+    af_mode_sync: AfModeSync = field(init=False)
     # The last phone_snapshot image that the agent got: phone_focus and phone_highlight map its pixels back.
     last_snapshot: SnapshotGeometry | None = None
     last_snapshot_image: bytes | None = None
     # Did the board or the phone move since the last phone_snapshot? The monitor's watcher marks it.
     scene: SceneState = field(default_factory=SceneState)
-    # The highlight boxes on the phone now (true orientation, 0 to 1).
+    # The highlight boxes and arrows on the phone now (true orientation, 0 to 1; angles in degrees).
     highlights: list[OverlayBox] = field(default_factory=list)
+    arrows: list[OverlayArrow] = field(default_factory=list)
+    # Searched parts and the live tracker that keeps their boxes and arrows on the board.
+    pointing: Pointing = field(init=False)
+    _overlay_listeners: list[OverlayListener] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.preview_sync = PreviewSync(self.phone, self.orientation)
         self.in_sensor_zoom_sync = InSensorZoomSync(self.phone, self.in_sensor_zoom)
+        self.af_mode_sync = AfModeSync(self.phone, self.af_mode)
+        self.pointing = Pointing(self)
         self.scene.add_listener(self._scene_changed)
+        self.scene.add_frame_listener(self.pointing.on_frame)
 
     def connect_board(self) -> None:
-        """The board photo tools refuse work after a scene change and can send highlight boxes."""
-        self.board.scene_guard = self.scene.guard
-        self.board.highlighter = self.highlight
+        """The board photo tools refuse work after a scene change, point to parts, and start the live tracking."""
+        self.board.scene_guard = self.guard_registration
+        self.board.highlighter = self.highlight_parts
+        self.board.on_registered = self.pointing.registered
+
+    def add_overlay_listener(self, listener: OverlayListener) -> None:
+        self._overlay_listeners.append(listener)
+
+    def guard_registration(self, registration_id: str | None) -> None:
+        """Photo positions are refused after a move, unless the live tracker follows that registration."""
+        if registration_id is not None and self.pointing.tracked(registration_id):
+            return
+        self.scene.guard()
+
+    async def send_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> CameraStatus:
+        """Show these boxes and arrows on the phone (they replace the old ones), and tell the page."""
+        with self.camera_command(), tool_errors():
+            status = await self.phone.overlay(OverlayRequest(boxes=boxes, arrows=arrows))
+        await self._overlay_changed(boxes, arrows)
+        return status
+
+    async def _overlay_changed(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
+        self.highlights, self.arrows = boxes, arrows
+        for listener in self._overlay_listeners:
+            await listener(boxes, arrows)
+
+    async def highlight_parts(
+        self, registration_id: str, refdes: list[str], boxes: list[PixelBox], photo_size: tuple[int, int]
+    ) -> tuple[PointResult, bytes | None]:
+        """board_locate_in_photo with `highlight`: point to the parts, and draw them on the last snapshot."""
+        result = await self.pointing.point_to(refdes, registration_id)
+        geometry, image = self.last_snapshot, self.last_snapshot_image
+        if geometry is None or image is None or not boxes:
+            return result, None
+        try:
+            scaled = scale_boxes(boxes, photo_size, (geometry.width, geometry.height))
+            return result, await asyncio.to_thread(draw_boxes, image, scaled)
+        except BoxOutsideError:
+            return result, None
 
     @contextmanager
     def camera_command(self) -> Iterator[None]:
@@ -159,15 +217,24 @@ class Services:
             self.scene.own_command()
 
     async def _scene_changed(self, _: datetime) -> None:
-        """The board or the phone moved: the boxes and the photo registrations are for the old scene."""
-        self.board.mark_registrations_stale()
-        if not self.highlights:
+        """The board or the phone moved: the boxes and the photo registrations are for the old scene, unless the
+        live tracker follows the move (then its registration and the pointed parts stay)."""
+        tracker = self.pointing.tracker
+        if await self.pointing.scene_changed() and tracker is not None:
+            for registration in self.board.registrations.values():
+                registration.stale = registration.registration_id != tracker.registration_id
+            if self.pointing.target is not None or not self.highlights:
+                return
+        else:
+            self.board.mark_registrations_stale()
+        self.pointing.stop()
+        if not self.highlights and not self.arrows:
             return
-        self.highlights = []
         try:
             await self.phone.overlay(OverlayRequest(boxes=[]))
         except PhoneError as exc:
             logger.warning("cannot clear the phone highlight boxes after a scene change: %s", exc)
+        await self._overlay_changed([], [])
 
     async def highlight(
         self, boxes: list[PixelBox], photo_size: tuple[int, int] | None = None
@@ -185,9 +252,8 @@ class Services:
             request = OverlayRequest(boxes=overlay)
         except (BoxOutsideError, ValidationError) as exc:
             raise ToolError(f"the boxes are not valid: {exc}") from exc
-        with self.camera_command(), tool_errors():
-            status = await self.phone.overlay(request)
-        self.highlights = overlay
+        self.pointing.stop()
+        status = await self.send_overlay(request.boxes, [])
         annotated = await asyncio.to_thread(draw_boxes, image, boxes)
         result = HighlightResult(
             count=len(overlay), boxes=overlay, overlay_boxes=status.overlay_boxes, note=HighlightResult.ESTIMATE_NOTE
@@ -195,20 +261,21 @@ class Services:
         return result, annotated
 
     async def clear_highlights(self) -> HighlightResult:
-        with self.camera_command(), tool_errors():
-            status = await self.phone.overlay(OverlayRequest(boxes=[]))
-        self.highlights = []
+        self.pointing.stop()
+        status = await self.send_overlay([], [])
         return HighlightResult(count=0, boxes=[], overlay_boxes=status.overlay_boxes, note=HighlightResult.CLEARED_NOTE)
 
     def reset_phone_syncs(self) -> None:
         """A new phone_connect: try the newer endpoints again (the app can have an update)."""
         self.preview_sync.reset()
         self.in_sensor_zoom_sync.reset()
+        self.af_mode_sync.reset()
 
     async def sync_phone(self, status: CameraStatus) -> CameraStatus:
         """Bring the app back to the user's choices when a status shows other ones (for example after an app start)."""
         status = await self.preview_sync.ensure(status)
-        return await self.in_sensor_zoom_sync.ensure(status)
+        status = await self.in_sensor_zoom_sync.ensure(status)
+        return await self.af_mode_sync.ensure(status)
 
     async def phone_snapshot(self) -> bytes:
         """One phone still in the orientation that the user chose (the true bytes when there is no flip)."""
@@ -249,6 +316,7 @@ class Services:
             vision=vision,
             orientation=OrientationState(SettingsStore.in_dir(state_dir())),
             in_sensor_zoom=InSensorZoomChoice(SettingsStore.in_dir(state_dir())),
+            af_mode=AfModeChoice(SettingsStore.in_dir(state_dir())),
             board=BoardSession.create(
                 runner,
                 LoaderOptions(
@@ -517,6 +585,22 @@ def register_camera_tools(server: MCPServer, services: Services) -> None:
         return PhoneStatusReport.of(status)
 
     @server.tool()
+    async def phone_af_mode(mode: AfModeName) -> PhoneStatusReport:
+        """Set the autofocus mode. macro: the camera's close-range autofocus mode, for work near the minimum focus
+        distance (about 10-12 cm). continuous: the normal autofocus.
+
+        `af_mode` in the result is the mode now. A phone without the macro mode stays `continuous`. The choice
+        persists and comes back after an app restart. Take a fresh phone_snapshot after the change.
+        """
+        services.af_mode.set(mode)
+        with services.camera_command(), tool_errors():
+            status = await services.af_mode_sync.send()
+        report = PhoneStatusReport.of(status)
+        if mode == "macro" and status.af_mode is not None and status.af_mode.value != mode:
+            report.advice_text = f"{AF_MODE_NOT_ON_PHONE}. {report.advice_text}".strip()
+        return report
+
+    @server.tool()
     async def phone_highlight(
         boxes: list[PixelBox] | None = None, clear: bool = False
     ) -> Annotated[CallToolResult, HighlightResult]:
@@ -544,6 +628,23 @@ def register_camera_tools(server: MCPServer, services: Services) -> None:
                 Image(data=annotated, format=JPEG_FORMAT).to_image_content(),
             ]
         return CallToolResult(content=content, structured_content=result.model_dump(mode="json"))
+
+    @server.tool()
+    async def phone_point_to(refdes: str | list[str], registration_id: str | None = None) -> PointResult:
+        """Point the user to parts on the board: a green box when a part is in the phone view, else an arrow at
+        the view edge toward it, with the board distance (for example "J4 ~4 cm").
+
+        Needs board_open and a photo registration (board_register_photo) of the board side that the phone sees;
+        without `registration_id`, the newest one. With live tracking (the result of board_register_photo says
+        it), the boxes and arrows follow the board while the user moves the phone. Tell the user to follow the
+        arrow and the distance; do not say left or right, because that depends on how they hold the phone. A part
+        on the other board side gets no arrow: tell the user to isolate the power before they turn the board.
+        The positions are boardview estimates: say so. Remove them with phone_highlight `clear: true`.
+        """
+        names = [refdes] if isinstance(refdes, str) else refdes
+        if not names or len(names) > phone.OVERLAY_MAX_BOXES:
+            raise ToolError(f"give 1 to {phone.OVERLAY_MAX_BOXES} parts in `refdes`")
+        return await services.pointing.point_to(names, registration_id)
 
 
 # endregion: phone tools

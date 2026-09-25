@@ -91,7 +91,13 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 - `POST /v1/overlay` draws up to 8 green highlight boxes (3 dp, with a label) over the preview. The boxes are given on
   the snapshot. `OverlayLogic` maps them to the preview (snapshot rotation, preview crop, flips) and scales them around
   the centre when the zoom changes. They are never in `/v1/snapshot`. `{"boxes": []}` clears them; they also go away
-  after 10 minutes and at an app start.
+  after 10 minutes and at an app start. Optional `arrows` (at most 4, `angle_deg` on the snapshot, 0 = right,
+  90 = down) show a green arrow at the preview edge in that direction: the target is outside the view there. Labels
+  of boxes and arrows are turned upright for the viewer, also when the phone is sideways.
+- `POST /v1/camera {"af_mode": "continuous" | "macro"}` (with or without `in_sensor_zoom`) sets the autofocus mode.
+  MACRO is the camera's close-range mode (a Camera2 request option); the lens moves on a focus trigger, so the app
+  scans the centre once after the switch, and `/v1/focus` triggers it again. A phone without MACRO stays
+  `continuous`. After an app start it is `continuous`.
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.
