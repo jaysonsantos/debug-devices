@@ -13,6 +13,7 @@ from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 from debug_devices_mcp.phone_screen import PhoneScreen
+from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
 from debug_devices_mcp.ui.constants import http, screen
 from debug_devices_mcp.ui.routes import error_response, monitor_of, until_closing
 
@@ -41,6 +42,28 @@ async def get_screen(request: Request) -> Response:
     )
 
 
+def mjpeg_part(jpeg: bytes) -> bytes:
+    header = f"--{http.MJPEG_BOUNDARY}\r\nContent-Type: {http.JPEG_MEDIA_TYPE}\r\nContent-Length: {len(jpeg)}\r\n\r\n"
+    return header.encode() + jpeg + b"\r\n"
+
+
+async def mjpeg_body(transcoder: ScreenTranscoder) -> AsyncGenerator[bytes]:
+    """ffmpeg runs while at least one fallback page reads this stream."""
+    async with transcoder.viewer():
+        async for jpeg in transcoder.frames():
+            yield mjpeg_part(jpeg)
+
+
+async def get_screen_mjpeg(request: Request) -> Response:
+    """The phone screen as MJPEG, for browsers that cannot decode H.264 with WebCodecs."""
+    monitor = monitor_of(request)
+    if monitor.screen_mjpeg is None:
+        return error_response("the phone screen is off (--no-phone-screen)", NOT_FOUND)
+    body = until_closing(mjpeg_body(monitor.screen_mjpeg), monitor.closing)
+    return StreamingResponse(body, media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
+
+
 routes = [
     Route("/api/phone/screen", get_screen, methods=["GET"]),
+    Route("/api/phone/screen.mjpg", get_screen_mjpeg, methods=["GET"]),
 ]

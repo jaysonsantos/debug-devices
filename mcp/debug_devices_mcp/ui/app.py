@@ -11,7 +11,18 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from debug_devices_mcp.ui.constants import INDEX_FILE, STATIC_DIR, http
-from debug_devices_mcp.ui.routes import bench, calls, ingest, multimeter, phone, screen, settings, state, webcam
+from debug_devices_mcp.ui.routes import (
+    bench,
+    board,
+    calls,
+    ingest,
+    multimeter,
+    phone,
+    screen,
+    settings,
+    state,
+    webcam,
+)
 
 if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
@@ -58,6 +69,7 @@ def create_app(monitor: Monitor) -> Starlette:
             *settings.routes,
             *webcam.routes,
             *phone.routes,
+            *board.routes,
             *multimeter.routes,
             *bench.routes,
             *ingest.routes,

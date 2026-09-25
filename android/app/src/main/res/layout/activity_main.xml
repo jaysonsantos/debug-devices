@@ -10,6 +10,20 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- POST /v1/overlay boxes: same bounds as the preview, never mirrored. -->
+    <dev.jayson.debugdevices.camera.OverlayView
+        android:id="@+id/highlight_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Focus ring at a POST /v1/focus screen point. Not mirrored: it sits outside the preview view. -->
+    <View
+        android:id="@+id/focus_ring"
+        android:layout_width="@dimen/focus_ring_size"
+        android:layout_height="@dimen/focus_ring_size"
+        android:background="@drawable/focus_ring"
+        android:visibility="gone" />
+
     <!-- Padding from the system bar and cutout insets (set in code). -->
     <FrameLayout
         android:id="@+id/safe_area"

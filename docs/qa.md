@@ -81,6 +81,7 @@ The script restores the zoom ratio and the torch state that it found at the star
 - A zoom body with `"ratio": 1e400` (overflow) or `"step": "IN"` (wrong case) gives 400 `bad_request`.
 - `PUT /v1/zoom` and `DELETE /v1/status` give 405 `method_not_allowed`.
 - Rotation bodies `-90`, `360`, `"degrees": null`, and `"auto": null` give 400 `bad_request`.
+- `POST /v1/focus` on the screen edges (`screen_x` 0.5, `screen_y` 0 and 1): 200 when the preview covers the edge, else 400 `bad_request` with a message that contains "outside the preview". The app layout decides which one, so the script notes a 200.
 
 `--expect starting` is for a run right after `am start`. It polls `/v1/status`. Every answer must be 503 `camera_not_ready` until the first 200. The first 200 must show the start state. Then the normal checks run.
 

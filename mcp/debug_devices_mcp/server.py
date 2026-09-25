@@ -1,16 +1,18 @@
 """MCP tools for the phone camera, the PC webcam, and the multimeter."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ContentBlock, TextContent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from debug_devices_mcp.adb import Adb, AdbError
 from debug_devices_mcp.board.constants import defaults as board_defaults
@@ -19,7 +21,21 @@ from debug_devices_mcp.board.tools import BoardSession, register_board_tools
 from debug_devices_mcp.camera_choice import InSensorZoomChoice, InSensorZoomSync
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images
-from debug_devices_mcp.focus import PhoneStatusReport
+from debug_devices_mcp.focus import (
+    FocusSource,
+    PhoneStatusReport,
+    PointOutsideError,
+    SnapshotGeometry,
+    snapshot_focus_request,
+)
+from debug_devices_mcp.highlight import (
+    BoxOutsideError,
+    HighlightResult,
+    PixelBox,
+    draw_boxes,
+    overlay_box,
+    scale_boxes,
+)
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.instructions import register_instructions_tool, server_instructions
 from debug_devices_mcp.multimeter import MeterSource, MultimeterReading, VisionClient, VisionError
@@ -28,6 +44,8 @@ from debug_devices_mcp.phone_api import (
     ApiErrorCode,
     CameraStatus,
     Health,
+    OverlayBox,
+    OverlayRequest,
     PhoneApiError,
     PhoneClient,
     PhoneError,
@@ -35,12 +53,15 @@ from debug_devices_mcp.phone_api import (
     RotationAutoRequest,
     RotationDegrees,
     RotationLockRequest,
+    ScreenFocusRequest,
+    SnapshotFocusRequest,
     ZoomRatioRequest,
     ZoomStep,
     ZoomStepRequest,
 )
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
+from debug_devices_mcp.scene import SceneState
 from debug_devices_mcp.ui.monitor import Monitor
 from debug_devices_mcp.ui.settings import SettingsStore, state_dir
 from debug_devices_mcp.ui.tools import register_monitor_tools
@@ -58,6 +79,9 @@ TOOL_GUIDE = (
 
 
 PHONE_SOURCE = "phone"
+NO_SNAPSHOT_YET = "take a phone_snapshot first: {what} are pixels in the last phone_snapshot image"
+
+logger = logging.getLogger(__name__)
 
 type MaxSide = Annotated[int, Field(ge=0, description="Long edge in pixels of the returned image. 0 = full size.")]
 
@@ -107,10 +131,74 @@ class Services:
     # The user's in-sensor zoom choice, and the sync that sends it again after an app start.
     in_sensor_zoom: InSensorZoomChoice = field(default_factory=InSensorZoomChoice)
     in_sensor_zoom_sync: InSensorZoomSync = field(init=False)
+    # The last phone_snapshot image that the agent got: phone_focus and phone_highlight map its pixels back.
+    last_snapshot: SnapshotGeometry | None = None
+    last_snapshot_image: bytes | None = None
+    # Did the board or the phone move since the last phone_snapshot? The monitor's watcher marks it.
+    scene: SceneState = field(default_factory=SceneState)
+    # The highlight boxes on the phone now (true orientation, 0 to 1).
+    highlights: list[OverlayBox] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.preview_sync = PreviewSync(self.phone, self.orientation)
         self.in_sensor_zoom_sync = InSensorZoomSync(self.phone, self.in_sensor_zoom)
+        self.scene.add_listener(self._scene_changed)
+
+    def connect_board(self) -> None:
+        """The board photo tools refuse work after a scene change and can send highlight boxes."""
+        self.board.scene_guard = self.scene.guard
+        self.board.highlighter = self.highlight
+
+    @contextmanager
+    def camera_command(self) -> Iterator[None]:
+        """Our own command changes the phone picture: the scene watcher takes a new reference after it."""
+        self.scene.own_command()
+        try:
+            yield
+        finally:
+            self.scene.own_command()
+
+    async def _scene_changed(self, _: datetime) -> None:
+        """The board or the phone moved: the boxes and the photo registrations are for the old scene."""
+        self.board.mark_registrations_stale()
+        if not self.highlights:
+            return
+        self.highlights = []
+        try:
+            await self.phone.overlay(OverlayRequest(boxes=[]))
+        except PhoneError as exc:
+            logger.warning("cannot clear the phone highlight boxes after a scene change: %s", exc)
+
+    async def highlight(
+        self, boxes: list[PixelBox], photo_size: tuple[int, int] | None = None
+    ) -> tuple[HighlightResult, bytes]:
+        """Send boxes in pixels of the last phone_snapshot (or of a photo of `photo_size`: the same photo at
+        another size) to the phone. Returns the result and the annotated last snapshot."""
+        self.scene.guard()
+        geometry, image = self.last_snapshot, self.last_snapshot_image
+        if geometry is None or image is None:
+            raise ToolError(NO_SNAPSHOT_YET.format(what="the boxes"))
+        try:
+            if photo_size is not None:
+                boxes = scale_boxes(boxes, photo_size, (geometry.width, geometry.height))
+            overlay = [overlay_box(box, geometry) for box in boxes]
+            request = OverlayRequest(boxes=overlay)
+        except (BoxOutsideError, ValidationError) as exc:
+            raise ToolError(f"the boxes are not valid: {exc}") from exc
+        with self.camera_command(), tool_errors():
+            status = await self.phone.overlay(request)
+        self.highlights = overlay
+        annotated = await asyncio.to_thread(draw_boxes, image, boxes)
+        result = HighlightResult(
+            count=len(overlay), boxes=overlay, overlay_boxes=status.overlay_boxes, note=HighlightResult.ESTIMATE_NOTE
+        )
+        return result, annotated
+
+    async def clear_highlights(self) -> HighlightResult:
+        with self.camera_command(), tool_errors():
+            status = await self.phone.overlay(OverlayRequest(boxes=[]))
+        self.highlights = []
+        return HighlightResult(count=0, boxes=[], overlay_boxes=status.overlay_boxes, note=HighlightResult.CLEARED_NOTE)
 
     def reset_phone_syncs(self) -> None:
         """A new phone_connect: try the newer endpoints again (the app can have an update)."""
@@ -302,11 +390,13 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         `distance_cm` (lens focus distance), `detail_px_per_mm` (how many snapshot pixels one mm of the board gets),
         `advice` (`too_close`, `good`, `far`, `unknown`), and `advice_text`. Tell the user to move the phone when
         the advice is `far` or `too_close`. The values are estimates; `calibration` says how good the distance is.
+        `scene_changed` (with `scene_changed_at`) is true when the board or the phone moved since the last
+        phone_snapshot: take a fresh phone_snapshot before you point at anything.
         """
         with tool_errors():
             # A status with other preview flips means that the app restarted: send the flips again.
             status = await services.sync_phone(await services.phone.status())
-        return PhoneStatusReport.of(status)
+        return PhoneStatusReport.of(status).with_scene(services.scene.changed_at)
 
     @server.tool()
     async def phone_zoom(ratio: float | None = None, step: ZoomStep | None = None) -> CameraStatus:
@@ -318,28 +408,14 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         if (ratio is None) == (step is None):
             raise ToolError("give exactly one of `ratio` or `step`")
         request = ZoomRatioRequest(ratio=ratio) if ratio is not None else ZoomStepRequest(step=step)
-        with tool_errors():
+        with services.camera_command(), tool_errors():
             return await services.phone.zoom(request)
 
     @server.tool()
     async def phone_torch(enabled: bool) -> CameraStatus:
         """Turn the phone torch (flash LED) on or off."""
-        with tool_errors():
+        with services.camera_command(), tool_errors():
             return await services.phone.torch(enabled)
-
-    @server.tool()
-    async def phone_in_sensor_zoom(enabled: bool) -> PhoneStatusReport:
-        """Turn the in-sensor zoom on or off. Real extra detail at 2x-4x from a sensor crop (not optics) on phones
-        that support it; the preview stops about 1 s while the camera rebinds.
-
-        `in_sensor_zoom` in the result: `on`, `off`, `unsupported` (this phone has no such mode), or `fallback` (the
-        mode failed; the camera runs normally). The choice persists and comes back after an app restart. Take a
-        fresh phone_snapshot after the change; this is not optical zoom.
-        """
-        services.in_sensor_zoom.set(enabled)
-        with tool_errors():
-            status = await services.in_sensor_zoom_sync.send()
-        return PhoneStatusReport.of(status)
 
     @server.tool()
     async def phone_rotation(degrees: RotationDegrees | None = None, auto: bool = False) -> CameraStatus:
@@ -351,7 +427,7 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         if (degrees is None) == (not auto):
             raise ToolError("give exactly one of `degrees` or `auto: true`")
         request = RotationLockRequest(degrees=degrees) if degrees is not None else RotationAutoRequest()
-        with tool_errors():
+        with services.camera_command(), tool_errors():
             return await services.phone.rotation(request)
 
     @server.tool()
@@ -371,10 +447,16 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         The photo comes in that orientation, the same as the user sees it; the text part says which. Pixel positions
         (board_register_photo, board_match_marking x_px/y_px) refer to this oriented photo.
         """
-        orientation = services.orientation.current.describe()
+        orientation = services.orientation.current
         with tool_errors():
             jpeg = await services.phone_snapshot()
-        return await image_result(jpeg, PHONE_SOURCE, max_side, save_path, orientation)
+        content = await image_result(jpeg, PHONE_SOURCE, max_side, save_path, orientation.describe())
+        info = SnapshotInfo.model_validate_json(content[0].text)
+        services.last_snapshot = SnapshotGeometry(width=info.width, height=info.height, orientation=orientation)
+        services.last_snapshot_image = content[1].data  # type: ignore[union-attr]
+        # This photo is the scene now: a later move of the board or the phone makes it stale.
+        services.scene.snapshot_taken()
+        return content
 
     @server.tool()
     async def phone_snapshot_orientation(
@@ -389,8 +471,79 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         """
         orientation = services.orientation.update(flip_horizontal, flip_vertical)
         # The phone preview follows (only the camera image; the app's text stays readable).
-        await services.preview_sync.push()
+        with services.camera_command():
+            await services.preview_sync.push()
         return orientation
+
+
+def register_camera_tools(server: MCPServer, services: Services) -> None:
+    """The camera settings on the phone: the focus point and the in-sensor zoom."""
+
+    @server.tool()
+    async def phone_focus(x: float, y: float, source: FocusSource = FocusSource.SNAPSHOT) -> PhoneStatusReport:
+        """Focus (and meter) the phone camera on one point, for example a blurry part.
+
+        `source` "snapshot" (default): `x`, `y` are pixels in the last phone_snapshot image that you got, as you
+        saw it (after the flips and the scaling). `source` "screen": `x`, `y` are a point on the phone screen from
+        0 to 1. The focus holds about 5 s. Take a fresh phone_snapshot after the focus settles (about 1 s) to see
+        the effect.
+        """
+        try:
+            if source is FocusSource.SCREEN:
+                request: ScreenFocusRequest | SnapshotFocusRequest = ScreenFocusRequest(screen_x=x, screen_y=y)
+            elif services.last_snapshot is None:
+                raise ToolError(NO_SNAPSHOT_YET.format(what="x and y"))
+            else:
+                services.scene.guard()
+                request = snapshot_focus_request(x, y, services.last_snapshot)
+        except (ValidationError, PointOutsideError) as exc:
+            raise ToolError(f"the focus point is not valid: {exc}") from exc
+        with services.camera_command(), tool_errors():
+            status = await services.phone.focus(request)
+        return PhoneStatusReport.of(status)
+
+    @server.tool()
+    async def phone_in_sensor_zoom(enabled: bool) -> PhoneStatusReport:
+        """Turn the in-sensor zoom on or off. Real extra detail at 2x-4x from a sensor crop (not optics) on phones
+        that support it; the preview stops about 1 s while the camera rebinds.
+
+        `in_sensor_zoom` in the result: `on`, `off`, `unsupported` (this phone has no such mode), or `fallback` (the
+        mode failed; the camera runs normally). The choice persists and comes back after an app restart. Take a
+        fresh phone_snapshot after the change; this is not optical zoom.
+        """
+        services.in_sensor_zoom.set(enabled)
+        with services.camera_command(), tool_errors():
+            status = await services.in_sensor_zoom_sync.send()
+        return PhoneStatusReport.of(status)
+
+    @server.tool()
+    async def phone_highlight(
+        boxes: list[PixelBox] | None = None, clear: bool = False
+    ) -> Annotated[CallToolResult, HighlightResult]:
+        """Draw a green box around a part that you found in the last phone_snapshot. Quote the marking you see
+        first. The box is your estimate; say so. Clear it when done or when the phone moves.
+
+        `boxes`: up to 8, each `{x, y, width, height, label}` in pixels of the last phone_snapshot image that you
+        got (as you saw it: after the flips and the scaling); `label` at most 32 characters, for example the
+        marking. New boxes replace the old ones. `clear: true` removes all boxes. The phone draws the boxes over
+        its camera preview (the monitor page live view shows them), and the page draws them on its snapshot. The
+        result has a copy of your last snapshot with the boxes: check that each box is where you meant. After the
+        board or the phone moves, the server clears the boxes and refuses new ones until a fresh phone_snapshot.
+        """
+        if clear:
+            if boxes:
+                raise ToolError("give `boxes` or `clear: true`, not both")
+            result = await services.clear_highlights()
+            content: list[ContentBlock] = [TextContent(type="text", text=result.model_dump_json())]
+        elif not boxes:
+            raise ToolError("give `boxes`, or `clear: true` to remove the boxes")
+        else:
+            result, annotated = await services.highlight(boxes)
+            content = [
+                TextContent(type="text", text=result.model_dump_json()),
+                Image(data=annotated, format=JPEG_FORMAT).to_image_content(),
+            ]
+        return CallToolResult(content=content, structured_content=result.model_dump(mode="json"))
 
 
 # endregion: phone tools
@@ -465,7 +618,9 @@ def build_server(
 
     register_instructions_tool(server, instructions_file)
     register_phone_tools(server, services)
+    register_camera_tools(server, services)
     register_webcam_tools(server, services)
+    services.connect_board()
     register_board_tools(server, services.board)
     if monitor is not None:
         register_monitor_tools(server, monitor)

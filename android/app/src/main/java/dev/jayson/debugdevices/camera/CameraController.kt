@@ -10,8 +10,14 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Surface
+import android.view.View
+import android.view.WindowManager
 import androidx.annotation.OptIn
 import androidx.camera.camera2.impl.Camera2ImplConfig
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -23,10 +29,13 @@ import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.ExtendableBuilder
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
 import androidx.camera.core.SessionConfig
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.TorchState
 import androidx.camera.core.impl.MutableOptionsBundle
 import androidx.camera.core.impl.UseCaseConfig
@@ -39,6 +48,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import androidx.lifecycle.asFlow
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
@@ -58,7 +68,10 @@ class CameraController(
     private val context: Context,
     onRotationChanged: (Int) -> Unit,
     private val onPreviewFlipChanged: (PreviewFlip) -> Unit,
-    private val onCameraBound: (Camera) -> Unit
+    private val onCameraBound: (Camera) -> Unit,
+    /** Gets a screen tap point in display pixels, for the focus ring. */
+    private val onFocusTap: (PixelPoint) -> Unit,
+    private val onOverlayChanged: () -> Unit
 ) : CameraPort {
     private val gate = ControlGate()
 
@@ -109,6 +122,18 @@ class CameraController(
     fun focusInfo(): FocusInfo? = FocusLogic.info(focusStatic, focusSample)
     private var owner: LifecycleOwner? = null
     private var previewView: PreviewView? = null
+
+    /** The one place of the overlay boxes, and the zoom when they came. Main thread only. */
+    private var overlayBoxes: List<OverlayBox> = emptyList()
+    private var overlayZoomAtCall = Constants.Zoom.UNIT_RATIO
+    private val overlayHandler = Handler(Looper.getMainLooper())
+    private val clearOverlay = Runnable {
+        overlayBoxes = emptyList()
+        onOverlayChanged()
+    }
+
+    /** When the last tap focus started (elapsed realtime), or null. Main thread only. */
+    private var focusHoldStartedAt: Long? = null
 
     /** The in-sensor zoom state of the last bind. Main thread only. */
     var inSensorZoomState = InSensorZoomState.OFF
@@ -164,6 +189,7 @@ class CameraController(
                 }
             }
             inSensorZoomState = state
+            focusHoldStartedAt = null
             onCameraBound(bound)
             Log.i(
                 Constants.Log.TAG,
@@ -436,9 +462,121 @@ class CameraController(
         readStatus(activeCamera())
     }
 
+    override suspend fun setOverlay(boxes: List<OverlayBox>): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            val camera = activeCamera()
+            overlayBoxes = boxes
+            overlayZoomAtCall = camera.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO
+            overlayHandler.removeCallbacks(clearOverlay)
+            if (boxes.isNotEmpty()) overlayHandler.postDelayed(clearOverlay, Constants.Overlay.TTL_MILLIS)
+            onOverlayChanged()
+            readStatus(camera)
+        }
+    }
+
+    /** The overlay boxes in the pixels of a view with the preview's bounds. Main thread only. */
+    fun overlayRects(viewWidth: Float, viewHeight: Float): List<Pair<PixelRect, String>> {
+        val camera = camera ?: return emptyList()
+        val view = previewView ?: return emptyList()
+        if (overlayBoxes.isEmpty() || viewWidth <= 0f || viewHeight <= 0f) return emptyList()
+        val resolution = imageCapture.resolutionInfo?.resolution ?: return emptyList()
+        val previewRotation = camera.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0)
+        val sideways = previewRotation % (2 * Constants.Orientation.BUCKET_DEGREES) != 0
+        val geometry = OverlayGeometry(
+            zoomAtCall = overlayZoomAtCall,
+            zoomNow = camera.cameraInfo.zoomState.value?.zoomRatio ?: overlayZoomAtCall,
+            snapshotRotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation),
+            previewRotation = previewRotation,
+            imageWidth = (if (sideways) resolution.height else resolution.width).toFloat(),
+            imageHeight = (if (sideways) resolution.width else resolution.height).toFloat(),
+            viewWidth = viewWidth,
+            viewHeight = viewHeight,
+            fill = view.scaleType.name.startsWith(FILL_SCALE_PREFIX),
+            mirroredX = view.scaleX < 0f,
+            mirroredY = view.scaleY < 0f
+        )
+        return overlayBoxes.mapNotNull { box -> OverlayLogic.boxToView(box, geometry)?.let { it to box.label } }
+    }
+
+    override suspend fun focusAt(target: FocusTarget): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            val camera = activeCamera()
+            val point = when (target) {
+                is FocusTarget.Screen -> screenMeteringPoint(target)
+                is FocusTarget.Snapshot -> snapshotMeteringPoint(camera, target)
+            }
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                .setAutoCancelDuration(Constants.FocusTap.HOLD_SECONDS, TimeUnit.SECONDS)
+                .build()
+            // A new action replaces the running one. The response comes at once; focus.state shows the progress.
+            camera.cameraControl.startFocusAndMetering(action)
+            focusHoldStartedAt = SystemClock.elapsedRealtime()
+            readStatus(camera)
+        }
+    }
+
+    private fun screenMeteringPoint(target: FocusTarget.Screen): MeteringPoint {
+        val view = previewView ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
+        val geometry = previewGeometry(view)
+        val local = FocusTapLogic.screenToPreview(target.x, target.y, geometry)
+            ?: throw ApiException(ErrorCode.BAD_REQUEST, Constants.Messages.FOCUS_OUTSIDE_PREVIEW)
+        onFocusTap(PixelPoint(target.x * geometry.displayWidth, target.y * geometry.displayHeight))
+        return view.meteringPointFactory.createPoint(local.x, local.y)
+    }
+
+    private fun snapshotMeteringPoint(camera: Camera, target: FocusTarget.Snapshot): MeteringPoint {
+        val rotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation)
+        val (x, y) = FocusTapLogic.snapshotToSurface(target.x, target.y, rotation)
+        return SurfaceOrientedMeteringPointFactory(NORMALIZED_SIZE, NORMALIZED_SIZE, imageCapture).createPoint(x, y)
+    }
+
+    /**
+     * The preview position on the display. The parent is never mirrored, so its screen location plus the layout
+     * offset is exact; `getLocationOnScreen` of a mirrored view would give the mirrored corner.
+     */
+    private fun previewGeometry(view: PreviewView): PreviewGeometry {
+        val parentLocation = IntArray(2)
+        (view.parent as View).getLocationOnScreen(parentLocation)
+        val display = displaySize()
+        return PreviewGeometry(
+            displayWidth = display.x,
+            displayHeight = display.y,
+            viewLeft = parentLocation[0] + view.left,
+            viewTop = parentLocation[1] + view.top,
+            viewWidth = view.width,
+            viewHeight = view.height,
+            mirroredX = view.scaleX < 0f,
+            mirroredY = view.scaleY < 0f
+        )
+    }
+
+    /** The full display in its natural portrait orientation, like the screen stream. */
+    private fun displaySize(): android.graphics.Point {
+        val windowManager = context.getSystemService(WindowManager::class.java)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            android.graphics.Point(bounds.width(), bounds.height())
+        } else {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            android.graphics.Point(metrics.widthPixels, metrics.heightPixels)
+        }
+    }
+
+    /** A zoom change ends a tap focus hold early. */
+    private fun endFocusHold(camera: Camera) {
+        val startedAt = focusHoldStartedAt ?: return
+        if (SystemClock.elapsedRealtime() - startedAt < Constants.FocusTap.HOLD_MILLIS) {
+            camera.cameraControl.cancelFocusAndMetering()
+        }
+        focusHoldStartedAt = null
+    }
+
     override suspend fun updateZoom(target: (CameraStatus) -> Float): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
+            endFocusHold(camera)
             val ratio = target(readStatus(camera))
             setZoomAlongPath(camera, camera.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO, ratio)
             // The zoom LiveData updates later, so report the ratio that CameraX accepted.
@@ -527,7 +665,8 @@ class CameraController(
             previewFlipVertical = previewFlip.vertical,
             focus = focusInfo(),
             optics = readOptics(),
-            inSensorZoom = inSensorZoomState
+            inSensorZoom = inSensorZoomState,
+            overlayBoxes = overlayBoxes.size
         )
     }
 
@@ -542,3 +681,9 @@ class CameraController(
 }
 
 private const val HEX_RADIX = 16
+
+/** Width and height for a metering point factory that takes normalized coordinates. */
+private const val NORMALIZED_SIZE = 1f
+
+/** `PreviewView.ScaleType` names that crop to fill the view (FILL_START, FILL_CENTER, FILL_END). */
+private const val FILL_SCALE_PREFIX = "FILL"

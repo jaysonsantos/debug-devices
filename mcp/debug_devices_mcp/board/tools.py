@@ -4,7 +4,7 @@ import asyncio
 import io
 import math
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +33,8 @@ from debug_devices_mcp.board.marking import (
 )
 from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, TestPoint, on_side
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
+from debug_devices_mcp.constants import phone
+from debug_devices_mcp.highlight import HighlightResult, PixelBox
 from debug_devices_mcp.process import CommandRunner
 
 PNG_FORMAT = "png"
@@ -40,6 +42,8 @@ JPEG_FORMAT = "jpeg"
 PIL_JPEG_FORMAT = "JPEG"
 JPEG_QUALITY = 85
 MARK_RADIUS_PX = 18
+# A highlight box around a tiny part is at least this large, so it stays visible.
+MIN_BOX_PX = 8.0
 MARK_WIDTH_PX = 4
 MARK_FONT_SIZE = 28
 
@@ -152,6 +156,8 @@ class Registration(BaseModel):
     fit: Fit
     # False with only 4 pairs: the fit is exact, so the error says nothing. Give 5 or more pairs.
     checked: bool
+    # True after the board or the phone moved (scene change): the photo positions are for the old scene.
+    stale: bool = False
 
 
 class LocatedPart(BaseModel):
@@ -181,9 +187,21 @@ class Locations(BaseModel):
     pins: list[LocatedPin]
     annotated: bool
     notes: list[str]
+    # With `highlight`: the result of phone_highlight for the located parts.
+    highlight: HighlightResult | None = None
 
 
 # endregion: results
+
+
+type SceneGuard = Callable[[], None]
+# Boxes in pixels of a photo of the given size -> the phone_highlight result and the annotated snapshot.
+type Highlighter = Callable[[list[PixelBox], tuple[int, int]], Awaitable[tuple[HighlightResult, bytes]]]
+
+STALE_REGISTRATION = (
+    "registration {id!r} is from before the board or the phone moved: take a fresh phone_snapshot and call "
+    "board_register_photo again"
+)
 
 
 class BoardSession:
@@ -193,6 +211,19 @@ class BoardSession:
         self.loader = loader
         self.board: Board | None = None
         self.registrations: dict[str, Registration] = {}
+        # The newest registration (the monitor page uses it to highlight a searched part).
+        self.last_registration_id: str | None = None
+        # Set by the MCP server: refuse photo work after a scene change, and send highlight boxes to the phone.
+        self.scene_guard: SceneGuard | None = None
+        self.highlighter: Highlighter | None = None
+
+    def check_scene(self) -> None:
+        if self.scene_guard is not None:
+            self.scene_guard()
+
+    def mark_registrations_stale(self) -> None:
+        for registration in self.registrations.values():
+            registration.stale = True
 
     @classmethod
     def create(cls, runner: CommandRunner, options: LoaderOptions) -> BoardSession:
@@ -209,6 +240,8 @@ class BoardSession:
             raise ToolError(f"no registration {registration_id!r}. Call board_register_photo first.")
         if self.board is None or registration.board_sha256 != self.board.sha256:
             raise ToolError("that registration belongs to another board. Open that board, or register again.")
+        if registration.stale:
+            raise ToolError(STALE_REGISTRATION.format(id=registration_id))
         return registration
 
     def part(self, refdes: str) -> Part:
@@ -308,6 +341,7 @@ def register(session: BoardSession, side: Side, width: int, height: int, pairs: 
         checked=fit.error_limit_px is not None,
     )
     session.registrations[registration.registration_id] = registration
+    session.last_registration_id = registration.registration_id
     return registration
 
 
@@ -355,6 +389,22 @@ def locate(board: Board, registration: Registration, refdes: list[str], net: str
         annotated=False,
         notes=notes,
     )
+
+
+def part_boxes(board: Board, registration: Registration, locations: Locations) -> list[PixelBox]:
+    """Pixel boxes around the located parts that are in the photo and on the registered side (at most 8)."""
+    boxes = []
+    for located in locations.parts:
+        part = board.part(located.name)
+        if part is None or not located.in_photo or not located.on_registered_side:
+            continue
+        box = part.box
+        corners = [(box.min_x, box.min_y), (box.max_x, box.min_y), (box.max_x, box.max_y), (box.min_x, box.max_y)]
+        xs, ys = zip(*map_points(registration.fit.matrix, corners), strict=True)
+        width, height = max(max(xs) - min(xs), MIN_BOX_PX), max(max(ys) - min(ys), MIN_BOX_PX)
+        label = located.name[: phone.OVERLAY_MAX_LABEL]
+        boxes.append(PixelBox(x=min(xs), y=min(ys), width=width, height=height, label=label))
+    return boxes[: phone.OVERLAY_MAX_BOXES]
 
 
 def annotate_photo(photo: bytes, locations: Locations, max_side: int) -> bytes:
@@ -480,6 +530,7 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
         highlight_nets: list[str] | None = None,
         crop_to_part: str | None = None,
         max_side: Annotated[int, Field(ge=200)] = defaults.RENDER_MAX_SIDE,
+        green: bool = False,
     ) -> Annotated[CallToolResult, RenderLegend]:
         """Draw one side of the board as a PNG: outline, part boxes, pins, and highlighted parts and nets.
 
@@ -488,7 +539,7 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
 
         `side` "top" (default) or "bottom" (mirrored in X, as seen from below). With `crop_to_part` and no `side`,
         the side of that part. Nets accept globs. The legend gives the color of each highlight and the pixel
-        position of each highlighted part.
+        position of each highlighted part. `green` draws every highlight in green (the phone highlight color).
         """
         board = session.current()
         if side is None:
@@ -500,6 +551,7 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
             highlight_nets=highlight_nets or [],
             crop_to_part=crop_to_part,
             max_side=max_side,
+            green=green,
         )
         with board_errors():
             png, legend = await asyncio.to_thread(render_board, board, options)
@@ -579,7 +631,9 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         Each pair is a part refdes and the pixel position of its center in the photo (origin top left). The size
         is the size of the photo that the pixels refer to. Use 5-6 large parts far apart (ICs, connectors). With
         5 or more pairs, a fit with a large error is refused. Returns the registration_id for board_locate_in_photo.
+        After the board or the phone moves, a registration is stale: take a fresh phone_snapshot and register again.
         """
+        session.check_scene()
         return register(session, side, photo_width_px, photo_height_px, pairs)
 
     @server.tool()
@@ -589,17 +643,31 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         net: str | None = None,
         photo_path: str | None = None,
         max_side: Annotated[int, Field(ge=200)] = defaults.RENDER_MAX_SIDE,
+        highlight: bool = False,
     ) -> Annotated[CallToolResult, Locations]:
         """Pixel positions of parts (`refdes`) and of the pins of a net (`net`, glob allowed) in the registered photo.
 
         With `photo_path` (for example a phone_snapshot save_path, any size of the same photo), the result also
         has the photo with circles on the parts and pins. Pins on the other side are left out.
+        `highlight: true` also draws green boxes around the located parts on the phone screen and the monitor page
+        (phone_highlight; the registered photo must be your last phone_snapshot). The boxes are boardview
+        estimates: say so, and clear them (phone_highlight clear) when done.
         """
+        session.check_scene()
         registration = session.registration(registration_id)
         if not refdes and not net:
             raise ToolError("give `refdes`, `net`, or both")
         locations = locate(session.current(), registration, refdes or [], net)
         content: list = [TextContent(type="text", text="")]
+        if highlight:
+            if session.highlighter is None:
+                raise ToolError("highlight boxes need the phone tools of this server")
+            boxes = part_boxes(session.current(), registration, locations)
+            if not boxes:
+                raise ToolError("no located part is in the photo on the registered side: nothing to highlight")
+            size = (registration.photo_width_px, registration.photo_height_px)
+            locations.highlight, highlighted = await session.highlighter(boxes, size)
+            content.append(Image(data=highlighted, format=JPEG_FORMAT).to_image_content())
         if photo_path:
             try:
                 photo = await asyncio.to_thread(read_photo, photo_path)

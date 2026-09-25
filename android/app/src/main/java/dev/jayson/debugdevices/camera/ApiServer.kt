@@ -87,6 +87,15 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             val request = call.receive<CameraSettingsRequest>()
             call.respond(camera.setInSensorZoom(request.inSensorZoom))
         }
+        post(Constants.Paths.FOCUS) {
+            val request = call.receive<FocusRequest>()
+            call.respond(camera.focusAt(FocusTapLogic.target(request)))
+        }
+        post(Constants.Paths.OVERLAY) {
+            val request = call.receive<OverlayRequest>()
+            OverlayLogic.validate(request)
+            call.respond(camera.setOverlay(request.boxes))
+        }
         get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
     }
 }

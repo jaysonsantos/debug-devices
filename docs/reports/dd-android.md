@@ -316,6 +316,59 @@ End state: zoom 1x, torch off, in-sensor zoom off, rotation auto, both flips fal
 
 Proposal: keep in-sensor zoom off by default. The MCP can turn it on for work at 2x and more. The detail gain is real at 2x, and small at 4x and more. For more detail at 4x the quarter mode needs the Xiaomi stream set (YUV 1440 x 1080), which costs snapshot resolution. I do not recommend that now.
 
+
+### Round: tap to focus (`POST /v1/focus`)
+
+Contract: `POST /v1/focus` with exactly one pair, `screen_x`/`screen_y` or `snapshot_x`/`snapshot_y` (changed by the orchestrator).
+
+Code:
+
+- `FocusTap.kt` (pure): `FocusRequest` (strict floats), `FocusTapLogic.target` (exactly one complete pair, finite values in [0, 1], else 400), `screenToPreview` (display point -> preview-view point: the preview offset on the display, "outside the preview" -> null, and the view mirroring undone), `snapshotToSurface` (turns a snapshot point back by the snapshot rotation 0/90/180/270).
+- `CameraController.focusAt` (through `ControlGate`): a screen point goes through `PreviewView.meteringPointFactory` (it knows the preview crop and the sensor orientation). A snapshot point goes through `SurfaceOrientedMeteringPointFactory(1, 1, imageCapture)` with `getSensorRotationDegrees(targetRotation)`. `FocusMeteringAction` with `FLAG_AF | FLAG_AE` and `setAutoCancelDuration(5 s)`. The response comes at once. A new focus replaces the action. A zoom change calls `cancelFocusAndMetering()` while a hold is active. A rebind (in-sensor zoom) ends it with the old session.
+- The preview position comes from the (never mirrored) parent's screen location plus the layout offset, because `getLocationOnScreen` of a mirrored view gives the mirrored corner. The display size is the full display (`maximumWindowMetrics`), like the screen stream.
+- Optional focus ring: a white 72 dp ring at the screen point for 0.8 s. It sits outside the preview view, so it is never mirrored, and it shows in the screen stream.
+- New unit tests: `FocusTapLogicTest` (7: pairs, range, mapping, flips, offset and bounds, all four rotations with known points) and `ApiServerTest` +3 (screen and snapshot targets, 9 bad bodies plus "outside the preview", 503 and 405). 103 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Check on `7fad170e` (APK installed at about 21:5x; the phone now at about 11 cm, focus distance 9.3 diopters; board with a raised heat pipe and shield):
+
+- **The mapping is exact** (AF/AE regions in "Last request sent", active array 4080 x 3060, sensor orientation 90):
+  - Snapshot (0.92, 0.80): expected region centre (3264, 245), sent `[2958 15 3570 473]` = centre (3264, 244). Snapshot (0.10, 0.10): expected (408, 2754), sent centre (408, 2754).
+  - Screen points: the same x axis. On the other axis the preview crop shows: the display (1280 x 2772) shows only the middle 62% of the 3:4 image width, so screen 0.92 -> image 0.76 and screen 0.10 -> image 0.25. The regions match this.
+  - Flip H at screen (0.08, 0.80) and flip V at screen (0.92, 0.20) give the same region as the unflipped screen (0.92, 0.80): `[2958 509 3570 967]`.
+- **Focus follows the tap:** each tap gives `scanning` for 0.6-0.9 s, then `focused`. The distances changed between points: 8.06-8.55 diopters for board points, 7.63 on the right side (seen through flip H), against 9.35 with continuous AF. After the 5 s hold the camera went back to continuous AF (9.35). The board is almost flat at this distance, so the near/far differences are small (2-7 mm), and the direction was not always as expected (the heat pipe gave 8.06, the table 8.20).
+- **Exposure metering on this HAL is weak or inverted:** metering on the white table gave a brighter snapshot (mean 92.1) than on the black shield (67.6); the snapshot-point and flipped pairs gave almost the same brightness. The regions are right, so the HAL uses the AE region little. `FLAG_AE` stays (contract), but do not expect a strong exposure change from a tap.
+- **"outside the preview" does not happen on this phone:** the preview view fills the whole display (also under the status and navigation bars), so (0.5, 0.99) and (0.5, 0.005) return 200. The rule is covered by unit tests for other layouts.
+- The focus ring shows at the tap point (screenshot).
+- No crash of our app. Images and dumps only in my scratch directory (`.../scratchpad/ftap/`).
+- During the test another client changed the zoom (2.25x) and turned in-sensor zoom **on** (it was off before). I set the zoom back to 1x. I left in-sensor zoom on, because a person probably turned it on.
+
+End state: zoom 1x, torch off, flips false, in-sensor zoom `on` (changed by another client during the test, see above).
+
+
+### Round: highlight boxes (`POST /v1/overlay`)
+
+Contract: `POST /v1/overlay {"boxes": [{snapshot_x, snapshot_y, width, height, label}]}` and `CameraStatus.overlay_boxes` (changed by the orchestrator).
+
+Code:
+
+- `Overlay.kt` (pure): `OverlayRequest`/`OverlayBox` (strict floats, a required string label), `OverlayLogic.validate` (at most 8 boxes, finite values, x and y >= 0, width and height > 0, the box inside the image with a 1e-4 float tolerance, label <= 32 characters), `rescale` (zoom around the centre by zoom now / zoom at the call), `surfaceToImage` (the inverse of the focus mapping), `snapshotToView` (snapshot rotation back to the surface, surface to the upright preview, the PreviewView FILL crop or FIT letterbox, then the preview flips), `boxToView` (null when no part is in the view).
+- `OverlayView`: a view with the preview's bounds, above the preview and below the label layer. It is never mirrored. It draws a green 3 dp border and the label (12 sp, white on a dark background, above the box or inside its top edge).
+- `CameraController`: the boxes, the zoom at the call, and the 10-minute timer (`Handler`) in one place, through `ControlGate`. `overlayRects` builds the geometry from the camera: zoom now, snapshot rotation, preview rotation (`getSensorRotationDegrees(ROTATION_0)`), the ImageCapture resolution, and the preview scale type and flips. The view redraws on a zoom change, a rotation change, a flip change, and an overlay change. An app start clears the boxes (in memory only).
+- New unit tests: `OverlayLogicTest` (7: straight mapping, inverse rotation, landscape snapshot on the portrait preview, flips, zoom rescale, hidden when outside, FILL crop and FIT letterbox on the phone's 1280 x 2772 view) and `ApiServerTest` +3 (set and clear, 12 bad bodies plus the 32-character and 8-box limits, 503 and 405). 113 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+
+Check on `7fad170e` (the board moved since the last round; a new scene at about 11 cm):
+
+- Two boxes from a 1x snapshot: "BAT1" around the battery connector (x 0.43-0.55, y 0.455-0.505) and "QR" around a QR label (x 0.65-0.82, y 0.505-0.57). `overlay_boxes` 2.
+- Screenshot at 1x: "BAT1" is around the connector. "QR" is around the label at the right edge. The preview shows only the middle 62% of the image width, so it is cut off there.
+- Zoom 1x -> 2x: "BAT1" stays around the connector, now twice as large. The QR label moved almost out of the screen; only a thin strip of its box is at the right edge. Correct.
+- Flip H at 2x: the preview is mirrored, the box stays around the mirrored connector, and the labels are readable.
+- `{"boxes": []}`: `overlay_boxes` 0, no boxes on the screen.
+- A snapshot taken while the boxes were on the screen has no box, and it is in the true orientation.
+- No crash. Screenshots only in my scratch directory (`.../scratchpad/ovl/`).
+- Not done: a sideways (landscape) phone. The mapping handles it (unit test), but the label text is always drawn for portrait, so it is turned for a viewer who holds the phone sideways. The status label turns; the box labels do not.
+
+End state: no boxes, zoom 1x, torch off, flips false. In-sensor zoom was `on` before the test (set by a person). My reinstall reset it to `off`, so I turned it `on` again.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

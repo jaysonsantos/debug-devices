@@ -57,6 +57,11 @@ class phone:
     PATH_ROTATION = "/v1/rotation"
     PATH_PREVIEW = "/v1/preview"
     PATH_CAMERA = "/v1/camera"
+    PATH_FOCUS = "/v1/focus"
+    PATH_OVERLAY = "/v1/overlay"
+    # POST /v1/overlay limits (docs/phone-api.md).
+    OVERLAY_MAX_BOXES = 8
+    OVERLAY_MAX_LABEL = 32
     PATH_SNAPSHOT = "/v1/snapshot"
 
 

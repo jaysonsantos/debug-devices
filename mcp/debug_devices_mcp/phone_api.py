@@ -3,10 +3,10 @@
 from datetime import timedelta
 from enum import StrEnum
 from http import HTTPMethod, HTTPStatus
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from debug_devices_mcp.constants import (
     CONTENT_TYPE_HEADER,
@@ -99,6 +99,8 @@ class CameraStatus(BaseModel):
     optics: Optics | None = None
     # None: an app from before POST /v1/camera.
     in_sensor_zoom: InSensorZoom | None = None
+    # The number of highlight boxes on the phone screen. None: an app from before POST /v1/overlay.
+    overlay_boxes: int | None = None
 
 
 class ApiErrorCode(StrEnum):
@@ -141,6 +143,46 @@ class RotationAutoRequest(BaseModel):
     auto: Literal[True] = True
 
 
+# A point in [0, 1] on the phone screen or on the snapshot, 0,0 = top left.
+# Float rounding of a box that ends on the image edge (x + width can be 1.0000000001).
+BOX_TOLERANCE = 1e-9
+type UnitCoordinate = Annotated[float, Field(ge=0, le=1)]
+
+
+class ScreenFocusRequest(BaseModel):
+    """A point on the phone screen as the screen stream shows it (natural portrait orientation)."""
+
+    screen_x: UnitCoordinate
+    screen_y: UnitCoordinate
+
+
+class SnapshotFocusRequest(BaseModel):
+    """A point on the image of /v1/snapshot now (true orientation, before the server flips)."""
+
+    snapshot_x: UnitCoordinate
+    snapshot_y: UnitCoordinate
+
+
+class OverlayBox(BaseModel):
+    """A highlight box on the image of /v1/snapshot now (true orientation), from 0 to 1, inside the image."""
+
+    snapshot_x: UnitCoordinate
+    snapshot_y: UnitCoordinate
+    width: Annotated[float, Field(gt=0, le=1)]
+    height: Annotated[float, Field(gt=0, le=1)]
+    label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
+
+    @model_validator(mode="after")
+    def _inside(self) -> OverlayBox:
+        if self.snapshot_x + self.width > 1 + BOX_TOLERANCE or self.snapshot_y + self.height > 1 + BOX_TOLERANCE:
+            raise ValueError("the box must be inside the image")
+        return self
+
+
+class OverlayRequest(BaseModel):
+    boxes: Annotated[list[OverlayBox], Field(max_length=phone.OVERLAY_MAX_BOXES)]
+
+
 class CameraSettingsRequest(BaseModel):
     in_sensor_zoom: bool
 
@@ -178,6 +220,14 @@ class PreviewNotSupportedError(PhoneError):
 
 class CameraSettingsNotSupportedError(PhoneError):
     """The app has no POST /v1/camera (an app from before it): 404."""
+
+
+class FocusNotSupportedError(PhoneError):
+    """The app has no POST /v1/focus (an app from before it): 404."""
+
+
+class OverlayNotSupportedError(PhoneError):
+    """The app has no POST /v1/overlay (an app from before it): 404."""
 
 
 class PhoneProtocolError(PhoneError):
@@ -248,6 +298,30 @@ class PhoneClient:
                 ) from exc
             raise
         return _parse(CameraStatus, phone.PATH_CAMERA, body)
+
+    async def focus(self, request: ScreenFocusRequest | SnapshotFocusRequest) -> CameraStatus:
+        """Focus and meter on one point. The answer comes at once; later statuses show scanning, then focused."""
+        try:
+            body = await self._request(HTTPMethod.POST, phone.PATH_FOCUS, request)
+        except PhoneApiError as exc:
+            if exc.status == HTTPStatus.NOT_FOUND:
+                raise FocusNotSupportedError(
+                    f"the phone app has no {phone.PATH_FOCUS}; update the phone app to focus on a point"
+                ) from exc
+            raise
+        return _parse(CameraStatus, phone.PATH_FOCUS, body)
+
+    async def overlay(self, request: OverlayRequest) -> CameraStatus:
+        """Draw highlight boxes over the camera preview on the phone screen. No boxes: remove them."""
+        try:
+            body = await self._request(HTTPMethod.POST, phone.PATH_OVERLAY, request)
+        except PhoneApiError as exc:
+            if exc.status == HTTPStatus.NOT_FOUND:
+                raise OverlayNotSupportedError(
+                    f"the phone app has no {phone.PATH_OVERLAY}; update the phone app to show highlight boxes"
+                ) from exc
+            raise
+        return _parse(CameraStatus, phone.PATH_OVERLAY, body)
 
     async def snapshot(self) -> bytes:
         return await self._request(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)

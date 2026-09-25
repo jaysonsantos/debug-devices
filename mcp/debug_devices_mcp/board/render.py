@@ -19,6 +19,8 @@ class colors:
     PIN = (120, 120, 120)
     LABEL = (60, 60, 60)
     LABEL_BACKGROUND = (255, 255, 255)
+    # The color of the phone highlight boxes (a little darker, for the white drawing).
+    GREEN = (0, 170, 50)
     # Distinct colors for highlighted parts and nets, in this order.
     HIGHLIGHTS = (
         (220, 20, 60),
@@ -58,6 +60,8 @@ class RenderOptions(BaseModel):
     highlight_nets: list[str] = Field(default_factory=list)
     crop_to_part: str | None = None
     max_side: int = defaults.RENDER_MAX_SIDE
+    # Every highlight in the green of the phone highlight boxes, instead of the palette.
+    green: bool = False
 
 
 class PixelPoint(BaseModel):
@@ -153,7 +157,7 @@ class _Renderer:
         self.font = ImageFont.load_default(size=style.FONT_SIZE)
         self.small_font = ImageFont.load_default(size=style.SMALL_FONT_SIZE)
         self.big_font = ImageFont.load_default(size=style.HIGHLIGHT_FONT_SIZE)
-        self.palette = cycle(colors.HIGHLIGHTS)
+        self.palette = cycle((colors.GREEN,) if options.green else colors.HIGHLIGHTS)
         self.notes: list[str] = []
         self.labels = 0
 

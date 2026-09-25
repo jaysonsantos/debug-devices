@@ -41,7 +41,8 @@ EVIDENCE_RULES = "\n".join(
         "supporting evidence: say so. When the question is about the physical device, confirm with phone_snapshot.",
         '4. Markings: quote the marking exactly as you see it in the photo (for example "U730"), then call '
         "board_match_marking. Say whether it is an exact match or only candidates. Never replace the visible marking "
-        "with a boardview name without saying so.",
+        "with a boardview name without saying so. After you identify a part in a photo, you may call phone_highlight "
+        "so the user sees it: say that the box is your estimate, and clear it when done.",
         "5. Use only the debug-devices MCP tools to get data about the devices. The monitor page is the user's "
         "cockpit: it shows the user what happens. Never open, fetch, screenshot, or drive the monitor page or its "
         "HTTP API (for example with a browser, a browser tool, curl, or Playwright). monitor_open and "
@@ -58,7 +59,9 @@ EVIDENCE_RULES = "\n".join(
         "zoom, assume that distance gives detail and zoom does not. When the user wants more detail without moving the "
         "phone, you may turn on phone_in_sensor_zoom and use a zoom of 2x-4x: on phones that support it, this gives "
         "real extra detail from a sensor crop. It is not optical zoom. Still take a fresh phone_snapshot after the "
-        "change.",
+        "change. When the relevant area is blurry, focus on it with phone_focus (pixels in your last phone_snapshot), "
+        "then take a fresh phone_snapshot. After the user moves or turns the board, take a fresh phone_snapshot "
+        "before you point at anything; never reuse boxes or positions from an older photo.",
         "7. Opposite board side: when boardview puts the target on the side that the phone does not see, say that the "
         "current photo cannot confirm it. Before the user turns or handles the board, tell them to isolate the power "
         "safely (disconnect the charger and the battery or bench supply) and wait for their confirmation.",

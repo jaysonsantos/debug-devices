@@ -27,7 +27,8 @@ data class CameraStatus(
     @SerialName("preview_flip_vertical") val previewFlipVertical: Boolean,
     val focus: FocusInfo?,
     val optics: Optics,
-    @SerialName("in_sensor_zoom") val inSensorZoom: InSensorZoomState
+    @SerialName("in_sensor_zoom") val inSensorZoom: InSensorZoomState,
+    @SerialName("overlay_boxes") val overlayBoxes: Int
 )
 
 @Serializable

@@ -65,11 +65,15 @@ class Route(StrEnum):
     ROTATION = "/v1/rotation"
     PREVIEW = "/v1/preview"
     CAMERA = "/v1/camera"
+    FOCUS = "/v1/focus"
+    OVERLAY = "/v1/overlay"
     FAKE_FOCUS = "/fake/focus"
     SNAPSHOT = "/v1/snapshot"
 
 
 KNOWN_PATHS = frozenset(Route)
+# An old app (from before POST /v1/preview) has none of these paths: 404.
+NEWER_PATHS = frozenset({Route.PREVIEW, Route.CAMERA, Route.FOCUS, Route.OVERLAY})
 
 
 class ContentType(StrEnum):
@@ -152,12 +156,20 @@ class CameraStatus:
     focus: dict | None = None
     optics: dict | None = None
     in_sensor_zoom: str = "off"
+    overlay_boxes: int = 0
 
 
 # The body of POST /v1/preview: exactly these fields, both booleans.
 PREVIEW_FIELDS = frozenset({"flip_horizontal", "flip_vertical"})
 # An old app (from before POST /v1/preview) sends none of these status fields.
-NEWER_STATUS_FIELDS = ("preview_flip_horizontal", "preview_flip_vertical", "focus", "optics", "in_sensor_zoom")
+NEWER_STATUS_FIELDS = (
+    "preview_flip_horizontal",
+    "preview_flip_vertical",
+    "focus",
+    "optics",
+    "in_sensor_zoom",
+    "overlay_boxes",
+)
 # The body of POST /v1/camera: exactly this field, a boolean.
 CAMERA_FIELD = "in_sensor_zoom"
 IN_SENSOR_ZOOM_ON = "on"
@@ -169,6 +181,24 @@ MIN_FOCUS_DIOPTERS = 10.0
 FOCUS_STATE = "focused"
 FOCUS_CALIBRATION = "approximate"
 OPTICS = {"focal_length_mm": 6.07, "sensor_width_mm": 9.14, "output_width_px": 4080}
+# The body of POST /v1/focus: exactly one of these pairs, each value a number in [0, 1].
+SCREEN_FOCUS_FIELDS = frozenset({"screen_x", "screen_y"})
+SNAPSHOT_FOCUS_FIELDS = frozenset({"snapshot_x", "snapshot_y"})
+# The fake camera preview on the phone screen (natural portrait, from 0 to 1): the status bar above it and the
+# controls below it are outside the preview.
+PREVIEW_SCREEN_TOP = 0.1
+PREVIEW_SCREEN_BOTTOM = 0.8
+OUTSIDE_PREVIEW = "outside the preview"
+FOCUS_FIELDS_MESSAGE = 'Send exactly "screen_x" and "screen_y", or "snapshot_x" and "snapshot_y"'
+# After POST /v1/focus, the state is "scanning" for this time, then "focused".
+FOCUS_SCAN_SECONDS = 0.3
+FOCUS_SCANNING = "scanning"
+# POST /v1/overlay: at most this many boxes, each with exactly these fields, labels at most 32 characters.
+OVERLAY_MAX_BOXES = 8
+OVERLAY_MAX_LABEL = 32
+OVERLAY_BOX_FIELDS = frozenset({"snapshot_x", "snapshot_y", "width", "height", "label"})
+# x + width and y + height may be this much above 1 (float rounding).
+OVERLAY_TOLERANCE = 1e-9
 # A test-only route (not in the contract): change the focus distance, like moving the phone.
 FAKE_FOCUS_FIELD = "distance_diopters"
 
@@ -225,6 +255,10 @@ class FakeCamera:
             },
             optics=dict(OPTICS),
         )
+        # The last focus point (the request fields) and the end of its scan: tests read them.
+        self.last_focus: dict[str, float] | None = None
+        self.last_overlay: list[dict[str, Any]] = []
+        self._scan_until = 0.0
 
     def _require_ready(self) -> None:
         if self.config.background:
@@ -240,7 +274,10 @@ class FakeCamera:
     def status(self) -> CameraStatus:
         self._require_ready()
         with self._lock:
-            return CameraStatus(**asdict(self._status))
+            status = CameraStatus(**asdict(self._status))
+        if status.focus is not None and time.monotonic() < self._scan_until:
+            status.focus = {**status.focus, "state": FOCUS_SCANNING}
+        return status
 
     def zoom_ratio(self, ratio: float) -> CameraStatus:
         self._require_ready()
@@ -280,6 +317,24 @@ class FakeCamera:
                 self._status.in_sensor_zoom = IN_SENSOR_ZOOM_UNSUPPORTED
             else:
                 self._status.in_sensor_zoom = IN_SENSOR_ZOOM_ON if in_sensor_zoom else IN_SENSOR_ZOOM_OFF
+        return self.status()
+
+    def focus(self, point: dict[str, float]) -> CameraStatus:
+        """Focus on a point: "scanning" for FOCUS_SCAN_SECONDS, then "focused"."""
+        self._require_ready()
+        if "screen_y" in point and not PREVIEW_SCREEN_TOP <= point["screen_y"] <= PREVIEW_SCREEN_BOTTOM:
+            raise ApiError(ErrorCode.BAD_REQUEST, OUTSIDE_PREVIEW)
+        with self._lock:
+            self.last_focus = dict(point)
+            self._scan_until = time.monotonic() + FOCUS_SCAN_SECONDS
+        return self.status()
+
+    def overlay(self, boxes: list[dict[str, Any]]) -> CameraStatus:
+        """Show the boxes over the preview (the fake keeps only their number and the last list for tests)."""
+        self._require_ready()
+        with self._lock:
+            self.last_overlay = list(boxes)
+            self._status.overlay_boxes = len(boxes)
         return self.status()
 
     def move_to(self, diopters: float) -> CameraStatus:
@@ -333,6 +388,21 @@ def is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def check_overlay_box(box: Any) -> None:
+    if not isinstance(box, dict) or set(box) != OVERLAY_BOX_FIELDS:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"Each box needs exactly {sorted(OVERLAY_BOX_FIELDS)}")
+    numbers = [box[name] for name in ("snapshot_x", "snapshot_y", "width", "height")]
+    if not all(is_number(value) for value in numbers):
+        raise ApiError(ErrorCode.BAD_REQUEST, "Box coordinates must be numbers")
+    x, y, width, height = numbers
+    inside = x >= 0 and y >= 0 and x + width <= 1 + OVERLAY_TOLERANCE and y + height <= 1 + OVERLAY_TOLERANCE
+    if width <= 0 or height <= 0 or not inside:
+        raise ApiError(ErrorCode.BAD_REQUEST, "A box needs width and height > 0 and must be inside the image")
+    label = box["label"]
+    if not isinstance(label, str) or len(label) > OVERLAY_MAX_LABEL:
+        raise ApiError(ErrorCode.BAD_REQUEST, f'"label" must be a string of at most {OVERLAY_MAX_LABEL} characters')
+
+
 class Handler(BaseHTTPRequestHandler):
     camera: FakeCamera  # set by make_server
     quiet: bool = False
@@ -373,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, routes: dict[str, Callable[[], None]]) -> None:
         path = self.path.split("?", 1)[0]
         route = routes.get(path)
-        known = KNOWN_PATHS - {Route.PREVIEW, Route.CAMERA} if self.camera.config.no_preview else KNOWN_PATHS
+        known = KNOWN_PATHS - NEWER_PATHS if self.camera.config.no_preview else KNOWN_PATHS
         try:
             if route is None and path in known:
                 raise ApiError(ErrorCode.METHOD_NOT_ALLOWED, f"{self.command} is not allowed on {path}")
@@ -397,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.camera.config.no_preview:
             routes[Route.PREVIEW] = self.preview
             routes[Route.CAMERA] = self.camera_settings
+            routes[Route.FOCUS] = self.focus
+            routes[Route.OVERLAY] = self.overlay
         routes[Route.FAKE_FOCUS] = self.fake_focus
         self._dispatch(routes)
 
@@ -453,6 +525,25 @@ class Handler(BaseHTTPRequestHandler):
         if set(data) != {CAMERA_FIELD} or not isinstance(data[CAMERA_FIELD], bool):
             raise ApiError(ErrorCode.BAD_REQUEST, f'Send exactly "{CAMERA_FIELD}": true or false')
         self._send_status(self.camera.camera(data[CAMERA_FIELD]))
+
+    def focus(self) -> None:
+        data = parse_body(self._read_body())
+        if set(data) not in (SCREEN_FOCUS_FIELDS, SNAPSHOT_FOCUS_FIELDS):
+            raise ApiError(ErrorCode.BAD_REQUEST, FOCUS_FIELDS_MESSAGE)
+        if not all(is_number(value) and 0 <= value <= 1 for value in data.values()):
+            raise ApiError(ErrorCode.BAD_REQUEST, "Each focus coordinate must be a number from 0 to 1")
+        self._send_status(self.camera.focus({name: float(value) for name, value in data.items()}))
+
+    def overlay(self) -> None:
+        data = parse_body(self._read_body())
+        boxes = data.get("boxes")
+        if set(data) != {"boxes"} or not isinstance(boxes, list):
+            raise ApiError(ErrorCode.BAD_REQUEST, 'Send exactly "boxes": a list')
+        if len(boxes) > OVERLAY_MAX_BOXES:
+            raise ApiError(ErrorCode.BAD_REQUEST, f"At most {OVERLAY_MAX_BOXES} boxes")
+        for box in boxes:
+            check_overlay_box(box)
+        self._send_status(self.camera.overlay(boxes))
 
     def fake_focus(self) -> None:
         data = parse_body(self._read_body())

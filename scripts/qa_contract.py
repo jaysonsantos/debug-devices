@@ -59,6 +59,8 @@ class Route(StrEnum):
     ROTATION = "/v1/rotation"
     PREVIEW = "/v1/preview"
     CAMERA = "/v1/camera"
+    FOCUS = "/v1/focus"
+    OVERLAY = "/v1/overlay"
     SNAPSHOT = "/v1/snapshot"
     UNKNOWN = "/v1/does-not-exist"
 
@@ -108,6 +110,7 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
     "rotation_locked": bool,
     "preview_flip_horizontal": bool,
     "preview_flip_vertical": bool,
+    "overlay_boxes": int,
 }
 PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
 # Objects in CameraStatus, checked by expect_focus and expect_optics.
@@ -172,6 +175,7 @@ class CameraStatus:
     rotation_locked: bool
     preview_flip_horizontal: bool
     preview_flip_vertical: bool
+    overlay_boxes: int
 
 
 class ContractError(AssertionError):
@@ -536,6 +540,8 @@ WRONG_METHODS: list[tuple[Method, Route]] = [
     (Method.GET, Route.ROTATION),
     (Method.GET, Route.PREVIEW),
     (Method.GET, Route.CAMERA),
+    (Method.GET, Route.FOCUS),
+    (Method.GET, Route.OVERLAY),
     (Method.POST, Route.STATUS),
     (Method.POST, Route.HEALTH),
     (Method.POST, Route.SNAPSHOT),
@@ -567,6 +573,8 @@ def check_after_start(ctx: Context) -> None:
     expect_start_state(ctx.status(), "after the app start")
     mode = expect_json(ctx.client.get(Route.STATUS))["in_sensor_zoom"]
     expect(mode == "off", f"after the app start: in_sensor_zoom is {mode!r}, expected off")
+    boxes = expect_json(ctx.client.get(Route.STATUS))["overlay_boxes"]
+    expect(boxes == 0, f"after the app start: overlay_boxes is {boxes!r}, expected 0")
 
 
 def check_rotation(ctx: Context) -> None:
@@ -818,6 +826,99 @@ def check_not_ready(ctx: Context) -> None:
     expect_error(ctx.client.get(Route.SNAPSHOT, timeout=ctx.snapshot_timeout), ErrorCode.CAMERA_NOT_READY)
 
 
+FOCUS_STATES = frozenset({"scanning", "focused", "unfocused"})
+OUTSIDE_PREVIEW = "outside the preview"
+# The screen edges: usually the status bar and the controls, not the preview. A full-screen preview can cover them.
+SCREEN_EDGES: list[dict[str, float]] = [{"screen_x": 0.5, "screen_y": 0.0}, {"screen_x": 0.5, "screen_y": 1.0}]
+BAD_FOCUS_BODIES: list[tuple[str, bytes]] = [
+    ("empty body", b"{}"),
+    ("screen_y missing", b'{"screen_x": 0.5}'),
+    ("snapshot_x missing", b'{"snapshot_y": 0.5}'),
+    ("both pairs", b'{"screen_x": 0.5, "screen_y": 0.5, "snapshot_x": 0.5, "snapshot_y": 0.5}'),
+    ("mixed pair", b'{"screen_x": 0.5, "snapshot_y": 0.5}'),
+    ("above 1", b'{"snapshot_x": 1.5, "snapshot_y": 0.5}'),
+    ("below 0", b'{"snapshot_x": 0.5, "snapshot_y": -0.1}'),
+    ("a string", b'{"screen_x": "0.5", "screen_y": 0.5}'),
+    ("null", b'{"snapshot_x": null, "snapshot_y": 0.5}'),
+    ("a boolean", b'{"snapshot_x": true, "snapshot_y": 0.5}'),
+]
+
+
+def expect_focus_state(raw: Response, what: str) -> None:
+    expect_status(raw)
+    focus = expect_json(raw).get("focus")
+    expect(isinstance(focus, dict), f"{what}: no focus object")
+    expect(focus["state"] in FOCUS_STATES, f"{what}: focus.state {focus['state']!r}")
+
+
+def check_focus(ctx: Context) -> None:
+    """A snapshot point and a screen point focus; bad bodies return 400. --strict: the screen edges."""
+    expect_focus_state(ctx.client.post_json(Route.FOCUS, {"snapshot_x": 0.5, "snapshot_y": 0.5}), "snapshot center")
+    expect_focus_state(ctx.client.post_json(Route.FOCUS, {"snapshot_x": 0, "snapshot_y": 1}), "snapshot corner")
+    center = ctx.client.post_json(Route.FOCUS, {"screen_x": 0.5, "screen_y": 0.5})
+    expect_focus_state(center, "screen center (the preview covers it)")
+    for name, body in BAD_FOCUS_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.FOCUS, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"focus {name}: {err}") from err
+    if not ctx.strict:
+        return
+    for point in SCREEN_EDGES:
+        raw = ctx.client.post_json(Route.FOCUS, point)
+        if raw.status == HTTP_OK:
+            expect_focus_state(raw, f"screen edge {point}")
+            ctx.notes.append(f"the preview covers the screen edge {point}")
+            continue
+        expect_error(raw, ErrorCode.BAD_REQUEST)
+        message = expect_json(raw)["message"]
+        expect(OUTSIDE_PREVIEW in message, f"screen edge {point}: message {message!r}, expected {OUTSIDE_PREVIEW!r}")
+
+
+OVERLAY_BOX = {"snapshot_x": 0.42, "snapshot_y": 0.31, "width": 0.05, "height": 0.04, "label": "U730"}
+EDGE_BOX = {"snapshot_x": 0.9, "snapshot_y": 0.8, "width": 0.1, "height": 0.2, "label": ""}
+LONGEST_LABEL = "L" * 32
+OVERLAY_MAX_BOXES = 8
+BAD_OVERLAY_BODIES: list[tuple[str, bytes]] = [
+    ("empty body", b"{}"),
+    ("boxes is not a list", b'{"boxes": {"snapshot_x": 0.1}}'),
+    ("9 boxes", json.dumps({"boxes": [OVERLAY_BOX] * (OVERLAY_MAX_BOXES + 1)}).encode()),
+    ("width 0", json.dumps({"boxes": [{**OVERLAY_BOX, "width": 0}]}).encode()),
+    ("negative height", json.dumps({"boxes": [{**OVERLAY_BOX, "height": -0.1}]}).encode()),
+    ("outside the image", json.dumps({"boxes": [{**OVERLAY_BOX, "snapshot_x": 0.98}]}).encode()),
+    ("negative x", json.dumps({"boxes": [{**OVERLAY_BOX, "snapshot_x": -0.1}]}).encode()),
+    ("label of 33 characters", json.dumps({"boxes": [{**OVERLAY_BOX, "label": "L" * 33}]}).encode()),
+    ("a string coordinate", json.dumps({"boxes": [{**OVERLAY_BOX, "width": "0.1"}]}).encode()),
+]
+
+
+def overlay_count(raw: Response, what: str) -> int:
+    expect_status(raw)
+    count = expect_json(raw).get("overlay_boxes")
+    expect(isinstance(count, int) and not isinstance(count, bool), f"{what}: overlay_boxes {count!r}")
+    return count
+
+
+def check_overlay(ctx: Context) -> None:
+    """Boxes appear in overlay_boxes, the limits hold, and an empty list removes them."""
+    boxes = [OVERLAY_BOX, EDGE_BOX, {**OVERLAY_BOX, "label": LONGEST_LABEL}]
+    shown = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": boxes}), "3 boxes")
+    expect(shown == len(boxes), f"3 boxes: overlay_boxes is {shown}")
+    expect(overlay_count(ctx.client.get(Route.STATUS), "GET status") == len(boxes), "GET status: another overlay_boxes")
+    full = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX] * OVERLAY_MAX_BOXES}), "8 boxes")
+    expect(full == OVERLAY_MAX_BOXES, f"8 boxes: overlay_boxes is {full}")
+    for name, body in BAD_OVERLAY_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.OVERLAY, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"overlay {name}: {err}") from err
+    # A refused body keeps the boxes that were there.
+    kept = overlay_count(ctx.client.get(Route.STATUS), "after refused bodies")
+    expect(kept == OVERLAY_MAX_BOXES, f"a refused body changed the boxes: overlay_boxes is {kept}")
+    cleared = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": []}), "no boxes")
+    expect(cleared == 0, f"no boxes: overlay_boxes is {cleared}")
+
+
 def check_capture_failed(ctx: Context) -> None:
     expect_error(ctx.client.get(Route.SNAPSHOT, timeout=ctx.snapshot_timeout), ErrorCode.CAPTURE_FAILED)
 
@@ -838,6 +939,8 @@ READY_CHECKS: list[Check] = [
     check_rotation,
     check_preview,
     check_camera,
+    check_focus,
+    check_overlay,
     check_rotation_bad_request,
     check_post_needs_json_content_type,
     check_snapshot,

@@ -5,8 +5,11 @@ from debug_devices_mcp.phone_api import CameraStatus
 from debug_devices_mcp.phone_screen import PhoneScreen, PhoneScreenOptions
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
+from debug_devices_mcp.scene import SCENE_TRANSCODE, SceneWatcher, screen_feed
 from debug_devices_mcp.scrcpy import ScrcpyLauncher, ScrcpyOptions
+from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
 from debug_devices_mcp.server import Services
+from debug_devices_mcp.ui.board import BoardPanel
 from debug_devices_mcp.ui.constants import SCRCPY_LOG_FILE_NAME
 from debug_devices_mcp.ui.forward import CallForwarder
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
@@ -87,6 +90,12 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             SubprocessRunner(),
             on_state=monitor.screen_changed,
         )
+        monitor.screen_mjpeg = ScreenTranscoder(monitor.screen, settings.ffmpeg_path)
+        # The scene watcher reuses the page fallback decoder when it runs, else it runs a small one of its own.
+        own = ScreenTranscoder(monitor.screen, settings.ffmpeg_path, options=SCENE_TRANSCODE)
+        monitor.scene_watcher = SceneWatcher(services.scene, screen_feed(monitor.screen_mjpeg, own))
+    services.scene.add_listener(monitor.scene_changed)
+    monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
     # When another server has the page on the configured port, this server sends its calls there.
     monitor.forwarder = CallForwarder(
         monitor.bus, RemoteMonitor(settings.ui_port, settings.webcam_timeout), monitor.is_secondary, monitor.origin

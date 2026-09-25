@@ -93,3 +93,27 @@ async def test_stop_page_ends_open_streams_without_error(tmp_path: Path, caplog:
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
     assert errors == [], [record.getMessage() for record in errors]
     assert not any("graceful shutdown" in record.getMessage() for record in caplog.records)
+
+
+async def test_until_closing_closes_the_source_when_the_client_leaves() -> None:
+    """A client that leaves cancels the response task. The source must still run its cleanup (viewer counts)."""
+    closed: list[bool] = []
+
+    async def waiting() -> AsyncGenerator[int]:
+        try:
+            yield 1
+            await asyncio.Event().wait()
+            yield 2
+        finally:
+            closed.append(True)
+
+    async def read() -> None:
+        async for _ in until_closing(waiting(), asyncio.Event()):
+            pass
+
+    reader = asyncio.create_task(read())
+    await asyncio.sleep(0.05)
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    assert closed == [True]

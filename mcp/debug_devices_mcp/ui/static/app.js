@@ -19,14 +19,21 @@ const API = {
   benchStart: "/api/bench/start",
   benchStop: "/api/bench/stop",
   phoneScreen: "/api/phone/screen",
+  phoneScreenMjpeg: "/api/phone/screen.mjpg",
   phoneRotation: "/api/phone/rotation",
   phoneOrientation: "/api/phone/orientation",
   phoneInSensorZoom: "/api/phone/in-sensor-zoom",
+  phoneFocus: "/api/phone/focus",
+  phoneClearHighlights: "/api/phone/highlight/clear",
+  board: "/api/board",
+  boardNames: "/api/board/names",
+  boardOpen: "/api/board/open",
+  boardSearch: "/api/board/search",
+  boardRegister: "/api/board/register",
   callImage: (id, index) => `/api/calls/${id}/images/${index}`,
 };
 const MAX_LOG_ROWS = 200;
 const MIN_CROP_PIXELS = 8;
-const PREVIEW_INTERVAL_MS = 500;
 const INFO_INTERVAL_MS = 3000;
 const ARGS_PREVIEW_CHARS = 120;
 const RECONNECT_MS = 2000;
@@ -37,6 +44,9 @@ const SCREEN_HEADER_BYTES = 5;
 const SCREEN_KIND = { config: 0, key: 1, delta: 2 };
 const SCREEN_RECONNECT_MS = 2000;
 const MICROSECONDS_PER_FRAME = 16666;
+// The MJPEG fallback (browsers without H.264 in WebCodecs): the page draws the image into the canvas this often.
+const FALLBACK_DRAW_MS = 100;
+const FALLBACK_RECONNECT_MS = 2000;
 const FULLSCREEN_KEY = "f";
 const FULL_SNAPSHOT_QUERY = "full=true";
 const FORM_FIELDS = "input, select, textarea";
@@ -50,6 +60,7 @@ const LIVE_ZOOM_INTERVAL_MS = 150;
 const LIVE_ZOOM_HIGHLIGHT_MS = 1200;
 const LIVE_ZOOM_KEYS = { ArrowUp: "in", ArrowRight: "in", ArrowDown: "out", ArrowLeft: "out" };
 const LIVE_ZOOM_DECIMALS = 1;
+const NEW_SNAPSHOT_KEY = "s";
 // The snapshot flips: the server applies them to the snapshot, and the phone to its camera preview.
 const FLIP_KEYS = { h: "horizontal", v: "vertical" };
 const FLIP_FIELDS = { horizontal: "flip_horizontal", vertical: "flip_vertical" };
@@ -58,6 +69,21 @@ const FULL_TURN = 360;
 const QUARTER_TURN = 90;
 const HALF_TURN = 180;
 const ROTATION_AUTO = "auto";
+// A single click on the live view focuses after this delay; a double-click (full screen) comes before it and cancels it.
+const FOCUS_CLICK_DELAY_MS = 250;
+// The ring at the click point fades in this time (the CSS animation has the same length).
+const FOCUS_RING_MS = 1000;
+// The focus label stays this long after the last focus state change.
+const FOCUS_LABEL_MS = 3000;
+// The MCP SDK text before a tool error message.
+const TOOL_ERROR_PREFIX = /^Error executing tool \w+: /;
+// A click on the snapshot that moves less than this (px) picks a registration point; more is a pan.
+const PICK_MAX_MOVE_PX = 5;
+const REGISTER_MIN_POINTS = 4;
+const BOARD_TOOL_PREFIX = "board_";
+// The note "Scene changed: highlights cleared" shows this long.
+const SCENE_NOTE_MS = 4000;
+const FOCUS_TAP_STATES = { scanning: "focusing…", focused: "focused", unfocused: "could not focus" };
 
 // endregion: constants
 
@@ -69,6 +95,7 @@ const state = {
   crop: null, // {x, y, width, height} in frame pixels
   phone: null, // PhoneState
   snapshotSeq: 0, // the phone snapshot that the page shows
+  version: null, // the code version of the server that served this page
   orientationKey: "", // the flips of the snapshot that the page shows
 };
 
@@ -200,28 +227,6 @@ function setupCropEditor() {
   });
 }
 
-function drawPreview() {
-  const img = $("webcam");
-  const canvas = $("crop-preview");
-  if (!img.complete || !img.naturalWidth) return;
-  const size = frameSize();
-  const crop = state.crop || { x: 0, y: 0, width: size.width, height: size.height };
-  // The page image can have another size than the frame; scale the crop to it.
-  const sx = img.naturalWidth / size.width;
-  const sy = img.naturalHeight / size.height;
-  if (canvas.width !== crop.width || canvas.height !== crop.height) {
-    canvas.width = crop.width;
-    canvas.height = crop.height;
-  }
-  try {
-    canvas.getContext("2d").drawImage(
-      img, crop.x * sx, crop.y * sy, crop.width * sx, crop.height * sy, 0, 0, crop.width, crop.height,
-    );
-  } catch {
-    // The image has no frame yet.
-  }
-}
-
 async function refreshWebcamInfo() {
   try {
     const info = await api("GET", API.webcamInfo);
@@ -247,7 +252,6 @@ function startWebcam() {
   $("multimeter-read").addEventListener("click", readMultimeter);
   refreshWebcamInfo();
   setInterval(refreshWebcamInfo, INFO_INTERVAL_MS);
-  setInterval(drawPreview, PREVIEW_INTERVAL_MS);
 }
 
 async function readMultimeter(event) {
@@ -301,7 +305,11 @@ function applyPhone(phone) {
     snapshotRotation.disabled = false;
   }
   showFocus(phone.focus);
+  showFocusTap(phone.focus);
+  showHighlights(phone);
+  showSceneChange(phone.scene_changed_at);
   showInSensorZoom(phone);
+  showLiveZoom(phone.status, false);
   showViewRotation();
   const orientationKey = applyOrientation(phone.orientation);
   const newOrientation = orientationKey !== state.orientationKey;
@@ -332,13 +340,38 @@ async function phoneAction(url, body, button) {
   }
 }
 
-function toggleInSensorZoom(button) {
-  phoneAction(API.phoneInSensorZoom, { enabled: !state.phone?.in_sensor_zoom_choice }, button);
+// One choice, three toggles (panel, full-screen live bar, full-screen snapshot bar): all of them wait for the
+// request (the camera rebinds, a few seconds), and all show the same state afterwards.
+async function toggleInSensorZoom() {
+  const toggles = document.querySelectorAll("[data-isz]");
+  for (const toggle of toggles) toggle.disabled = true;
+  try {
+    await phoneAction(API.phoneInSensorZoom, { enabled: !state.phone?.in_sensor_zoom_choice });
+  } finally {
+    for (const toggle of toggles) toggle.disabled = false;
+  }
+}
+
+let snapshotBusy = false;
+
+// A new phone snapshot. It arrives as a phone update with a new snapshot number: the image reloads (full size in
+// full screen) and the digital zoom resets.
+async function takeSnapshot() {
+  if (snapshotBusy) return;
+  snapshotBusy = true;
+  const buttons = [$("phone-snapshot"), ...document.querySelectorAll("[data-new-snapshot]")];
+  for (const button of buttons) button.disabled = true;
+  try {
+    await phoneAction(API.phoneSnapshot);
+  } finally {
+    for (const button of buttons) button.disabled = false;
+    snapshotBusy = false;
+  }
 }
 
 function setupPhone() {
   for (const button of document.querySelectorAll("[data-isz]")) {
-    button.addEventListener("click", () => toggleInSensorZoom(button));
+    button.addEventListener("click", toggleInSensorZoom);
   }
   $("phone-connect").addEventListener("click", (e) => phoneAction(API.phoneConnect, undefined, e.currentTarget));
   $("phone-refresh").addEventListener("click", (e) => phoneAction(API.phoneStatus, undefined, e.currentTarget));
@@ -348,7 +381,21 @@ function setupPhone() {
     phoneAction(API.phoneZoom, { ratio: Number(e.currentTarget.value) }),
   );
   $("torch").addEventListener("change", (e) => phoneAction(API.phoneTorch, { enabled: e.currentTarget.checked }));
-  $("phone-snapshot").addEventListener("click", (e) => phoneAction(API.phoneSnapshot, undefined, e.currentTarget));
+  $("phone-snapshot").addEventListener("click", takeSnapshot);
+  for (const button of document.querySelectorAll("[data-new-snapshot]")) button.addEventListener("click", takeSnapshot);
+  for (const button of document.querySelectorAll("[data-clear-highlights]")) {
+    button.addEventListener("click", () => phoneAction(API.phoneClearHighlights, undefined, button));
+  }
+  // The camera zoom in the full-screen snapshot bar: the same rate limit as the live view.
+  for (const button of document.querySelectorAll("[data-snapshot-zoom]")) {
+    button.addEventListener("click", () => liveZoomStep(button.dataset.snapshotZoom));
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== NEW_SNAPSHOT_KEY || document.fullscreenElement !== $("snapshot-view")) return;
+    if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest?.(FORM_FIELDS)) return;
+    event.preventDefault();
+    takeSnapshot();
+  });
   $("view-rotate-left").addEventListener("click", () =>
     saveViewRotation(String((viewRotation() + FULL_TURN - QUARTER_TURN) % FULL_TURN)),
   );
@@ -364,7 +411,19 @@ function setupPhone() {
 
 // region: phone screen
 
-const screenState = { decoder: null, codec: null, waitForKey: true, timestamp: 0 };
+const screenState = {
+  decoder: null,
+  codec: null,
+  waitForKey: true,
+  timestamp: 0,
+  fallback: false,
+  abort: null,
+  // The size of the last drawn frame, before the view rotation: a click maps back to it.
+  frameWidth: 0,
+  frameHeight: 0,
+};
+
+class FallbackNeeded extends Error {}
 
 // The clockwise angle of the phone screen on the page. Auto undoes the turn of the phone: the app reports the
 // counterclockwise turn of the phone (Android surface rotation) in `rotation_degrees`.
@@ -387,9 +446,13 @@ function saveViewRotation(value) {
 }
 
 function drawScreenFrame(frame) {
+  drawScreenSource(frame, frame.displayWidth, frame.displayHeight);
+  frame.close();
+}
+
+// Draw a video frame or the fallback image, turned by the view rotation, into the phone screen canvas.
+function drawScreenSource(source, width, height) {
   const canvas = $("phone-screen");
-  const width = frame.displayWidth;
-  const height = frame.displayHeight;
   const angle = viewRotation();
   // A quarter turn swaps the sides of the box, so the whole screen stays visible.
   const sideways = angle % HALF_TURN !== 0;
@@ -398,14 +461,16 @@ function drawScreenFrame(frame) {
   if (canvas.width !== boxWidth || canvas.height !== boxHeight) {
     canvas.width = boxWidth;
     canvas.height = boxHeight;
+    canvas.style.setProperty("--screen-ratio", String(boxWidth / boxHeight));
   }
+  screenState.frameWidth = width;
+  screenState.frameHeight = height;
   const context = canvas.getContext("2d");
   context.save();
   context.translate(boxWidth / 2, boxHeight / 2);
   context.rotate((angle * Math.PI) / HALF_TURN);
-  context.drawImage(frame, -width / 2, -height / 2);
+  context.drawImage(source, -width / 2, -height / 2);
   context.restore();
-  frame.close();
   canvas.hidden = false;
   $("phone-screen-note").hidden = true;
 }
@@ -415,13 +480,8 @@ function configureScreen(codec) {
   if (screenState.decoder && screenState.decoder.state !== "closed") screenState.decoder.close();
   screenState.decoder = new VideoDecoder({
     output: drawScreenFrame,
-    error: (error) => {
-      // The next key frame configures a new decoder.
-      $("phone-screen-note").textContent = `Decoder error: ${error.message}`;
-      $("phone-screen-note").hidden = false;
-      screenState.codec = null;
-      screenState.waitForKey = true;
-    },
+    // This browser cannot decode the stream after all (for example "Operation is not supported"): use MJPEG.
+    error: (error) => startFallback(`decoder error: ${error.message}`),
   });
   screenState.decoder.configure({ codec, optimizeForLatency: true });
   screenState.codec = codec;
@@ -447,8 +507,15 @@ function handleScreenMessage(kind, payload) {
   );
 }
 
+// Ask before the first decode: some browsers (for example Camoufox) have WebCodecs without H.264.
+async function checkCodec(codec) {
+  const support = await VideoDecoder.isConfigSupported({ codec, optimizeForLatency: true }).catch(() => null);
+  if (!support?.supported) throw new FallbackNeeded(`${codec} is not supported by this browser`);
+}
+
 async function readScreen() {
-  const response = await fetch(API.phoneScreen);
+  screenState.abort = new AbortController();
+  const response = await fetch(API.phoneScreen, { signal: screenState.abort.signal });
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `${response.status}`);
   const reader = response.body.getReader();
   let buffer = new Uint8Array(0);
@@ -466,7 +533,10 @@ async function readScreen() {
       if (buffer.length - offset < SCREEN_HEADER_BYTES + length) break;
       const kind = view.getUint8(4);
       const start = offset + SCREEN_HEADER_BYTES;
-      handleScreenMessage(kind, buffer.slice(start, start + length));
+      const payload = buffer.slice(start, start + length);
+      if (kind === SCREEN_KIND.config) await checkCodec(JSON.parse(new TextDecoder().decode(payload)).codec);
+      if (screenState.fallback) return;
+      handleScreenMessage(kind, payload);
       offset = start + length;
     }
     buffer = buffer.slice(offset);
@@ -475,19 +545,43 @@ async function readScreen() {
 
 async function startScreen() {
   if (typeof VideoDecoder === "undefined") {
-    $("phone-screen-note").textContent = "This browser has no WebCodecs VideoDecoder.";
+    startFallback("this browser has no WebCodecs VideoDecoder");
     return;
   }
-  for (;;) {
+  while (!screenState.fallback) {
     try {
       // A new connection gets the config and the frames since the last key frame.
       screenState.codec = null;
       await readScreen();
     } catch (error) {
-      $("phone-screen-note").textContent = `Phone screen: ${error.message}`;
+      if (error instanceof FallbackNeeded) {
+        startFallback(error.message);
+        return;
+      }
+      if (!screenState.fallback) $("phone-screen-note").textContent = `Phone screen: ${error.message}`;
     }
     await new Promise((resolve) => setTimeout(resolve, SCREEN_RECONNECT_MS));
   }
+}
+
+// The phone screen as MJPEG from the server. It is drawn into the same canvas: rotation, full screen, and the
+// zoom keys work the same way.
+function startFallback(reason) {
+  if (screenState.fallback) return;
+  screenState.fallback = true;
+  screenState.abort?.abort();
+  if (screenState.decoder && screenState.decoder.state !== "closed") screenState.decoder.close();
+  console.info(`phone screen: MJPEG fallback (${reason})`);
+  $("phone-screen-mode").hidden = false;
+  $("phone-screen-mode").title = reason;
+  const img = $("phone-screen-mjpeg");
+  img.addEventListener("error", () =>
+    setTimeout(() => (img.src = `${API.phoneScreenMjpeg}?t=${Date.now()}`), FALLBACK_RECONNECT_MS),
+  );
+  img.src = API.phoneScreenMjpeg;
+  setInterval(() => {
+    if (img.complete && img.naturalWidth) drawScreenSource(img, img.naturalWidth, img.naturalHeight);
+  }, FALLBACK_DRAW_MS);
 }
 
 // endregion: phone screen
@@ -676,6 +770,9 @@ function setupFullscreen() {
   setupSnapshotZoom();
   setupFlips();
   setupLiveZoom();
+  setupFocusTap();
+  setupHighlights();
+  setupBoard();
   const controls = document.querySelector("#phone-view .fs-controls");
   for (const button of controls.querySelectorAll("[data-zoom]")) {
     button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
@@ -748,6 +845,93 @@ function showFocus(focus) {
 
 // endregion: phone distance
 
+// region: click to focus
+
+const focusTap = { timer: null, labelTimer: null, active: false, lastState: null };
+
+// A click on the canvas -> a point on the phone screen as the stream shows it, from 0 to 1. It undoes the CSS
+// scaling and the letterbox (object-fit: contain in full screen), then the view rotation. Null outside the picture.
+function screenPoint(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  if (!screenState.frameWidth || !rect.width || !rect.height) return null;
+  const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+  const boxX = (clientX - rect.left - (rect.width - canvas.width * scale) / 2) / scale;
+  const boxY = (clientY - rect.top - (rect.height - canvas.height * scale) / 2) / scale;
+  if (boxX < 0 || boxY < 0 || boxX > canvas.width || boxY > canvas.height) return null;
+  // drawScreenSource turns the frame clockwise by the angle around the box center: turn the point back.
+  const radians = (-viewRotation() * Math.PI) / HALF_TURN;
+  const cos = Math.round(Math.cos(radians));
+  const sin = Math.round(Math.sin(radians));
+  const dx = boxX - canvas.width / 2;
+  const dy = boxY - canvas.height / 2;
+  const frameX = dx * cos - dy * sin + screenState.frameWidth / 2;
+  const frameY = dx * sin + dy * cos + screenState.frameHeight / 2;
+  const clamp = (value) => Math.min(1, Math.max(0, value));
+  return { screen_x: clamp(frameX / screenState.frameWidth), screen_y: clamp(frameY / screenState.frameHeight) };
+}
+
+function drawFocusRing(view, clientX, clientY) {
+  const rect = view.getBoundingClientRect();
+  const ring = document.createElement("span");
+  ring.className = "focus-ring";
+  ring.style.left = `${clientX - rect.left}px`;
+  ring.style.top = `${clientY - rect.top}px`;
+  view.append(ring);
+  setTimeout(() => ring.remove(), FOCUS_RING_MS);
+}
+
+function setFocusLabel(text) {
+  const label = $("focus-tap");
+  label.textContent = text;
+  label.hidden = false;
+  clearTimeout(focusTap.labelTimer);
+  focusTap.labelTimer = setTimeout(() => {
+    label.hidden = true;
+    focusTap.active = false;
+  }, FOCUS_LABEL_MS);
+}
+
+// The status poll brings the focus state: show it while a click focus is in progress.
+function showFocusTap(focus) {
+  const current = focus?.focus_state ?? null;
+  if (!focusTap.active || current === focusTap.lastState) return;
+  focusTap.lastState = current;
+  if (current) setFocusLabel(FOCUS_TAP_STATES[current] ?? current);
+}
+
+async function focusAt(view, point, clientX, clientY) {
+  drawFocusRing(view, clientX, clientY);
+  focusTap.active = true;
+  focusTap.lastState = null;
+  setFocusLabel(FOCUS_TAP_STATES.scanning);
+  try {
+    const phone = await api("POST", API.phoneFocus, point);
+    focusTap.lastState = phone.focus?.focus_state ?? null;
+    applyPhone(phone);
+  } catch (err) {
+    focusTap.active = false;
+    // For example "phone API error 400 bad_request: outside the preview".
+    setFocusLabel(err.message.replace(TOOL_ERROR_PREFIX, ""));
+  }
+}
+
+function setupFocusTap() {
+  const view = $("phone-view");
+  const canvas = $("phone-screen");
+  canvas.addEventListener("click", (event) => {
+    clearTimeout(focusTap.timer);
+    // The second click of a double-click: the dblclick handler toggles the full screen.
+    if (event.detail > 1) return;
+    const point = screenPoint(canvas, event.clientX, event.clientY);
+    if (!point) return;
+    const { clientX, clientY } = event;
+    focusTap.timer = setTimeout(() => focusAt(view, point, clientX, clientY), FOCUS_CLICK_DELAY_MS);
+  });
+  canvas.addEventListener("dblclick", () => clearTimeout(focusTap.timer));
+}
+
+// endregion: click to focus
+
 // region: snapshot flips
 
 // Show the flips on the buttons. Return a key of the flips. The live phone view gets no CSS flip: the phone
@@ -796,14 +980,19 @@ function liveZoomActive() {
   return document.fullscreenElement === $("phone-view");
 }
 
+// Every zoom ratio label (the full-screen live bar and the full-screen snapshot bar) shows the same value.
 function showLiveZoom(status, changed) {
-  const label = $("live-zoom");
   if (!status) return;
-  label.textContent = `${status.zoom_ratio.toFixed(LIVE_ZOOM_DECIMALS)}x`;
+  const labels = document.querySelectorAll("[data-zoom-ratio]");
+  for (const label of labels) {
+    label.textContent = `${status.zoom_ratio.toFixed(LIVE_ZOOM_DECIMALS)}x`;
+    if (changed) label.classList.add("changed");
+  }
   if (!changed) return;
-  label.classList.add("changed");
   clearTimeout(liveZoom.highlight);
-  liveZoom.highlight = setTimeout(() => label.classList.remove("changed"), LIVE_ZOOM_HIGHLIGHT_MS);
+  liveZoom.highlight = setTimeout(() => {
+    for (const label of labels) label.classList.remove("changed");
+  }, LIVE_ZOOM_HIGHLIGHT_MS);
 }
 
 // One zoom step at most per interval, and none while a request runs: a fast scroll drops its extra events.
@@ -817,7 +1006,7 @@ async function liveZoomStep(step) {
     applyPhone(phone);
     showLiveZoom(phone.status, true);
   } catch (error) {
-    $("live-zoom").textContent = error.message;
+    for (const label of document.querySelectorAll("[data-zoom-ratio]")) label.textContent = error.message;
   } finally {
     liveZoom.busy = false;
   }
@@ -861,6 +1050,7 @@ function applySnapshotZoom() {
   img.style.transform = scale === SNAPSHOT_ZOOM_MIN ? "" : `translate(${x}px, ${y}px) scale(${scale})`;
   img.classList.toggle("zoomed", scale > SNAPSHOT_ZOOM_MIN);
   $("snapshot-zoom").textContent = `${Number(scale.toFixed(ZOOM_LABEL_DECIMALS))}x`;
+  drawHighlights();
 }
 
 // Keep the image inside the screen: no empty band at an edge when zoomed in.
@@ -932,6 +1122,311 @@ function setupSnapshotZoom() {
 
 // endregion: snapshot zoom
 
+// region: highlights
+
+const sceneNote = { seen: undefined, timer: null };
+
+// The agent's boxes (phone_highlight) on the true-orientation snapshot, shown as the page shows the snapshot:
+// with the snapshot flips, the letterbox of the full screen view, and the wheel zoom and pan.
+function drawHighlights() {
+  const layer = $("snapshot-boxes");
+  const img = $("snapshot");
+  const boxes = state.phone?.highlights ?? [];
+  layer.replaceChildren();
+  if ((!boxes.length && !register.points.length) || !img.naturalWidth || $("snapshot-view").hidden) return;
+  const view = $("snapshot-view").getBoundingClientRect();
+  const picture = snapshotPicture();
+  const { width, height } = picture;
+  const left = picture.left - view.left;
+  const top = picture.top - view.top;
+  const flips = state.phone.orientation ?? {};
+  for (const box of boxes) {
+    const x = flips.flip_horizontal ? 1 - box.snapshot_x - box.width : box.snapshot_x;
+    const y = flips.flip_vertical ? 1 - box.snapshot_y - box.height : box.snapshot_y;
+    const element = document.createElement("div");
+    element.className = "highlight-box";
+    element.style.left = `${left + x * width}px`;
+    element.style.top = `${top + y * height}px`;
+    element.style.width = `${box.width * width}px`;
+    element.style.height = `${box.height * height}px`;
+    if (box.label) {
+      const label = document.createElement("span");
+      label.className = "highlight-label";
+      label.textContent = box.label;
+      element.append(label);
+    }
+    layer.append(element);
+  }
+  // The registration points that the user picked (already in the shown orientation).
+  for (const point of register.points) {
+    const mark = document.createElement("div");
+    mark.className = "register-mark";
+    mark.style.left = `${left + point.x * width}px`;
+    mark.style.top = `${top + point.y * height}px`;
+    const label = document.createElement("span");
+    label.textContent = point.refdes;
+    mark.append(label);
+    layer.append(mark);
+  }
+}
+
+// The shown picture of the snapshot in page pixels: after the zoom transform, inside the panel border, and without
+// the letterbox of object-fit: contain (a uniform scale, so the picture is in the middle of the box).
+function snapshotPicture() {
+  const img = $("snapshot");
+  const outer = img.getBoundingClientRect();
+  // The panel image has a border (the full screen one has none, so the zoom does not scale it).
+  const border = img.clientLeft;
+  const box = { left: outer.left + border, top: outer.top + border, width: outer.width - 2 * border, height: outer.height - 2 * border };
+  const scale = Math.min(box.width / img.naturalWidth, box.height / img.naturalHeight);
+  const width = img.naturalWidth * scale;
+  const height = img.naturalHeight * scale;
+  return { left: box.left + (box.width - width) / 2, top: box.top + (box.height - height) / 2, width, height };
+}
+
+function showHighlights(phone) {
+  const count = phone.highlights?.length ?? 0;
+  for (const button of document.querySelectorAll("[data-clear-highlights]")) {
+    button.disabled = count === 0;
+    button.title = count ? `Remove the ${count} highlight box(es) from the phone and the page` : "No highlight boxes";
+  }
+  drawHighlights();
+}
+
+function showSceneChange(changedAt) {
+  const first = sceneNote.seen === undefined;
+  const changed = changedAt !== sceneNote.seen;
+  sceneNote.seen = changedAt ?? null;
+  // A page that opens later shows only a recent change.
+  const recent = changedAt && Date.now() - Date.parse(changedAt) < SCENE_NOTE_MS;
+  if (!changedAt || !changed || (first && !recent)) return;
+  const notes = document.querySelectorAll(".scene-note");
+  for (const note of notes) note.hidden = false;
+  clearTimeout(sceneNote.timer);
+  sceneNote.timer = setTimeout(() => {
+    for (const note of notes) note.hidden = true;
+  }, SCENE_NOTE_MS);
+}
+
+function setupHighlights() {
+  $("snapshot").addEventListener("load", drawHighlights);
+  // The full screen change and window resizes move the image.
+  new ResizeObserver(drawHighlights).observe($("snapshot-view"));
+  document.addEventListener("fullscreenchange", () => requestAnimationFrame(drawHighlights));
+}
+
+// endregion: highlights
+
+// region: board panel
+
+const board = { names: { parts: [], nets: [] }, partKeys: new Map(), sha: null, loading: false };
+const register = { points: [], pick: null, down: null };
+
+function showBoardError(message) {
+  const error = $("board-error");
+  error.textContent = message ?? "";
+  error.hidden = !message;
+}
+
+async function loadBoard() {
+  let view;
+  try {
+    view = await api("GET", API.board);
+  } catch (error) {
+    $("board-info").textContent = error.message;
+    return;
+  }
+  const summary = view.summary;
+  $("board-info").textContent = summary
+    ? `${summary.path.split("/").pop()} · ${summary.parts} parts · ${summary.nets} nets`
+    : "no board";
+  if (summary && !$("board-path").value) $("board-path").value = summary.path;
+  const remote = $("board-remote");
+  const remoteOther = view.remote && view.remote.path !== summary?.path;
+  remote.hidden = !remoteOther;
+  remote.textContent = remoteOther ? `${view.remote.origin} opened ${view.remote.path}. Press Open to use it here.` : "";
+  if (remoteOther && !summary) $("board-path").value = view.remote.path;
+  for (const element of $("board-search-form").elements) element.disabled = !summary;
+  const registration = view.registration;
+  $("board-registration").textContent = registration
+    ? `${registration.side}, ${registration.refdes.length} parts${registration.stale ? " · stale: the board moved" : ""}`
+    : "none";
+  if (summary && summary.sha256 !== board.sha) await loadBoardNames(summary.sha256);
+}
+
+async function loadBoardNames(sha) {
+  const names = await api("GET", API.boardNames);
+  board.names = names;
+  board.sha = sha;
+  board.partKeys = new Map(names.parts.map((name) => [name.toLowerCase(), name]));
+  const options = [...names.parts, ...names.nets].map((name) => {
+    const option = document.createElement("option");
+    option.value = name;
+    return option;
+  });
+  $("board-names").replaceChildren(...options);
+}
+
+async function openBoard(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  showBoardError(null);
+  try {
+    await api("POST", API.boardOpen, { path: $("board-path").value.trim() });
+    await loadBoard();
+  } catch (error) {
+    showBoardError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function fact(list, name, value) {
+  const term = document.createElement("dt");
+  term.textContent = name;
+  const detail = document.createElement("dd");
+  detail.textContent = value;
+  list.append(term, detail);
+}
+
+function showSearch(result) {
+  const facts = $("board-facts");
+  facts.replaceChildren();
+  if (result.part) {
+    const part = result.part;
+    fact(facts, "Part", part.name + (part.mfgcode ? ` (${part.mfgcode})` : ""));
+    fact(facts, "Side", part.side);
+    fact(facts, "Position", `x ${part.x_mm} mm, y ${part.y_mm} mm`);
+    fact(facts, "Pins", String(part.pin_count));
+    const more = part.nets_total > part.nets.length ? ` … (${part.nets_total})` : "";
+    fact(facts, "Nets", part.nets.join(", ") + more);
+  }
+  if (result.net) {
+    const net = result.net;
+    fact(facts, "Net", net.name);
+    fact(facts, "Parts", `${net.part_count} (${net.pin_count} pins): ${net.parts.join(", ")}`);
+    fact(facts, "Test points", net.test_points.join(", ") || "none");
+  }
+  if (result.others.length) fact(facts, "Also", result.others.join(", "));
+  if (result.message) fact(facts, "Note", result.message);
+  const highlight = $("board-highlight");
+  highlight.textContent = result.highlight ? `Camera: ${result.highlight.message}` : "";
+  highlight.classList.toggle("shown", Boolean(result.highlight?.shown));
+  const render = $("board-render");
+  render.hidden = !result.render_call_id;
+  if (result.render_call_id) render.src = API.callImage(result.render_call_id, 0);
+  $("board-result").hidden = false;
+}
+
+async function searchBoard(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  const query = $("board-query").value.trim();
+  if (!query) return;
+  button.disabled = true;
+  showBoardError(null);
+  try {
+    showSearch(await api("POST", API.boardSearch, { query }));
+  } catch (error) {
+    showBoardError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function showRegisterPoints() {
+  const list = $("register-points");
+  list.replaceChildren(
+    ...register.points.map((point) => {
+      const item = document.createElement("li");
+      item.textContent = `${point.refdes} at ${(point.x * 100).toFixed(1)}%, ${(point.y * 100).toFixed(1)}%`;
+      return item;
+    }),
+  );
+  $("register-undo").disabled = register.points.length === 0;
+  $("register-send").disabled = register.points.length < REGISTER_MIN_POINTS;
+  $("snapshot").classList.toggle("picking", Boolean(register.pick));
+  drawHighlights();
+}
+
+function startPick() {
+  const typed = $("board-query").value.trim().toLowerCase();
+  const refdes = board.partKeys.get(typed);
+  const status = $("register-status");
+  if (!refdes) {
+    status.textContent = "Type a part name of the open board in the search box first.";
+    return;
+  }
+  if ($("snapshot-view").hidden) {
+    status.textContent = "Take a phone snapshot first.";
+    return;
+  }
+  register.pick = refdes;
+  status.textContent = `Click the center of ${refdes} on the snapshot.`;
+  showRegisterPoints();
+}
+
+function setupSnapshotPick() {
+  const img = $("snapshot");
+  img.addEventListener("pointerdown", (event) => {
+    register.down = { x: event.clientX, y: event.clientY };
+  });
+  img.addEventListener("click", (event) => {
+    const down = register.down;
+    if (!register.pick || !down) return;
+    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > PICK_MAX_MOVE_PX) return;
+    const picture = snapshotPicture();
+    const x = (event.clientX - picture.left) / picture.width;
+    const y = (event.clientY - picture.top) / picture.height;
+    if (x < 0 || y < 0 || x > 1 || y > 1) return;
+    register.points.push({ refdes: register.pick, x, y });
+    $("register-status").textContent = `${register.pick} placed. Pick the next part.`;
+    register.pick = null;
+    showRegisterPoints();
+  });
+}
+
+async function sendRegistration(event) {
+  const button = event.currentTarget;
+  const status = $("register-status");
+  button.disabled = true;
+  try {
+    const result = await api("POST", API.boardRegister, { side: $("register-side").value, points: register.points });
+    const check = result.checked ? "checked" : "exact fit of 4 parts: add a 5th part to check it";
+    register.points = [];
+    showRegisterPoints();
+    await loadBoard();
+    status.textContent = `Registered: error ${result.rms_error_px} px (max ${result.max_error_px} px), ${check}.`;
+  } catch (error) {
+    status.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+function boardCallFinished(call) {
+  if (!call.tool.startsWith(BOARD_TOOL_PREFIX) || call.status === "running" || board.loading) return;
+  board.loading = true;
+  loadBoard().finally(() => {
+    board.loading = false;
+  });
+}
+
+function setupBoard() {
+  $("board-open-form").addEventListener("submit", openBoard);
+  $("board-search-form").addEventListener("submit", searchBoard);
+  $("register-pick").addEventListener("click", startPick);
+  $("register-undo").addEventListener("click", () => {
+    register.points.pop();
+    showRegisterPoints();
+  });
+  $("register-send").addEventListener("click", sendRegistration);
+  setupSnapshotPick();
+  loadBoard();
+}
+
+// endregion: board panel
+
 // region: bench
 
 function benchSummary(result) {
@@ -977,12 +1472,23 @@ function connectEvents() {
     link.textContent = "disconnected";
     link.className = "badge error";
   });
-  source.addEventListener("call", (event) => renderCall(JSON.parse(event.data)));
+  source.addEventListener("call", (event) => {
+    const call = JSON.parse(event.data);
+    renderCall(call);
+    boardCallFinished(call);
+  });
+  // After a reconnect, another code version means a new server (dev reload): load the new page.
+  source.addEventListener("version", (event) => {
+    const { version } = JSON.parse(event.data);
+    if (state.version === null) state.version = version;
+    else if (version !== state.version) window.location.reload();
+  });
   source.addEventListener("phone", (event) => applyPhone(JSON.parse(event.data)));
 }
 
 async function loadState() {
   const view = await api("GET", API.state);
+  state.version = view.version;
   applySettings(view.settings);
   applyPhone(view.phone);
   if (view.webcam?.width) state.frame = { width: view.webcam.width, height: view.webcam.height };

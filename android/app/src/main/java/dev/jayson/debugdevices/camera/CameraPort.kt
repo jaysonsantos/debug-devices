@@ -12,6 +12,12 @@ interface CameraPort {
 
     suspend fun setTorch(enabled: Boolean): CameraStatus
 
+    /** Shows highlight boxes over the preview (not in snapshots). An empty list clears them. */
+    suspend fun setOverlay(boxes: List<OverlayBox>): CameraStatus
+
+    /** Focuses and meters on one point. The response comes at once; the focus state shows the progress. */
+    suspend fun focusAt(target: FocusTarget): CameraStatus
+
     /** Turns the vendor in-sensor zoom on or off. It binds again and keeps the zoom and the torch. */
     suspend fun setInSensorZoom(enabled: Boolean): CameraStatus
 

@@ -28,6 +28,22 @@ class ApiServerTest {
         /** Like the real camera: `unsupported` without the vendor keys. */
         var vendorSupported = true
         var rebinds = 0
+        var focusTarget: FocusTarget? = null
+        var overlay: List<OverlayBox> = emptyList()
+
+        override suspend fun setOverlay(boxes: List<OverlayBox>): CameraStatus = gate.control {
+            overlay = boxes
+            status().copy(overlayBoxes = boxes.size).also { status = it }
+        }
+
+        override suspend fun focusAt(target: FocusTarget): CameraStatus = gate.control {
+            // Like the real camera: the lower tenth of the screen is outside the preview.
+            if (target is FocusTarget.Screen && target.y > OUTSIDE_PREVIEW_Y) {
+                throw ApiException(ErrorCode.BAD_REQUEST, Constants.Messages.FOCUS_OUTSIDE_PREVIEW)
+            }
+            focusTarget = target
+            status().let { it.copy(focus = it.focus?.copy(state = FocusState.SCANNING)) }.also { status = it }
+        }
 
         override suspend fun setInSensorZoom(enabled: Boolean): CameraStatus = gate.control {
             val current = status()
@@ -95,7 +111,8 @@ class ApiServerTest {
             minDistanceDiopters = 10f
         ),
         optics = Optics(focalLengthMm = 6.07f, sensorWidthMm = 9.14f, outputWidthPx = 4080),
-        inSensorZoom = InSensorZoomState.OFF
+        inSensorZoom = InSensorZoomState.OFF,
+        overlayBoxes = 0
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -127,7 +144,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off"}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0}""",
             body
         )
     }
@@ -376,6 +393,118 @@ class ApiServerTest {
     }
 
     @Test
+    fun `overlay sets and clears boxes`() {
+        val camera = ready(ready)
+        api(camera) {
+            val body =
+                """{"boxes":[{"snapshot_x":0.42,"snapshot_y":0.31,"width":0.05,"height":0.04,"label":"U730"},""" +
+                    """{"snapshot_x":0,"snapshot_y":0,"width":1,"height":1,"label":""}]}"""
+            val set = postJson(Constants.Paths.OVERLAY, body)
+            assertEquals(HttpStatusCode.OK, set.status)
+            assertEquals(2, set.status().overlayBoxes)
+            assertEquals("U730", camera.overlay.first().label)
+            assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""overlay_boxes":2"""))
+            assertEquals(0, postJson(Constants.Paths.OVERLAY, """{"boxes":[]}""").status().overlayBoxes)
+        }
+    }
+
+    @Test
+    fun `overlay bad bodies are 400`() = api(ready(ready)) {
+        fun box(x: String = "0.1", y: String = "0.1", w: String = "0.2", h: String = "0.2", label: String = "\"R1\"") =
+            """{"snapshot_x":$x,"snapshot_y":$y,"width":$w,"height":$h,"label":$label}"""
+        val nine = (1..9).joinToString(",") { box() }
+        val bodies = listOf(
+            "{}",
+            """{"boxes":null}""",
+            """{"boxes":[$nine]}""",
+            """{"boxes":[${box(w = "0")}]}""",
+            """{"boxes":[${box(h = "-0.1")}]}""",
+            """{"boxes":[${box(x = "0.9", w = "0.2")}]}""",
+            """{"boxes":[${box(y = "-0.01")}]}""",
+            """{"boxes":[${box(x = "\"0.1\"")}]}""",
+            """{"boxes":[${box(label = "\"" + "x".repeat(33) + "\"")}]}""",
+            """{"boxes":[${box(label = "5")}]}""",
+            """{"boxes":[{"snapshot_x":0.1,"snapshot_y":0.1,"width":0.2,"height":0.2}]}""",
+            """{"boxes":[],"color":"red"}"""
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.OVERLAY, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+        assertEquals(
+            HttpStatusCode.OK,
+            postJson(
+                Constants.Paths.OVERLAY,
+                """{"boxes":[${box(
+                    label =
+                        "\"" + "x".repeat(32) + "\""
+                )}]}"""
+            ).status
+        )
+        assertEquals(
+            HttpStatusCode.OK,
+            postJson(
+                Constants.Paths.OVERLAY,
+                """{"boxes":[${(1..8).joinToString(",") {
+                    box()
+                }}]}"""
+            ).status
+        )
+    }
+
+    @Test
+    fun `overlay is 503 before the start state and 405 on get`() = api(FakeCamera(ready)) {
+        assertEquals(HttpStatusCode.ServiceUnavailable, postJson(Constants.Paths.OVERLAY, """{"boxes":[]}""").status)
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get(Constants.Paths.OVERLAY).status)
+    }
+
+    @Test
+    fun `focus on a screen point and on a snapshot point`() {
+        val camera = ready(ready)
+        api(camera) {
+            val screen = postJson(Constants.Paths.FOCUS, """{"screen_x":0.4,"screen_y":0.6}""")
+            assertEquals(HttpStatusCode.OK, screen.status)
+            assertEquals(FocusState.SCANNING, screen.status().focus?.state)
+            assertEquals(FocusTarget.Screen(0.4f, 0.6f), camera.focusTarget)
+            val snapshot = postJson(Constants.Paths.FOCUS, """{"snapshot_x":0,"snapshot_y":1}""")
+            assertEquals(HttpStatusCode.OK, snapshot.status)
+            assertEquals(FocusTarget.Snapshot(0f, 1f), camera.focusTarget)
+        }
+    }
+
+    @Test
+    fun `focus bad bodies are 400`() = api(ready(ready)) {
+        val bodies = listOf(
+            "{}",
+            """{"screen_x":0.4}""",
+            """{"screen_x":0.4,"screen_y":0.6,"snapshot_x":0.1,"snapshot_y":0.1}""",
+            """{"screen_x":"0.4","screen_y":0.6}""",
+            """{"screen_x":1.5,"screen_y":0.6}""",
+            """{"snapshot_x":-0.1,"snapshot_y":0.6}""",
+            """{"screen_x":0.4,"screen_y":0.6,"x":1}""",
+            """{"screen_x":null,"screen_y":0.6}"""
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.FOCUS, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+        val outside = postJson(Constants.Paths.FOCUS, """{"screen_x":0.5,"screen_y":0.95}""")
+        assertEquals(HttpStatusCode.BadRequest, outside.status)
+        assertEquals("outside the preview", outside.error().message)
+    }
+
+    @Test
+    fun `focus is 503 before the start state and 405 on get`() = api(FakeCamera(ready)) {
+        assertEquals(
+            HttpStatusCode.ServiceUnavailable,
+            postJson(Constants.Paths.FOCUS, """{"screen_x":0.5,"screen_y":0.5}""").status
+        )
+        assertEquals(HttpStatusCode.MethodNotAllowed, client.get(Constants.Paths.FOCUS).status)
+    }
+
+    @Test
     fun `in-sensor zoom on and off keeps zoom and torch`() {
         val camera = ready(ready.copy(zoomRatio = 3f, torchEnabled = true))
         api(camera) {
@@ -496,6 +625,7 @@ class ApiServerTest {
     private companion object {
         const val APP_VERSION = "0.1.0"
         const val CONCURRENT_REQUESTS = 10
+        const val OUTSIDE_PREVIEW_Y = 0.9f
         const val SENSOR_ROTATION = android.view.Surface.ROTATION_0
     }
 }

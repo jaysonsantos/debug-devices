@@ -4,11 +4,13 @@ Pure math on `CameraStatus.focus` and `CameraStatus.optics` (docs/phone-api.md).
 `output_width_px * focal_length_mm / (sensor_width_mm * distance_mm)`. Zoom does not change it: zoom crops.
 """
 
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
 
-from debug_devices_mcp.phone_api import CameraStatus, FocusCalibration, InSensorZoom, Optics
+from debug_devices_mcp.images import SnapshotOrientation
+from debug_devices_mcp.phone_api import CameraStatus, FocusCalibration, InSensorZoom, Optics, SnapshotFocusRequest
 
 CM_PER_METER = 100
 MM_PER_CM = 10
@@ -138,6 +140,51 @@ class PhoneStatusReport(CameraStatus):
     advice_text: str = ""
     sensor_zoom_boost: bool = False
 
+    # True when the board or the phone moved since the last phone_snapshot (the monitor watches the phone screen).
+    # Take a fresh phone_snapshot before you point at anything.
+    scene_changed: bool = False
+    scene_changed_at: datetime | None = None
+
     @classmethod
     def of(cls, status: CameraStatus) -> PhoneStatusReport:
         return cls(**status.model_dump(), **focus_report(status).model_dump())
+
+    def with_scene(self, changed_at: datetime | None) -> PhoneStatusReport:
+        return self.model_copy(update={"scene_changed": changed_at is not None, "scene_changed_at": changed_at})
+
+
+# region: focus point
+
+
+class FocusSource(StrEnum):
+    # x, y are pixels in the last phone_snapshot image that the agent got (after the flips and the scaling).
+    SNAPSHOT = "snapshot"
+    # x, y are a point on the phone screen, from 0 to 1 (the page sends this).
+    SCREEN = "screen"
+
+
+class SnapshotGeometry(BaseModel):
+    """The last phone_snapshot image as the agent saw it: its size and the flips in it."""
+
+    width: int
+    height: int
+    orientation: SnapshotOrientation
+
+
+class PointOutsideError(ValueError):
+    """The point is not on the image."""
+
+
+def snapshot_focus_request(x: float, y: float, geometry: SnapshotGeometry) -> SnapshotFocusRequest:
+    """Pixels in the flipped, scaled image -> a point from 0 to 1 on the true-orientation snapshot of the phone."""
+    if not (0 <= x <= geometry.width and 0 <= y <= geometry.height):
+        raise PointOutsideError(f"({x:g}, {y:g}) is outside the last snapshot ({geometry.width}x{geometry.height} px)")
+    unit_x, unit_y = x / geometry.width, y / geometry.height
+    if geometry.orientation.flip_horizontal:
+        unit_x = 1 - unit_x
+    if geometry.orientation.flip_vertical:
+        unit_y = 1 - unit_y
+    return SnapshotFocusRequest(snapshot_x=unit_x, snapshot_y=unit_y)
+
+
+# endregion: focus point

@@ -34,14 +34,12 @@ async def until_closing[T](source: AsyncGenerator[T], closing: asyncio.Event) ->
     with an error after its graceful time.
     """
     closed = asyncio.ensure_future(closing.wait())
+    item: asyncio.Future[T] | None = None
     try:
         while True:
             item = asyncio.ensure_future(anext(source))
             await asyncio.wait({item, closed}, return_when=asyncio.FIRST_COMPLETED)
             if not item.done():
-                item.cancel()
-                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
-                    await item
                 return
             try:
                 yield item.result()
@@ -49,4 +47,10 @@ async def until_closing[T](source: AsyncGenerator[T], closing: asyncio.Event) ->
                 return
     finally:
         closed.cancel()
+        # A read can still run inside the source (the page stopped, or the client left and the response task was
+        # cancelled). Stop it first: aclose() on a running generator fails, and then its cleanup never runs.
+        if item is not None and not item.done():
+            item.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await item
         await source.aclose()

@@ -10,7 +10,7 @@ import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -21,22 +21,27 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
+from debug_devices_mcp.board.tools import BoardSummary
 from debug_devices_mcp.camera_choice import InSensorZoomChoice
 from debug_devices_mcp.constants import images
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
 from debug_devices_mcp.orientation import OrientationState
-from debug_devices_mcp.phone_api import CameraStatus, PhoneError
+from debug_devices_mcp.phone_api import CameraStatus, OverlayBox, PhoneError
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
+from debug_devices_mcp.scene import SceneWatcher
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
+from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
 from debug_devices_mcp.ui.app import create_app
+from debug_devices_mcp.ui.board import BoardPanel, RemoteBoard
 from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details, http, labels, tools
 from debug_devices_mcp.ui.desktop import BrowserOpener
 from debug_devices_mcp.ui.events import CallSource, CallStatus, EventBus, ToolCall, current_call, truncate
 from debug_devices_mcp.ui.forward import CallForwarder, origin_label, remove_token, token_dir, write_token
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
+from debug_devices_mcp.ui.version import code_version
 from debug_devices_mcp.webcam import Crop
-from debug_devices_mcp.webcam_stream import FrameSource, WebcamStream
+from debug_devices_mcp.webcam_stream import FrameSource, WebcamStream, crop_jpeg
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +53,20 @@ STATUS_POLL_SECONDS = 1
 # The whole cleanup at exit: web server, webcam stream, scrcpy, phone screen (adb forward --remove).
 STOP_TIMEOUT_SECONDS = 15
 TEXT_SEPARATOR = "\n"
+HIGHLIGHT_TOOLS = frozenset({tools.PHONE_HIGHLIGHT, tools.BOARD_LOCATE_IN_PHOTO})
+# board_locate_in_photo has the phone_highlight result in this field; phone_highlight is the result itself.
+HIGHLIGHT_FIELD = "highlight"
+HIGHLIGHT_BOXES_FIELD = "boxes"
+BOARD_PATH_ARGUMENT = "path"
 PHONE_STATUS_TOOLS = frozenset(
-    {tools.PHONE_STATUS, tools.PHONE_ZOOM, tools.PHONE_TORCH, tools.PHONE_ROTATION, tools.PHONE_IN_SENSOR_ZOOM}
+    {
+        tools.PHONE_STATUS,
+        tools.PHONE_ZOOM,
+        tools.PHONE_TORCH,
+        tools.PHONE_ROTATION,
+        tools.PHONE_IN_SENSOR_ZOOM,
+        tools.PHONE_FOCUS,
+    }
 )
 
 type ToolCaller = Callable[..., Awaitable[Any]]
@@ -59,6 +76,19 @@ type StatusReader = Callable[[], Awaitable[CameraStatus]]
 type ForwardRemover = Callable[[str], Awaitable[None]]
 type Clock = Callable[[], float]
 type SnapshotReader = Callable[[], Awaitable[bytes]]
+
+
+NO_CROP_TEXT = "none (the whole frame)"
+
+
+def crop_text(crop: Crop | None) -> str:
+    return NO_CROP_TEXT if crop is None else f"{crop.x},{crop.y},{crop.width},{crop.height}"
+
+
+def crop_preview(jpeg: bytes, crop: Crop | None) -> bytes:
+    """The area that multimeter_read sends, scaled down for the log."""
+    area = jpeg if crop is None else crop_jpeg(jpeg, crop)
+    return downscale_jpeg(area, defaults.CROP_PREVIEW_MAX_SIDE).data
 
 
 class ConnectedPhone(BaseModel):
@@ -213,6 +243,14 @@ class Monitor:
         # The page of another MCP server on the configured port (the primary). Then this server serves no page and
         # sends its calls there.
         self.primary_url: str | None = None
+        # The phone screen as MJPEG for browsers without H.264 in WebCodecs (set by setup with the phone screen).
+        self.screen_mjpeg: ScreenTranscoder | None = None
+        # Watches the phone screen for a moved board or phone while a phone session runs (setup sets it).
+        self.scene_watcher: SceneWatcher | None = None
+        # The Board panel of the page (setup sets it, with the MCP server's board session).
+        self.board_panel: BoardPanel | None = None
+        # Changes with each server start and each change of the page files: an open page reloads itself.
+        self.code_version = code_version()
         self.client_name: str | None = None
         self.forwarder: CallForwarder | None = None
         self.token_dir: Path = token_dir()
@@ -343,12 +381,46 @@ class Monitor:
             await self._phone_connected(call, structured)
         elif call.tool in PHONE_STATUS_TOOLS and structured is not None:
             self._phone_status(structured)
+        elif call.tool in HIGHLIGHT_TOOLS and structured is not None:
+            self._highlights(structured)
+        elif call.tool == tools.BOARD_OPEN and structured is not None and self.board_panel is not None:
+            with contextlib.suppress(ValidationError):
+                self.board_panel.summary = BoardSummary.model_validate(structured)
         elif call.tool == tools.PHONE_SNAPSHOT and result_images:
             self.last_snapshot = result_images[0]
             # The full image of the same call, for the full screen view. Without it, the scaled one.
             self.last_snapshot_raw = self._full_snapshots.pop(call.id, None)
             self._rendered.clear()
             self.bus.update_phone(has_snapshot=True, snapshot_seq=self.bus.phone.snapshot_seq + 1)
+
+    def _highlights(self, structured: dict[str, Any]) -> None:
+        """phone_highlight, or board_locate_in_photo with `highlight`: the page draws the same boxes."""
+        nested = structured.get(HIGHLIGHT_FIELD)
+        result = nested if isinstance(nested, dict) else structured
+        if HIGHLIGHT_BOXES_FIELD not in result:
+            return
+        try:
+            boxes = [OverlayBox.model_validate(box) for box in result[HIGHLIGHT_BOXES_FIELD]]
+        except ValidationError as exc:
+            logger.warning("unexpected highlight result: %s", exc)
+            return
+        self.bus.update_phone(highlights=boxes)
+
+    def remote_board(self) -> RemoteBoard | None:
+        """The last board that another MCP server opened (its board_open call came to this page)."""
+        for call in reversed(self.bus.calls()):
+            path = call.arguments.get(BOARD_PATH_ARGUMENT)
+            if call.tool == tools.BOARD_OPEN and call.origin and call.status is CallStatus.OK and isinstance(path, str):
+                return RemoteBoard(path=path, origin=call.origin)
+        return None
+
+    async def scene_changed(self, changed_at: datetime) -> None:
+        """The board or the phone moved: the server cleared the boxes; the page drops them and shows a note."""
+        self.bus.update_phone(highlights=[], scene_changed_at=changed_at)
+
+    def _start_scene_watch(self) -> None:
+        if self.scene_watcher is not None:
+            self.scene_watcher.start()
 
     def _phone_status(self, structured: dict[str, Any]) -> None:
         try:
@@ -367,6 +439,7 @@ class Monitor:
         if self.screen is not None:
             started = self.screen.ensure_running(connected.serial)
             call.set_detail(details.SCREEN, "started" if started else "already running")
+            self._start_scene_watch()
         if self.scrcpy is None:
             return
         try:
@@ -404,6 +477,20 @@ class Monitor:
         for listener in self._listeners:
             listener(self.effective)
         return self.effective
+
+    async def log_crop_change(self, before: Crop | None) -> None:
+        """One log entry for a saved crop change, with a small image of the area that multimeter_read sends."""
+        after = self.effective.webcam_crop
+        if after == before:
+            return
+        text = crop_text(after)
+        async with self.bus.record(tools.WEBCAM_CROP, {"crop": text}, CallSource.UI) as call:
+            call.summary = text
+            frame = self.stream.latest if self.stream is not None else None
+            if frame is None:
+                call.summary = f"{text} (no webcam frame for a preview)"
+                return
+            call.attach_image(await asyncio.to_thread(crop_preview, frame.jpeg, after), labels.CROP_PREVIEW)
 
     @property
     def settings_path(self) -> Path:
@@ -625,6 +712,8 @@ class Monitor:
 
     async def stop_phone(self) -> None:
         """Stop the phone screen, scrcpy, and the status poll, and remove the adb forward of the camera API."""
+        if self.scene_watcher is not None:
+            await self.scene_watcher.stop()
         if self.screen is not None:
             await self.screen.stop()
         if self.scrcpy is not None:
@@ -699,6 +788,10 @@ class Monitor:
             await self.stream.stop()
         if self.scrcpy is not None:
             await self.scrcpy.stop()
+        if self.scene_watcher is not None:
+            await self.scene_watcher.stop()
+        if self.screen_mjpeg is not None:
+            await self.screen_mjpeg.stop()
         if self.screen is not None:
             await self.screen.stop()
         if self._status_task is not None:

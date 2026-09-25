@@ -51,6 +51,8 @@ class defaults:
     PAGE_STOP_DELAY = timedelta(milliseconds=500)
     PROCESS_STOP_TIMEOUT = timedelta(seconds=5)
     CROP_JPEG_QUALITY = 95
+    # The log image of a crop change is small: it only shows which area goes to the model.
+    CROP_PREVIEW_MAX_SIDE = 320
     HISTORY_SIZE = 200
     # Images use memory, so only the most recent calls keep them.
     IMAGE_HISTORY_SIZE = 30
@@ -186,7 +188,16 @@ class tools:
     PHONE_ROTATION = "phone_rotation"
     PHONE_SNAPSHOT_ORIENTATION = "phone_snapshot_orientation"
     PHONE_IN_SENSOR_ZOOM = "phone_in_sensor_zoom"
+    PHONE_FOCUS = "phone_focus"
+    PHONE_HIGHLIGHT = "phone_highlight"
+    BOARD_LOCATE_IN_PHOTO = "board_locate_in_photo"
     BOARD_OPEN = "board_open"
+    BOARD_FIND_PART = "board_find_part"
+    BOARD_FIND_NET = "board_find_net"
+    BOARD_RENDER = "board_render"
+    BOARD_REGISTER_PHOTO = "board_register_photo"
+    # Not an MCP tool: the log entry of a crop change on the page.
+    WEBCAM_CROP = "webcam_crop"
     BENCH_INSTRUCTIONS = "bench_instructions"
     # Their results hold the user's instructions text: other monitors get only the tool name and the status.
     REDACTED = frozenset({BENCH_INSTRUCTIONS})
@@ -209,3 +220,4 @@ class labels:
     MODEL_INPUT = "image sent to the model"
     WEBCAM_FRAME = "webcam frame"
     RESULT_IMAGE = "result image"
+    CROP_PREVIEW = "new crop area"

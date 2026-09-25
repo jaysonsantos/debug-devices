@@ -12,16 +12,18 @@ from debug_devices_mcp.ui.constants import defaults, http
 from debug_devices_mcp.ui.events import BusMessage
 from debug_devices_mcp.ui.routes import json_response, monitor_of, until_closing
 from debug_devices_mcp.ui.routes.settings import settings_view
-from debug_devices_mcp.ui.views import StateView
+from debug_devices_mcp.ui.views import StateView, VersionView
 
 if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
 
 SSE_KEEPALIVE = ": keepalive\n\n"
+VERSION_EVENT = "version"
 
 
 def state_view(monitor: Monitor) -> StateView:
     return StateView(
+        version=monitor.code_version,
         phone=monitor.bus.phone,
         settings=settings_view(monitor),
         webcam=monitor.stream.info() if monitor.stream is not None else None,
@@ -33,6 +35,10 @@ async def get_state(request: Request) -> JSONResponse:
     return json_response(state_view(monitor_of(request)))
 
 
+def version_message(version: str) -> str:
+    return f"event: {VERSION_EVENT}\ndata: {VersionView(version=version).model_dump_json()}\n\n"
+
+
 def sse_message(message: BusMessage) -> str:
     return f"event: {message.kind}\ndata: {message.data.model_dump_json()}\n\n"
 
@@ -42,7 +48,8 @@ async def get_events(request: Request) -> StreamingResponse:
 
     async def body() -> AsyncGenerator[str]:
         with monitor.bus.subscribe() as queue:
-            yield SSE_KEEPALIVE
+            # The first event: the code version, so a page from before a server restart reloads itself.
+            yield version_message(monitor.code_version)
             while True:
                 try:
                     message = await asyncio.wait_for(queue.get(), defaults.SSE_KEEPALIVE.total_seconds())

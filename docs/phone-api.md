@@ -23,6 +23,8 @@ Change this file first, then change both sides.
 | POST | `/v1/rotation` | `{"degrees": 0 \| 90 \| 180 \| 270}` or `{"auto": true}` | `CameraStatus` |
 | POST | `/v1/preview` | `{"flip_horizontal": true, "flip_vertical": false}` | `CameraStatus` |
 | POST | `/v1/camera` | `{"in_sensor_zoom": true}` | `CameraStatus` |
+| POST | `/v1/focus` | `{"screen_x": 0.4, "screen_y": 0.6}` or `{"snapshot_x": 0.4, "snapshot_y": 0.6}` | `CameraStatus` |
+| POST | `/v1/overlay` | `{"boxes": [{"snapshot_x": 0.42, "snapshot_y": 0.31, "width": 0.05, "height": 0.04, "label": "U730"}]}` or `{"boxes": []}` | `CameraStatus` |
 | GET | `/v1/snapshot` | none | `image/jpeg` bytes of one full still capture |
 
 `CameraStatus`:
@@ -49,7 +51,8 @@ Change this file first, then change both sides.
     "sensor_width_mm": 9.14,
     "output_width_px": 4080
   },
-  "in_sensor_zoom": "off"
+  "in_sensor_zoom": "off",
+  "overlay_boxes": 0
 }
 ```
 
@@ -72,6 +75,12 @@ Rules:
 - `optics` describes the camera of `/v1/snapshot`: the first focal length, the physical sensor width (`SENSOR_INFO_PHYSICAL_SIZE`), and the snapshot width in pixels before rotation. Clients compute the distance in cm (100 / diopters) and the detail in px/mm (`output_width_px * focal_length_mm / (sensor_width_mm * distance_mm)`, thin-lens estimate). Zoom does not change this detail value: zoom crops.
 - `POST /v1/camera {"in_sensor_zoom": true|false}` turns the vendor in-sensor zoom on or off. The body field is a required boolean (400 `bad_request` otherwise). The app binds the camera again: the preview stops for about 1 s, and the zoom and the torch stay as they were. `CameraStatus.in_sensor_zoom` is `off`, `on`, `unsupported` (the phone has no such vendor mode; the request still returns 200 with this value), or `fallback` (the vendor session failed; the app runs in the normal mode). After an app start, it is `off`.
 - With `in_sensor_zoom` `on`, a zoom at 2x or more can give real extra detail (a sensor crop at full density, not optics). The detail estimate in `optics` does not include this gain.
+- `POST /v1/focus` focuses and meters (autofocus and auto exposure) on one point. Give exactly one pair, each value a number in [0, 1] (400 `bad_request` otherwise):
+  - `screen_x`, `screen_y`: a point on the phone screen as the screen stream shows it (the display in its natural portrait orientation, 0,0 = top left). A point outside the camera preview returns 400 `bad_request` with the message "outside the preview". The app takes the preview position on the screen and the preview flips into account.
+  - `snapshot_x`, `snapshot_y`: a point on the image that `/v1/snapshot` returns now (true orientation, before any flip that the MCP server applies; 0,0 = top left). The app takes the snapshot rotation into account.
+- The focus lock ends after 5 s (`FOCUS_HOLD`), then the camera goes back to continuous autofocus. A new `/v1/focus`, a zoom change, or an in-sensor zoom change ends it earlier. The response comes at once; `focus.state` in later statuses shows `scanning`, then `focused` or `unfocused`.
+- `POST /v1/overlay` draws highlight boxes over the camera preview on the phone screen (so they also show in the screen stream). Each box is a rectangle on the true-orientation `/v1/snapshot` image, normalized to [0, 1] (`snapshot_x`, `snapshot_y` = top left corner; `width`, `height` > 0; the box must be inside the image), with a `label` of at most 32 characters. At most 8 boxes (400 `bad_request` otherwise). The app draws a green border (3 dp) and the label on a dark background, not mirrored, and keeps the boxes aligned when the zoom, the rotation, or the preview flips change (zoom crops around the center, so the app scales the boxes around the center by the zoom change since the call). `{"boxes": []}` removes all boxes. The boxes also go away after 10 minutes (`OVERLAY_TTL`) and at an app start. The overlay never goes into `/v1/snapshot` images.
+- `CameraStatus.overlay_boxes` is the number of boxes on the screen now (0 when none).
 - The camera endpoints return 503 `camera_not_ready` while the app is not in the foreground.
 - `/v1/snapshot` does not fire the flash. The torch state after a snapshot is the same as before it.
 

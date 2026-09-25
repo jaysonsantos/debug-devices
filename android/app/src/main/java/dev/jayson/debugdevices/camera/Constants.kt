@@ -23,6 +23,8 @@ object Constants {
         const val CAMERA = "$PREFIX/camera"
         const val ROTATION = "$PREFIX/rotation"
         const val PREVIEW = "$PREFIX/preview"
+        const val FOCUS = "$PREFIX/focus"
+        const val OVERLAY = "$PREFIX/overlay"
     }
 
     object Zoom {
@@ -78,6 +80,27 @@ object Constants {
         const val SESSION_CHECK_MILLIS = 4_000L
     }
 
+    object Overlay {
+        const val MAX_BOXES = 8
+        const val MAX_LABEL_LENGTH = 32
+
+        /** Float rounding: a box may end this much past 1.0 (x + width, y + height). */
+        const val EDGE_TOLERANCE = 1e-4f
+
+        /** The boxes go away after this time (`OVERLAY_TTL` in the contract). */
+        const val TTL_MINUTES = 10L
+        const val TTL_MILLIS = TTL_MINUTES * 60L * 1_000L
+    }
+
+    object FocusTap {
+        /** The focus lock ends after this time, then the camera goes back to continuous autofocus. */
+        const val HOLD_SECONDS = 5L
+        const val HOLD_MILLIS = HOLD_SECONDS * 1_000L
+
+        /** How long the focus ring stays on the screen after a tap. */
+        const val RING_MILLIS = 800L
+    }
+
     object Focus {
         /** `LENS_INFO_MINIMUM_FOCUS_DISTANCE` of a fixed-focus lens. */
         const val FIXED_FOCUS_DIOPTERS = 0f
@@ -111,6 +134,12 @@ object Constants {
         const val REBIND_REASON_API = "in_sensor_zoom request"
         const val REBIND_FAILED = "In-sensor zoom rebind failed"
         const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
+        const val OVERLAY_TOO_MANY = "At most 8 boxes"
+        const val OVERLAY_BAD_BOX = "A box must be inside the snapshot, with width and height above 0"
+        const val OVERLAY_LABEL_TOO_LONG = "A label has at most 32 characters"
+        const val FOCUS_NEEDS_ONE_PAIR = "Send exactly one pair: screen_x and screen_y, or snapshot_x and snapshot_y"
+        const val FOCUS_OUT_OF_RANGE = "Focus coordinates must be numbers in [0, 1]"
+        const val FOCUS_OUTSIDE_PREVIEW = "outside the preview"
         const val START_STATE_PENDING = "Camera start state is not set yet"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "
         const val START_STATE_FAILED = "Camera bind or start state failed"

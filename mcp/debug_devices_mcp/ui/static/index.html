@@ -17,6 +17,105 @@
   </header>
 
   <main>
+    <section id="phone-panel" class="panel">
+      <h2>Phone</h2>
+      <div class="phone-layout">
+        <div class="phone-live">
+          <div id="phone-view" class="view" tabindex="0" aria-label="Phone screen">
+            <canvas id="phone-screen" width="1" height="1" hidden></canvas>
+            <!-- The MJPEG fallback: the page draws this image into the canvas, so rotation and full screen stay. -->
+            <img id="phone-screen-mjpeg" alt="">
+            <span id="focus-tap" class="focus-tap" role="status" hidden></span>
+            <span class="scene-note" role="status" hidden>Scene changed: highlights cleared</span>
+            <span id="phone-screen-mode" class="screen-mode" hidden>No H.264 decoder in this browser: MJPEG fallback</span>
+            <button type="button" class="fs-button" aria-label="Full screen: phone screen" title="Full screen (double-click or f; Esc leaves). A click on the picture focuses there."><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+            <div class="fs-controls" role="toolbar" aria-label="Phone controls">
+              <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
+              <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
+              <button type="button" data-torch aria-label="Torch on or off">Torch</button>
+              <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x">Sensor zoom</button>
+              <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
+              <span id="live-zoom" data-zoom-ratio class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
+            </div>
+          </div>
+          <p id="phone-screen-note" class="hint">The phone screen shows here after Connect.</p>
+        </div>
+        <div class="phone-side">
+          <dl class="facts">
+            <dt>Serial</dt><dd id="phone-serial">not connected</dd>
+            <dt>Screen</dt><dd id="phone-screen-state">off</dd>
+            <dt>scrcpy window</dt><dd id="phone-scrcpy">off</dd>
+            <dt>Zoom</dt><dd id="phone-zoom">–</dd>
+            <dt>Torch</dt><dd id="phone-torch">–</dd>
+            <dt>Rotation</dt><dd id="phone-rotation">–</dd>
+            <dt>Distance</dt><dd><span id="phone-focus" class="focus-text">–</span><br><span id="phone-focus-advice" class="hint focus-advice" hidden></span></dd>
+            <dt>Sensor zoom</dt><dd><span id="phone-isz-state">–</span><br><span id="phone-isz-hint" class="hint" hidden></span></dd>
+            <dt>Preview flip</dt><dd id="phone-preview-flip" title="The phone mirrors its camera preview (live view)">–</dd>
+          </dl>
+          <div class="row">
+            <button id="phone-connect" type="button">Connect</button>
+            <button id="phone-refresh" type="button">Refresh status</button>
+          </div>
+          <div class="row">
+            <button id="zoom-out" type="button" title="Zoom out (÷1.5)">−</button>
+            <input id="zoom-slider" type="range" min="1" max="8" step="0.1" value="1" disabled>
+            <button id="zoom-in" type="button" title="Zoom in (×1.5)">+</button>
+          </div>
+          <div class="row">
+            <label><input id="torch" type="checkbox" disabled> Torch</label>
+            <button id="phone-snapshot" type="button">Take snapshot</button>
+          </div>
+          <div class="row">
+            <button type="button" data-isz aria-pressed="false" title="Real extra detail at 2x-4x from a sensor crop (not optics), on phones that support it. The preview stops about 1 s.">Sensor zoom (2x-4x detail)</button>
+          </div>
+          <div class="row">
+            <span>Screen view</span>
+            <button id="view-rotate-left" type="button" title="Turn the phone screen 90° to the left">⟲</button>
+            <button id="view-rotate-right" type="button" title="Turn the phone screen 90° to the right">⟳</button>
+            <button id="view-auto" type="button" title="Turn the phone screen with the phone">Auto</button>
+            <span id="view-rotation" class="hint"></span>
+          </div>
+          <div class="row">
+            <label for="snapshot-rotation">Snapshot rotation</label>
+            <select id="snapshot-rotation" disabled title="Lock the rotation of the next phone snapshots, or follow the phone">
+              <option value="auto">Auto</option>
+              <option value="0">0°</option>
+              <option value="90">90°</option>
+              <option value="180">180°</option>
+              <option value="270">270°</option>
+            </select>
+          </div>
+          <p id="phone-error" class="error" hidden></p>
+          <div id="snapshot-view" class="view" tabindex="0" aria-label="Last phone snapshot" hidden>
+            <img id="snapshot" alt="Last phone snapshot" draggable="false">
+          <!-- The agent's highlight boxes (phone_highlight), drawn over the snapshot. -->
+          <div id="snapshot-boxes" aria-hidden="true"></div>
+          <span class="scene-note" role="status" hidden>Scene changed: highlights cleared</span>
+            <span id="snapshot-zoom" class="zoom-badge" aria-live="polite"></span>
+            <div class="fs-controls" role="toolbar" aria-label="Snapshot controls">
+              <button type="button" data-flip="horizontal" aria-pressed="false" title="Flip the phone snapshot left-right (h)">Flip H</button>
+              <button type="button" data-flip="vertical" aria-pressed="false" title="Flip the phone snapshot upside down (v)">Flip V</button>
+              <button type="button" data-snapshot-zoom="out" aria-label="Phone camera zoom out" title="Phone camera zoom out (the next snapshot shows it)">−</button>
+              <span class="live-zoom" data-zoom-ratio title="Phone camera zoom"></span>
+              <button type="button" data-snapshot-zoom="in" aria-label="Phone camera zoom in" title="Phone camera zoom in (the next snapshot shows it)">+</button>
+              <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x from a sensor crop (not optics); the preview stops about 1 s">Sensor zoom</button>
+              <button type="button" data-new-snapshot title="Take a new phone snapshot (s)">New snapshot</button>
+            <button type="button" data-clear-highlights disabled>Clear highlights</button>
+            </div>
+            <button type="button" class="fs-button" aria-label="Full screen: phone snapshot" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+          </div>
+          <div class="row" role="group" aria-label="Snapshot flips">
+            <span>Snapshot flip</span>
+              <button type="button" data-flip="horizontal" aria-pressed="false" title="Flip the phone snapshot left-right (h)">Flip H</button>
+              <button type="button" data-flip="vertical" aria-pressed="false" title="Flip the phone snapshot upside down (v)">Flip V</button>
+            <span class="hint">Also for the agent's snapshots and the phone preview.</span>
+            <button type="button" data-clear-highlights disabled>Clear highlights</button>
+          </div>
+          <a id="snapshot-full" target="_blank" hidden>Open the full-size snapshot</a>
+        </div>
+      </div>
+    </section>
+
     <section id="webcam-panel" class="panel">
       <h2>Webcam <small id="webcam-info"></small></h2>
       <div id="webcam-view" class="view" tabindex="0" aria-label="Webcam view">
@@ -35,12 +134,8 @@
       <div class="row">
         <span>Crop: <code id="crop-text">none</code></span>
         <button id="clear-crop" type="button">Clear crop</button>
-        <span class="hint">Drag on the image to draw the area that goes to the model. Drag the box to move it, drag a corner to resize it.</span>
+        <span class="hint">Drag on the image to draw the area that goes to the model. Drag the box to move it, drag a corner to resize it. The Activity log shows each new area.</span>
       </div>
-      <div class="row">
-        <span>Crop preview (what <code>multimeter_read</code> sends):</span>
-      </div>
-      <canvas id="crop-preview" width="1" height="1"></canvas>
       <div class="row">
         <button id="multimeter-read" type="button">Read multimeter</button>
         <select id="multimeter-source" title="The camera that sees the multimeter">
@@ -52,82 +147,36 @@
       <p id="multimeter-error" class="error" hidden></p>
     </section>
 
-    <section id="phone-panel" class="panel">
-      <h2>Phone</h2>
-      <dl class="facts">
-        <dt>Serial</dt><dd id="phone-serial">not connected</dd>
-        <dt>Screen</dt><dd id="phone-screen-state">off</dd>
-        <dt>scrcpy window</dt><dd id="phone-scrcpy">off</dd>
-        <dt>Zoom</dt><dd id="phone-zoom">–</dd>
-        <dt>Torch</dt><dd id="phone-torch">–</dd>
-        <dt>Rotation</dt><dd id="phone-rotation">–</dd>
-        <dt>Distance</dt><dd><span id="phone-focus" class="focus-text">–</span><br><span id="phone-focus-advice" class="hint focus-advice" hidden></span></dd>
-        <dt>Sensor zoom</dt><dd><span id="phone-isz-state">–</span><br><span id="phone-isz-hint" class="hint" hidden></span></dd>
-        <dt>Preview flip</dt><dd id="phone-preview-flip" title="The phone mirrors its camera preview (live view)">–</dd>
-      </dl>
-      <div class="row">
-        <button id="phone-connect" type="button">Connect</button>
-        <button id="phone-refresh" type="button">Refresh status</button>
+    <section id="board-panel" class="panel">
+      <h2>Board <small id="board-info">no board</small></h2>
+      <form id="board-open-form" class="row">
+        <input id="board-path" type="text" placeholder="Boardview file path" autocomplete="off" spellcheck="false" aria-label="Boardview file path">
+        <button type="submit">Open</button>
+      </form>
+      <p id="board-remote" class="hint" hidden></p>
+      <form id="board-search-form" class="row">
+        <input id="board-query" type="search" list="board-names" placeholder="Part (J4) or net (PP3V3*)" autocomplete="off" spellcheck="false" aria-label="Part or net" disabled>
+        <datalist id="board-names"></datalist>
+        <button type="submit" disabled>Search</button>
+      </form>
+      <p id="board-error" class="error" hidden></p>
+      <div id="board-result" hidden>
+        <dl id="board-facts" class="facts"></dl>
+        <p id="board-highlight" class="hint"></p>
+        <img id="board-render" alt="Board drawing from the boardview file (not a photo)">
       </div>
-      <div class="row">
-        <button id="zoom-out" type="button" title="Zoom out (÷1.5)">−</button>
-        <input id="zoom-slider" type="range" min="1" max="8" step="0.1" value="1" disabled>
-        <button id="zoom-in" type="button" title="Zoom in (×1.5)">+</button>
-      </div>
-      <div class="row">
-        <label><input id="torch" type="checkbox" disabled> Torch</label>
-        <button id="phone-snapshot" type="button">Take snapshot</button>
-      </div>
-      <div class="row">
-        <button type="button" data-isz aria-pressed="false" title="Real extra detail at 2x-4x from a sensor crop (not optics), on phones that support it. The preview stops about 1 s.">Sensor zoom (2x-4x detail)</button>
-      </div>
-      <div class="row">
-        <span>Screen view</span>
-        <button id="view-rotate-left" type="button" title="Turn the phone screen 90° to the left">⟲</button>
-        <button id="view-rotate-right" type="button" title="Turn the phone screen 90° to the right">⟳</button>
-        <button id="view-auto" type="button" title="Turn the phone screen with the phone">Auto</button>
-        <span id="view-rotation" class="hint"></span>
-      </div>
-      <div class="row">
-        <label for="snapshot-rotation">Snapshot rotation</label>
-        <select id="snapshot-rotation" disabled title="Lock the rotation of the next phone snapshots, or follow the phone">
-          <option value="auto">Auto</option>
-          <option value="0">0°</option>
-          <option value="90">90°</option>
-          <option value="180">180°</option>
-          <option value="270">270°</option>
-        </select>
-      </div>
-      <p id="phone-error" class="error" hidden></p>
-      <div id="phone-view" class="view" tabindex="0" aria-label="Phone screen">
-        <canvas id="phone-screen" width="1" height="1" hidden></canvas>
-        <button type="button" class="fs-button" aria-label="Full screen: phone screen" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
-        <div class="fs-controls" role="toolbar" aria-label="Phone controls">
-          <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
-          <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
-          <button type="button" data-torch aria-label="Torch on or off">Torch</button>
-          <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x">Sensor zoom</button>
-          <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
-          <span id="live-zoom" class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
+      <details id="board-register">
+        <summary>Register photo <small id="board-registration">none</small></summary>
+        <p class="hint">Take a phone snapshot. Type a reference part in the search box, press "Pick", then click the center of that part on the snapshot (panel or full screen). Use 4 or more large parts far apart; 5 or more also check the fit.</p>
+        <div class="row">
+          <label>Side <select id="register-side"><option value="top">top</option><option value="bottom">bottom</option></select></label>
+          <button id="register-pick" type="button">Pick</button>
+          <button id="register-undo" type="button" disabled>Undo</button>
+          <button id="register-send" type="button" disabled>Register</button>
         </div>
-      </div>
-      <p id="phone-screen-note" class="hint">The phone screen shows here after Connect.</p>
-      <div id="snapshot-view" class="view" tabindex="0" aria-label="Last phone snapshot" hidden>
-        <img id="snapshot" alt="Last phone snapshot" draggable="false">
-        <span id="snapshot-zoom" class="zoom-badge" aria-live="polite"></span>
-        <div class="fs-controls" role="toolbar" aria-label="Snapshot flips">
-          <button type="button" data-flip="horizontal" aria-pressed="false" title="Flip the phone snapshot left-right (h)">Flip H</button>
-          <button type="button" data-flip="vertical" aria-pressed="false" title="Flip the phone snapshot upside down (v)">Flip V</button>
-        </div>
-        <button type="button" class="fs-button" aria-label="Full screen: phone snapshot" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
-      </div>
-      <div class="row" role="group" aria-label="Snapshot flips">
-        <span>Snapshot flip</span>
-          <button type="button" data-flip="horizontal" aria-pressed="false" title="Flip the phone snapshot left-right (h)">Flip H</button>
-          <button type="button" data-flip="vertical" aria-pressed="false" title="Flip the phone snapshot upside down (v)">Flip V</button>
-        <span class="hint">Also for the agent's snapshots and the phone preview.</span>
-      </div>
-      <a id="snapshot-full" target="_blank" hidden>Open the full-size snapshot</a>
+        <p id="register-status" class="hint"></p>
+        <ol id="register-points"></ol>
+      </details>
     </section>
 
     <section id="settings-panel" class="panel">

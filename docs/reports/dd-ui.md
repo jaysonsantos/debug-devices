@@ -696,3 +696,278 @@ Playwright check (headless Firefox, 1440x600) against a separate eager server wi
 
 - I did not test with the real phone app (dd-android builds `/v1/camera` now). With the new app, run `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict` (the camera check turns the mode on and off one time, so the preview stops twice for about 1 s), then compare a snapshot at 2x with the mode on and off.
 - In the unsupported mode, the button stays pressed (it shows the choice), and the line says "not on this phone".
+
+## Round 18: phone screen MJPEG fallback, and page self-reload
+
+### Part 1: MJPEG fallback for browsers without H.264 in WebCodecs
+
+Problem: in Camoufox (Firefox 152 based), the live phone view showed "Decoder error: Operation is not supported". WebCodecs is there, but it cannot decode H.264.
+
+- Page (`app.js`, region `phone screen`):
+  - Before the first frame, `checkCodec()` asks `VideoDecoder.isConfigSupported({codec, optimizeForLatency: true})` with the codec string of the stream.
+  - The page switches to the fallback when the answer is not supported, when the browser has no `VideoDecoder`, or on a later decoder error (`error` callback). It then stays on the fallback until a reload.
+  - `startFallback()` stops the H.264 fetch (`AbortController`), shows the label "MJPEG fallback" (the title says why), and loads `/api/phone/screen.mjpg` into a hidden `<img>`. The image is 1 px and transparent, not `display: none`, so the browser keeps decoding the frames.
+  - Every 100 ms, the page draws the current image into the same canvas as the H.264 path (`drawScreenSource()`). So rotation, full screen, the layout, the wheel and arrow camera zoom, and the Sensor zoom button work the same way.
+  - The H.264 path stays for browsers that can decode it.
+- Server:
+  - `screen_mjpeg.py` (new): `ScreenTranscoder`. One ffmpeg (`-f h264 -i pipe:0`, `fps=10`, width at most 1280, `-q:v 5`, `mpjpeg` on stdout) gets the key and delta frames of a phone screen subscription on stdin. The subscription starts at a key frame, and a resync gives a key frame again.
+  - It starts with the first fallback viewer and stops after the last one leaves (`viewer()` counts them).
+  - `GET /api/phone/screen.mjpg` (multipart, like the webcam stream, in `routes/screen.py`) has the same LocalOnly checks and the same clean end at a page stop (`until_closing`). It returns 404 without the phone screen.
+- **Bug found and fixed in `until_closing()` (round 10):** when a client left, uvicorn cancelled the response task. The helper then called `aclose()` on the source generator while a read still ran inside it. That fails, so the generator's cleanup never ran. Effects:
+  - The fallback ffmpeg did not stop after the last viewer.
+  - The webcam viewer count never went down after a page left the live view, so the webcam idle release could not stop the camera.
+  - Fix: cancel and await the pending read first, then close the source. A new test covers a cancelled reader.
+
+### Part 2: the page reloads itself after a server restart
+
+- `ui/version.py`: `code_version()` is a hash of the page files (`ui/static/`) and a new UUID v7 per server start (16 hex chars). `Monitor.code_version` is computed at start.
+- `/api/state` has `version`. The event stream sends `event: version` as its first message.
+- The page keeps the version from `/api/state`. When a reconnect brings another version (a `scripts/dev-monitor.sh` or `--dev-reload` restart, or new page files), it calls `location.reload()`. It does not keep the full screen state.
+
+### Tests
+
+- `mcp/tests/test_screen_mjpeg.py` (real ffmpeg; skipped without ffmpeg):
+  - ffmpeg makes a 2 s H.264 test clip (`testsrc`, libx264). It is split into access units like the phone screen, and the test publishes them in a loop.
+  - `/api/phone/screen.mjpg` returns `multipart/x-mixed-replace` with JPEG frames. ffmpeg runs only while the client reads, and it stops after the client leaves (viewers 0).
+  - Also: the transcode arguments (10 fps, width 1280), and 404 without the phone screen.
+- `test_ui_shutdown.py`: a cancelled reader of `until_closing` closes its source. `test_ui_app.py`: the first SSE message is the version.
+- Browser checks (script in my scratch folder; an in-process monitor with a looping H.264 test clip):
+  - Camoufox (`uv run --with camoufox`, Firefox/152.0): the page chose the fallback with the reason "avc1.64000c is not supported by this browser". The label "MJPEG fallback" showed. The canvas had pixels at 320x240. Full screen on the fallback view worked (`fullscreenElement` = `phone-view`).
+  - Playwright Firefox: the H.264 path ran (no fallback label), and the canvas had pixels at 320x240.
+  - Reload: with the page open in Playwright Firefox, the script stopped the page, changed `code_version`, and started the page on the same port. The page reloaded itself (a window marker was gone), and `/api/state` showed the new version.
+- `uv run pytest`: 266 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on my files: pass.
+
+### Notes
+
+- `camoufox` pulls another Playwright version than the one with the installed Firefox build (1543), so the two checks run in two separate `uv run --with ...` calls.
+- The fallback costs one ffmpeg that decodes and encodes, but only while a fallback page is open. H.264 browsers do not start it.
+- The fallback ffmpeg starts when the fallback page opens, also before `phone_connect`. It then waits for the first key frame and uses almost no CPU.
+
+## Round 19: sensor zoom, camera zoom, and a new snapshot in the full-screen snapshot bar
+
+### What I did
+
+The full-screen snapshot bar (`#snapshot-view .fs-controls`) had only Flip H and Flip V. It now has:
+
+- **Camera zoom `−` / `+`** with the zoom ratio text. They send `phone_zoom` steps through `liveZoomStep()`, so the same rate limit applies as in the live view (one step per 150 ms, none while a request runs). `showLiveZoom()` now updates every `[data-zoom-ratio]` label: the live bar and this bar show the same value. Each phone update also refreshes the labels.
+- **Sensor zoom**: the same `data-isz` toggle, so the one choice drives all three toggles (panel, live bar, snapshot bar), with the same `aria-pressed`. During the request (the camera rebinds), all three toggles are disabled, not only the clicked one.
+- **New snapshot**, and the key `s` in the full-screen snapshot view (not in form fields): `phone_snapshot` through the instrumented `call_tool`. The panel button uses the same function (`takeSnapshot()`, with no second request while one runs). The new snapshot number reloads the image at full size in full screen and resets the digital zoom, as before.
+- Flip H and Flip V stay. The digital wheel zoom and pan stay.
+- Each button has a tooltip that says what it does. They are normal buttons, so the keyboard can focus them.
+
+### Tests
+
+Playwright (headless Firefox, fake phone, eager server on port 18890, `--webcam /dev/video99`), in the full-screen snapshot view:
+
+- The bar had Flip H, Flip V, `−`, `+`, Sensor zoom, and New snapshot, each with its tooltip. The ratio showed "1.0x".
+- The bar's Sensor zoom: all three toggles went to `aria-pressed="true"` and were enabled again afterwards. The state showed "on".
+- `+`, `+`, `−`: the ratio went 1.5x, 2.3x, 1.5x. The fake phone showed zoom 1.5, and the log had three `phone_zoom` calls.
+- With a digital zoom active, "New snapshot" loaded a new image with `full=true` and reset the digital zoom (no transform). The key `s` loaded another new image. Flip H still worked, and the view stayed in full screen.
+- The log: `phone_connect`, `phone_snapshot`, `phone_in_sensor_zoom`, `phone_zoom` ×3, `phone_snapshot` ×2, `phone_snapshot_orientation`.
+- `uv run pytest`: 266 passed, 1 skipped (no Python change). `uv run ruff check` and `prek run --files` on the page files: pass.
+
+### Note
+
+In full screen, an error of a bar button shows in the phone panel (under the full-screen view), not in the bar.
+
+## Round 18, addendum: H.264 first, the fallback hint, and the Camoufox library fix
+
+The orchestrator's note: the user prefers H.264 (smoother). Camoufox 152 has no H.264 only because this system has libavcodec 63. With FFmpeg 7 (`libavcodec.so.61`) on `LD_LIBRARY_PATH`, it decodes H.264 in WebCodecs.
+
+- The page already uses WebCodecs H.264 first. It falls back only when `VideoDecoder` is missing, when `isConfigSupported()` says no, or after a decoder error. No change to that logic.
+- The label in the view now says "No H.264 decoder in this browser: MJPEG fallback". The title still gives the exact reason.
+- `mcp/README.md`: a note on the Camoufox fix (start it with `LD_LIBRARY_PATH=$HOME/.cache/debug-devices/ffmpeg7-lib-lib/lib`).
+- Camoufox checks, both with an in-process monitor and a looping H.264 test clip. The library path goes only to the browser, through Camoufox's `env`.
+  - Plain Camoufox (Firefox/152.0): fallback, reason "avc1.64000c is not supported by this browser", the new label text, canvas pixels at 320x240, full screen works.
+  - Camoufox with `LD_LIBRARY_PATH=$HOME/.cache/debug-devices/ffmpeg7-lib-lib/lib`: the H.264 path (no fallback label), canvas pixels at 320x240, full screen works.
+- The check script also pressed ArrowUp in full screen. The in-process test monitor has no MCP server, so that press logged "the monitor is not attached to an MCP server". This comes from the test harness, not the product. The zoom keys were checked in round 14 with a real server.
+
+## Round 20: the phone panel is the main panel; the crop preview goes to the log
+
+The user's request: "the phone view is more important than the multimeter ... swap them but keep the features". Addition: "crop preview is not needed, it can go to the log".
+
+### What I did
+
+- **Panel order.** The Phone panel is now the first section in the page and has the large left column (`2fr`). The Webcam panel is in the right column, and the Settings panel is below it. The activity log stays at the bottom, full width. Below a window width of 1000 px, the panels are in one column: Phone, Webcam, Settings, Activity. The grid rows are `auto 1fr auto`, so the Settings panel stays right below the Webcam panel, also when the phone panel is tall.
+- **The phone panel inside.** When the panel is 720 px wide or more (a container query), it has two columns: the live view on the left (`3fr`), and the facts, the controls, and the snapshot on the right (`2fr`). A narrower panel puts them in one column, live view first.
+- **The live view size.** The canvas is as large as its column and the window height allow: `width: min(100cqw, (100vh − 96px) × ratio)`, `height: auto`. `drawScreenSource()` sets `--screen-ratio` (the width / height of the drawn frame, after the view rotation), so the canvas keeps the aspect ratio and shows the full frame. The `#phone-view` box shrinks to the canvas (`fit-content`), so the full-screen button stays on the picture corner. Full screen uses the old rules (`100vw` × `100vh`, `object-fit: contain`).
+- **Crop preview removed.** The canvas `#crop-preview`, its label, `drawPreview()`, and its 500 ms timer are gone. The crop hint says: "The Activity log shows each new area."
+- **Crop changes in the log.** `PUT /api/settings` and `DELETE /api/settings/crop` call `Monitor.log_crop_change(before)`. When the effective crop changed, the monitor adds one log row: tool `webcam_crop`, source `ui`, argument and summary `x,y,w,h` (or "none (the whole frame)" after Clear crop), and the image "new crop area": the crop of the latest webcam frame, scaled to at most 320 px (`defaults.CROP_PREVIEW_MAX_SIDE`). The page saves the crop once at the end of a drag, so a drag gives one row, not one per mouse move. A save with the same crop (for example Save of the other settings) adds no row. With no webcam frame, the row says "(no webcam frame for a preview)" and has no image. `multimeter_read` rows keep the exact image that went to the model.
+- Every id and data attribute stays, so the tests and `scripts/record_demo.py` need no change. `mcp/README.md` describes the new layout and the `webcam_crop` rows.
+
+### Tests
+
+- New in `mcp/tests/test_ui_app.py`: a crop change, the same crop again, and Clear crop give exactly two `webcam_crop` rows (source `ui`), each with one image; the first image is 20x10 px, the crop size. A crop change without a webcam frame gives a row with the "no webcam frame" note and no image.
+- Playwright (headless Firefox; an in-process monitor with a looping 360x800 H.264 test clip as the phone screen and plain red frames as the webcam; no real devices, no people in frames). Screenshots are in my scratch folder only.
+  - 1920x1080: Phone panel 1251 px wide at the left, Webcam 625 px at the right, Settings right below it. The canvas is 443x984, ratio 0.45, the same as the frame.
+  - 1366x768: Phone 881 px, Webcam 441 px. The canvas is 302x672 and fits the window height.
+  - 900x900: one column: Phone, Webcam, Settings, Activity. The canvas is 362x804.
+  - At all three sizes: no horizontal page scroll, `#crop-preview` is gone, the full-screen button is on the picture, and a double-click on the live view opens full screen with the canvas at the full screen size.
+  - A crop drag on the webcam gave one log row `webcam_crop 61,61,309,185` with one image. Clear crop gave the second row.
+- `uv run pytest`: 268 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on the changed files: pass.
+
+## Round 21: click to focus on the live phone view, and the `phone_focus` tool
+
+The user's request: "if I click on the image of the phone, can you try to focus on that area?" The contract was already changed (`POST /v1/focus` with `screen_x`/`screen_y` or `snapshot_x`/`snapshot_y`). I did the panel swap (round 20) first, as the orchestrator asked, and then finished this task.
+
+### What I did
+
+- **Client** (`phone_api.py`): `ScreenFocusRequest`, `SnapshotFocusRequest` (each value in [0, 1]), and `PhoneClient.focus()`. A 404 raises `FocusNotSupportedError`: "the phone app has no /v1/focus; update the phone app to focus on a point". `constants.phone.PATH_FOCUS`.
+- **MCP tool** `phone_focus(x, y, source="snapshot" | "screen")` (`server.py`, in the new `register_camera_tools()` with `phone_in_sensor_zoom`; the phone tool function had too many statements).
+  - `phone_snapshot` now keeps the geometry of the image that the agent got: its width and height after the scaling, and the flips (`Services.last_snapshot`).
+  - `source` "snapshot": `snapshot_focus_request()` (`focus.py`) divides by that width and height, then undoes the flips (`1 − x` for Flip H, `1 − y` for Flip V). The result is the point on the true-orientation snapshot of the phone.
+  - Errors (tool errors): no `phone_snapshot` yet ("take a phone_snapshot first"), a point outside the last snapshot, a `screen` value outside [0, 1], an old app ("update the phone app"), and the 400 message of the app (for example "outside the preview").
+  - The result is `PhoneStatusReport` (the status with the distance values and `focus_state`). The description says: take a fresh `phone_snapshot` after the focus settles (about 1 s).
+  - `phone_focus` is in `PHONE_STATUS_TOOLS`, so the page gets the new status.
+- **Evidence rule 6** has a new sentence: "When the relevant area is blurry, focus on it with phone_focus (pixels in your last phone_snapshot), then take a fresh phone_snapshot." The phrase test has "focus on it with phone_focus".
+- **Page route** `POST /api/phone/focus {screen_x, screen_y}` (strict floats in [0, 1], otherwise 400). It runs `phone_focus` with `source` "screen" through the instrumented tool call, so the log shows a `ui` row.
+- **Page click** (`app.js`, region "click to focus"):
+  - One click on `#phone-screen` (the canvas that shows the H.264 frames and also the MJPEG fallback, in the panel and in full screen) starts a timer of `FOCUS_CLICK_DELAY_MS` = 250 ms. The second click of a double-click (`event.detail > 1`) and the `dblclick` event cancel it, so a double-click only toggles full screen.
+  - `screenPoint()` undoes the CSS scaling and the letterbox (`object-fit: contain`: the scale is the smaller of the two axis scales, and the content is centered), then turns the point back by the view rotation around the box center (the inverse of `drawScreenSource()`). It then divides by the frame size, which `drawScreenSource()` now stores. A click on the letterbox gives no point and sends nothing.
+  - A yellow ring fades at the click point in 1 s (`FOCUS_RING_MS`, CSS animation). The label `#focus-tap` shows "focusing…", then the focus state from the status poll ("focused", "could not focus"), or the error without the SDK prefix (for example "phone API error 400 bad_request: outside the preview"). It hides 3 s after the last change.
+  - The full-screen button tooltip says: "A click on the picture focuses there."
+- **Fake phone**: `POST /v1/focus` with the 400 rules of the contract (exactly one pair, numbers in [0, 1]; not a string, null, or boolean). A screen point outside the fake preview (above 0.1 or below 0.8 of the screen height) gives 400 "outside the preview". The state is `scanning` for 0.3 s, then `focused`. An old app (`--no-preview`) answers 404. `FakeCamera.last_focus` keeps the last point for tests.
+- **`qa_contract.py`**: `check_focus` sends a snapshot center and corner, and a screen center; each must give a status with a known `focus.state`. It also checks ten bad bodies (400) and adds `GET /v1/focus` to the 405 checks. `--strict` also checks the screen edges: 200, or 400 with "outside the preview" (`docs/qa.md`).
+- `mcp/README.md`: the `phone_focus` tool row and the "Click to focus" page part.
+
+### Not done: a click on the full-screen snapshot
+
+The brief made it optional ("only if cheap"). I did not do it. The snapshot view already uses click-drag for the pan and the wheel for the digital zoom, and a double-click for full screen. A focus click needs the same click-versus-drag and click-versus-double-click logic again, plus the inverse of the pan and zoom transform and of the flips. Also, the focus changes the live camera, not the photo on the screen: the user must take a new snapshot to see it. Click to focus on the live view gives the same result with direct feedback.
+
+### Tests
+
+- New `mcp/tests/test_focus_tap.py` (10 tests):
+  - The mapping with the four flip combinations, the edges, and points outside the image.
+  - The tool: no snapshot yet gives an error. With Flip H and a 4000x3000 photo (scaled for the agent), a point at 1/4 of the image width gives `snapshot_x` 0.75 and `snapshot_y` 0.5. A point outside the image, and a screen value of 30, send nothing. The screen source sends the point as it is. The old app gives "update the phone app", and a 400 from the app gives "outside the preview".
+  - The page route: 200 with the status, one `phone_focus` row with source `ui`, and 400 for a string, 1.2, or a missing field. A 400 of the app gives 502 with the message.
+- Playwright (headless Firefox, an in-process monitor with the real tools, the httpx fake phone, and a looping 360x800 H.264 test clip; no devices):
+  - Panel click at (0.25, 0.75) of the picture: nothing after 100 ms, then `screen_x` 0.249, `screen_y` 0.75. The ring and "focusing…" showed. The ring was gone after 1 s, and the label after 3 s.
+  - A double-click opened full screen and sent no focus. A full-screen click at (0.9, 0.4) sent 0.899, 0.4. A click on the black letterbox sent nothing. A second double-click left full screen and sent nothing.
+  - View rotation 90°: a click at (0.2, 0.3) of the canvas sent 0.298, 0.8 (expected 0.3, 0.8). At 180°: 0.801, 0.701 (expected 0.8, 0.7).
+  - A 400 "outside the preview" showed as "phone API error 400 bad_request: outside the preview" (checked before I removed the SDK prefix from the label).
+  - The log had five `phone_focus` rows with source `ui`: four ok and one error.
+- `qa_contract.py --strict` against `scripts/fake_phone.py`: 21/21 checks passed, with `PASS focus`. `fake_phone.py --self-check`: passed. `--no-preview`: `POST /v1/focus` gives 404.
+- `uv run pytest`: 278 passed, 1 skipped. `uv run ruff check` and `ruff format --check`: pass. `prek run --files` on all changed files: pass.
+
+### Notes
+
+- Headless Firefox in full screen: a mouse click near the top edge opens the browser toolbar. The click then goes to the browser, not to the page, and full screen ends. The check clicks lower. A control check with the full-screen snapshot view showed that a normal click there keeps full screen. This behavior is from the browser, not from the page code.
+- The real app part is dd-android's task. I did not test against the phone.
+
+## Round 22: `phone_highlight`, green boxes on the page, and scene-change detection
+
+The brief: the agent draws green boxes around the parts that it found, on the phone and on the page. The addition from the user: "somehow the model has to know about the rotation of the board if I changed something". A box or a photo registration is only valid for the scene that the agent saw.
+
+### What I did: highlight boxes
+
+- **Client** (`phone_api.py`): `OverlayBox` (a rectangle on the true-orientation snapshot from 0 to 1, inside the image, label at most 32 characters), `OverlayRequest` (at most 8 boxes), and `PhoneClient.overlay()`. A 404 raises `OverlayNotSupportedError`: "update the phone app to show highlight boxes". `CameraStatus.overlay_boxes` (None for an older app).
+- **Mapping** (`highlight.py`): `PixelBox` is a box in pixels of the last `phone_snapshot` image that the agent got. `overlay_box()` cuts the box at the image edge, divides by the image size, and mirrors it for the flips: `x = 1 − x − width` for Flip H, and the same for y with Flip V. A box fully outside the image is refused. `scale_boxes()` converts boxes of the same photo at another size. It refuses another aspect ratio (more than 2 % difference). `draw_boxes()` draws the green boxes and the labels on a copy.
+- **Tool** `phone_highlight(boxes, clear)` has the description from the brief, and it also says how the pixels are defined. `phone_snapshot` now also keeps the scaled image that the agent got. The tool sends the boxes, keeps them in `Services.highlights`, and returns `HighlightResult`: the count, the true-orientation boxes, `overlay_boxes` from the phone, and a note that the boxes are estimates. The result also has the annotated copy of the last snapshot as an image. `clear: true` sends an empty list. Both `boxes` and `clear`, neither of them, 9 boxes, or no snapshot yet give a tool error.
+- **`board_locate_in_photo(highlight=true)`**: it maps the boardview box of each located part (in the photo, on the registered side) through the registration homography, takes the bounding rectangle (at least 8 px), and sends up to 8 boxes with the part name as label through the same code. The registered photo can be the last snapshot at another size, but it must have the same shape. The result has `highlight` (the `phone_highlight` result) and the annotated snapshot.
+- **Evidence rule 4** has a new sentence: "After you identify a part in a photo, you may call phone_highlight so the user sees it: say that the box is your estimate, and clear it when done."
+- **Page**:
+  - `#snapshot-boxes` draws the boxes and labels over the snapshot. `drawHighlights()` takes the image rectangle after the transform, removes the panel border, and places each box in view pixels. It includes the `object-fit: contain` letterbox and the snapshot flips (the stored boxes are in the true orientation). The labels keep their size under the wheel zoom.
+  - The boxes are drawn again after an image load, a zoom or pan, a size change (`ResizeObserver`), full screen, and each phone update.
+  - "Clear highlights" is in the panel flip row and in the full-screen snapshot bar. It is disabled with no boxes. It calls `POST /api/phone/highlight/clear`, which runs `phone_highlight` with `clear: true`.
+  - The log row of `phone_highlight` shows the annotated image.
+  - The monitor takes the boxes from the result of `phone_highlight` and of `board_locate_in_photo` (`PhoneState.highlights`).
+- **Fake phone**: `POST /v1/overlay` with the 400 rules (exactly `boxes`; at most 8; each box with exactly the five fields, numbers, width and height > 0, inside the image, label a string of at most 32 characters). `overlay_boxes` is in the status. An old app (`--no-preview`) answers 404 and sends no `overlay_boxes`.
+- **`qa_contract.py`**: `overlay_boxes` is a required status field (int). `check_overlay` sends 3 boxes (one at the image edge, one with a 32-character label), then 8, then nine bad bodies. It checks that a refused body keeps the boxes, and that an empty list gives 0. `GET /v1/overlay` must give 405. `--after-start` also checks `overlay_boxes == 0`.
+
+### What I did: scene-change detection
+
+- **`scene.py`**:
+  - `SceneState` is shared by the tools and the watcher. It has `changed_at`, `snapshot_taken()` (a new reference), `own_command()` (a new reference after `settle` = 1.5 s), `guard()` (a tool error with the message from the brief), and `mark_changed()` (tells the listeners).
+  - `prepare()` makes the compared frame: a JPEG draft decode in grayscale, the crop to the preview area (x 5–95 %, y 20–95 %: the app status text at the top left stays out), 64 px wide, a Gaussian blur, and the mean brightness removed (so auto exposure does not count).
+  - `compare()` gives the mean absolute difference and the best global shift up to ±4 px. `is_changed()` is true when the difference is above 12, or when a shift of 2 px or more explains the difference (the shifted difference is below 0.6 × the plain one).
+  - A change must last 2 compared frames in a row (a hand that passes does not count). All thresholds are named fields of `SceneOptions`.
+- **Frames**: `SceneWatcher` compares one frame each 0.5 s. `screen_feed()` uses the page's MJPEG fallback decoder while it runs. Otherwise it runs its own small `ScreenTranscoder` (2 fps, 160 px wide; `TranscodeOptions` is new in `screen_mjpeg.py`). It switches when the fallback starts or stops (`frames_while()`). The watcher starts at `phone_connect` when the phone screen runs, and it stops with `stop_phone` (also `bench_stop`) and at the monitor stop.
+- **Our own commands** (`Services.camera_command()`, before and after the request): `phone_zoom`, `phone_torch`, `phone_rotation`, the preview flips of `phone_snapshot_orientation`, `phone_in_sensor_zoom`, `phone_focus`, and `phone_highlight` (the boxes are in the stream). After them, the watcher takes a new reference after 1.5 s.
+- **On a change**: the server removes the phone boxes, marks every photo registration as stale, and sets `scene_changed`. The monitor removes the page boxes and sets `scene_changed_at`. The page shows "Scene changed: highlights cleared" for 4 s, over the live view and the snapshot.
+- **Refusals** until a fresh `phone_snapshot`: `phone_highlight`, `phone_focus` with `source` "snapshot", `board_locate_in_photo`, and also `board_register_photo` (its pixel pairs come from the old photo). A stale registration stays refused after the new snapshot: "call board_register_photo again". `phone_focus` with `source` "screen" still works.
+- `phone_status` returns `scene_changed` and `scene_changed_at`.
+- **Evidence rule 6** has a new sentence: "After the user moves or turns the board, take a fresh phone_snapshot before you point at anything; never reuse boxes or positions from an older photo."
+
+### Tests
+
+- `mcp/tests/test_highlight.py` (13 tests):
+  - The mapping with the four flip combinations, cutting at the edge, a box outside the image, the scaling and the shape check, and the green pixels of the annotated image.
+  - The tool: a 4000x3000 photo with Flip H (the agent sees 1568x1176). The top-left quarter goes to the phone as (0.75, 0, 0.25, 0.25), and the annotated image is 1568x1176 with green at the box edge. It also checks 9 boxes, both and neither argument, clear, and the old app.
+  - The scene change: after a change, the phone boxes are cleared, `phone_status` shows `scene_changed`, and `phone_highlight` and snapshot-pixel `phone_focus` are refused. A new snapshot allows them again. A zoom asks for a new reference.
+  - The board: the registration of `markings.json`, then `board_locate_in_photo` with `highlight` sends a U7301 box centered on its located center (within 2 px), with the width of its boardview box. After a change it is refused, and after a new snapshot the stale registration is still refused.
+  - The page route: the boxes go to the page state, Clear highlights empties them on the phone and the page, and a scene change clears them and sets `scene_changed_at`.
+- `mcp/tests/test_scene.py` (12 tests) with a synthetic board texture as a 360x800 phone screen:
+  - Not changed: still, sensor noise (σ 6), and 25 levels brighter.
+  - Changed: moved 12 px (3 %) sideways, moved 40 px down, turned 10°, and turned 180°. The shift check finds a small shift.
+  - The watcher: no reference before the first snapshot. One changed frame is ignored, and two in a row mark the change once. The state stays changed until a new snapshot. Frames during the settle time of our own command are ignored, and then a new reference is taken. `frames_while()` stops when asked.
+- End to end (scratch script; real ffmpeg with the watcher's own decoder, and still H.264 clips of the synthetic board): no change in 5 s of a still scene. A move of 4 % was found after 2.1 s, and a turn of 12° after 2.0 s. After our own command, no false change came. The decoder stopped with the watcher.
+- Playwright (headless Firefox, an in-process monitor with the real tools and the httpx fake phone):
+  - The agent's box on the second quarter showed at (0.25, 0.248, 0.25, 0.251) of the panel picture. After Flip H it moved to x 0.501, the mirror position.
+  - In full screen at zoom 1.56x, the box stayed at (0.25, 0.25, 0.25, 0.25) of the zoomed picture.
+  - Clear highlights sent an empty list to the phone.
+  - A scene change removed the boxes, showed the note, and hid it after 4 s. `phone_highlight` was then refused.
+  - The log rows of `phone_highlight` had the annotated image.
+- `qa_contract.py --strict` against `scripts/fake_phone.py`: 22/22 passed, with `PASS overlay`. `fake_phone.py --self-check`: passed.
+- `uv run pytest`: 303 passed, 1 skipped. ruff check, ruff format, and `prek run --files` on the changed files: pass.
+
+### Notes and limits
+
+- Detection needs the page server and the phone screen stream. With `--no-ui` or `--no-phone-screen`, `scene_changed` stays false.
+- The preview area crop is a fixed part of the screen. The app's preview fills the screen, and the status text is at the top left. If the app layout changes, `SceneOptions` must change.
+- A move within 1.5 s after our own command becomes part of the new reference and is not found. A hand that stays over the board for 1 s or more counts as a change.
+- The page snapshot tool (a user click) also resets the reference, because it is the same `phone_snapshot` tool.
+- The real app part is dd-android's task. I did not test against the phone.
+
+## Round 23: Board panel with part search and camera highlight
+
+The user's request: "on the web UI there should be a search for a part, and then it tries to highlight on the board where that is".
+
+### What I did
+
+- **Board panel** (right column, between Webcam and Settings; in one column after Webcam). It has:
+  - A path field with Open. It runs `board_open` through the instrumented tool call (source `ui`).
+  - The open board: the file name, parts, and nets.
+  - A note when another MCP server of this page opened a board (from the ingested `board_open` calls). Open then loads it here.
+  - A search box with a `<datalist>` over all part names and net names (`GET /api/board/names`).
+- **Search** (`POST /api/board/search`, `ui/board.py` `BoardPanel`). A part name or part glob searches a part; a net name or glob without such parts searches a net.
+  - Part: `board_find_part` (limit 5). The panel shows the side, the position in mm, the pin count, the mfgcode, up to 6 nets, the other matches, and the prefix note. It also runs `board_render` with `crop_to_part`, the part highlighted, and the new `green` option (every highlight in the green of the phone boxes). The drawing is the image of that logged call.
+  - Net: `board_find_net`. The panel shows the part count, the pin count, up to 12 parts, and the test points. It draws the side with most of the net's parts, with the net in green.
+- **Camera highlight**: the panel uses the newest photo registration (`BoardSession.last_registration_id`). If it is valid for the board and the side, it runs `board_locate_in_photo` with `highlight: true`, so the green box shows on the phone live view (the phone overlay) and on the page snapshot. For a net, the boxes are up to 8 of its parts on the registered side. Otherwise the panel keeps the drawing and says why:
+  - "register the photo first: 4 reference parts";
+  - "the board moved: register again" (a stale registration, or the scene-change refusal of the tool);
+  - "on the bottom side: not visible now";
+  - "the registration is for another board: register again".
+- **Register photo** (a `<details>` in the panel):
+  1. Take a snapshot.
+  2. Type a reference part and press Pick.
+  3. Click its center on the snapshot, in the panel or in full screen. A click that moves more than 5 px is a pan, not a pick.
+  4. Yellow marks with the part names show the picked points (they follow the zoom). Undo removes the last one.
+  5. With 4 or more points, Register sends `POST /api/board/register`. The server converts the points (0 to 1 of the shown picture) to pixels of the last snapshot and runs `board_register_photo` with that size. It refuses when the flips changed after the snapshot. The panel shows the rms and max error in px, and it says when only 4 parts give an exact fit that is not checked.
+- The monitor keeps the last `board_open` result (the page's or the agent's), and it reloads the panel after each finished `board_*` call.
+- `board_render` has the new optional `green` argument (`RenderOptions.green`, `colors.GREEN`). The palette stays the default.
+- The cockpit rule is unchanged: these are page routes for the user. Agents still use only the MCP tools. `mcp/README.md` has a "Board" part and the `green` argument.
+
+### Tests
+
+- New `mcp/tests/test_board_panel.py` (7 tests; the synthetic `markings.json` board with invented names, and the fake obv-dump runner):
+  - Before a board: no summary, names give 409, and search gives 502. After Open: the summary and the names, and one `board_open` row with source `ui`.
+  - Part search without a registration: the facts, the "register the photo first" message, and the drawing image of the `board_render` call with `green`.
+  - A registration from 5 clicked points (converted from the known photo mapping): checked, max error below 1 px. Then U7301 is highlighted (the phone got one box "U7301"), and U7303 gives "on the bottom side: not visible now".
+  - Net search: the parts and test points, and boxes only for parts on the registered side.
+  - After a scene change: the registration is stale, the search says "the board moved: register again" and keeps the drawing. A new registration works again.
+  - Register needs 4 points and a snapshot. A board of another server is offered.
+- Playwright (headless Firefox; an in-process monitor with the real tools, the httpx fake phone, and the synthetic board):
+  - Before Open, the search box is disabled. After Open, the panel showed "markings.json · 8 parts · 9 nets" and 17 autocomplete entries.
+  - U7301: the facts, the green drawing, and "Camera: register the photo first: 4 reference parts".
+  - Five parts picked by clicks on the snapshot (the last one in full screen): 5 marks. Register gave "error 0.75 px (max 1.14 px), checked".
+  - U7301 again: "highlighted on the camera (top side)". The page box center was at (352.9, 644.5) px of the photo, and the boardview center maps to (354.0, 646.0).
+  - U7303: "on the bottom side: not visible now". After a scene change: "the board moved: register again", and the registration shows "stale".
+  - Net PP_SYN_1V0: 4 parts (6 pins) and test point TP9.
+  - Every call in the log has source `ui`.
+- `uv run pytest`: 310 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on the changed files: pass.
+
+### Notes
+
+- A double-click on the snapshot during Pick also places a point, because the first click picks. The hint says to use the full-screen button or `f`.
+- The panel uses the board session of the MCP server of this page. A board that only another server opened needs Open here. The panel offers its path.
+- The registration uses the size of the last snapshot. When the agent registers another photo size, the highlight scales the boxes if the shape is the same.

@@ -8,9 +8,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from debug_devices_mcp.focus import FocusSource
 from debug_devices_mcp.ui.constants import http, tools
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
-from debug_devices_mcp.ui.views import InSensorZoomBody, OrientationBody, RotationBody, TorchBody, ZoomBody
+from debug_devices_mcp.ui.views import FocusBody, InSensorZoomBody, OrientationBody, RotationBody, TorchBody, ZoomBody
 
 BAD_REQUEST = 400
 NOT_FOUND = 404
@@ -72,6 +73,18 @@ async def post_orientation(request: Request) -> JSONResponse:
     return await run_tool(request, tools.PHONE_SNAPSHOT_ORIENTATION, body.model_dump(mode="json", exclude_none=True))
 
 
+async def post_focus(request: Request) -> JSONResponse:
+    body = await parse(request, FocusBody)
+    if isinstance(body, JSONResponse):
+        return body
+    arguments = {"x": body.screen_x, "y": body.screen_y, "source": FocusSource.SCREEN}
+    return await run_tool(request, tools.PHONE_FOCUS, arguments)
+
+
+async def post_clear_highlights(request: Request) -> JSONResponse:
+    return await run_tool(request, tools.PHONE_HIGHLIGHT, {"clear": True})
+
+
 async def post_in_sensor_zoom(request: Request) -> JSONResponse:
     body = await parse(request, InSensorZoomBody)
     if isinstance(body, JSONResponse):
@@ -107,6 +120,8 @@ routes = [
     Route("/api/phone/torch", post_torch, methods=["POST"]),
     Route("/api/phone/rotation", post_rotation, methods=["POST"]),
     Route("/api/phone/orientation", post_orientation, methods=["POST"]),
+    Route("/api/phone/focus", post_focus, methods=["POST"]),
+    Route("/api/phone/highlight/clear", post_clear_highlights, methods=["POST"]),
     Route("/api/phone/in-sensor-zoom", post_in_sensor_zoom, methods=["POST"]),
     Route("/api/phone/snapshot", post_snapshot, methods=["POST"]),
     Route("/api/phone/snapshot.jpg", get_last_snapshot, methods=["GET"]),

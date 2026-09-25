@@ -1,6 +1,6 @@
 """JSON shapes of the monitor web API."""
 
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictFloat
 
 from debug_devices_mcp.phone_api import RotationDegrees, ZoomStep
 from debug_devices_mcp.ui.events import PhoneState, ToolCallEvent
@@ -16,10 +16,16 @@ class SettingsView(BaseModel):
 
 
 class StateView(BaseModel):
+    # The code version: a page that sees another one after a reconnect reloads itself.
+    version: str
     phone: PhoneState
     settings: SettingsView
     webcam: StreamInfo | None
     calls: list[ToolCallEvent]
+
+
+class VersionView(BaseModel):
+    version: str
 
 
 class ErrorView(BaseModel):
@@ -45,6 +51,13 @@ class OrientationBody(BaseModel):
 class InSensorZoomBody(BaseModel):
     # Strict: "yes" or 1 must not turn a camera mode on.
     enabled: StrictBool
+
+
+class FocusBody(BaseModel):
+    """A click on the live phone view: a point on the phone screen, from 0 to 1."""
+
+    screen_x: StrictFloat = Field(ge=0, le=1)
+    screen_y: StrictFloat = Field(ge=0, le=1)
 
 
 class RotationBody(BaseModel):

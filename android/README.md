@@ -45,6 +45,9 @@ curl -s -X POST -H 'Content-Type: application/json' -d '{"enabled":true}' localh
 curl -s -X POST -H 'Content-Type: application/json' -d '{"degrees":90}' localhost:8765/v1/rotation
 curl -s -X POST -H 'Content-Type: application/json' -d '{"auto":true}' localhost:8765/v1/rotation
 curl -s -X POST -H 'Content-Type: application/json' -d '{"flip_horizontal":true,"flip_vertical":false}' localhost:8765/v1/preview
+curl -s -X POST -H 'Content-Type: application/json' -d '{"screen_x":0.5,"screen_y":0.5}' localhost:8765/v1/focus
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"boxes":[{"snapshot_x":0.42,"snapshot_y":0.31,"width":0.05,"height":0.04,"label":"U730"}]}' localhost:8765/v1/overlay
 curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 ```
 
@@ -81,6 +84,14 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   the snapshot width. Distance in cm = 100 / diopters. Detail in px/mm = `output_width_px * focal_length_mm /
   (sensor_width_mm * distance_mm)`. The phone label shows `≈ NN cm` when the calibration is `approximate` or
   `calibrated`. A capture callback on the Preview keeps the values (no logging per frame).
+- `POST /v1/focus` focuses and meters (AF + AE) on one point: `screen_x`/`screen_y` (the phone screen as the
+  screen stream shows it) or `snapshot_x`/`snapshot_y` (the current snapshot). The lock ends after 5 s, or earlier on a
+  new focus, a zoom change, or a rebind. A screen tap shows a short focus ring. The screen shows only the middle part
+  of the 3:4 camera image (the preview fills the tall display), and the PreviewView metering factory accounts for it.
+- `POST /v1/overlay` draws up to 8 green highlight boxes (3 dp, with a label) over the preview. The boxes are given on
+  the snapshot. `OverlayLogic` maps them to the preview (snapshot rotation, preview crop, flips) and scales them around
+  the centre when the zoom changes. They are never in `/v1/snapshot`. `{"boxes": []}` clears them; they also go away
+  after 10 minutes and at an app start.
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
 import android.view.OrientationEventListener
+import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -44,6 +45,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var server: ApiServer
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
+    private lateinit var focusRing: View
+    private lateinit var overlayView: OverlayView
     private lateinit var safeArea: FrameLayout
     private lateinit var overlay: FrameLayout
     private lateinit var orientationListener: OrientationEventListener
@@ -63,6 +66,8 @@ class MainActivity : ComponentActivity() {
         // (seen on 7fad170e: the label said "flip H", but the preview did not change).
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         statusView = findViewById(R.id.status)
+        focusRing = findViewById(R.id.focus_ring)
+        overlayView = findViewById(R.id.highlight_overlay)
         safeArea = findViewById(R.id.safe_area)
         overlay = findViewById(R.id.overlay)
         // Keep the label out of the status bar, the navigation bar, and the camera cutout.
@@ -78,8 +83,11 @@ class MainActivity : ComponentActivity() {
             applicationContext,
             onRotationChanged = { next -> onRotationChanged(next) },
             onPreviewFlipChanged = { applyPreviewFlip() },
-            onCameraBound = { bound -> observe(bound) }
+            onCameraBound = { bound -> observe(bound) },
+            onFocusTap = { point -> showFocusRing(point) },
+            onOverlayChanged = { overlayView.invalidate() }
         )
+        overlayView.boxes = { width, height -> camera.overlayRects(width, height) }
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.
         orientationListener = object : OrientationEventListener(this) {
@@ -174,6 +182,7 @@ class MainActivity : ComponentActivity() {
     private fun onRotationChanged(next: Int) {
         layoutOverlay()
         applyPreviewFlip()
+        overlayView.invalidate()
         Log.i(Constants.Log.TAG, Constants.Messages.ROTATION_CHANGED + OrientationLogic.surfaceDegrees(next))
     }
 
@@ -205,6 +214,7 @@ class MainActivity : ComponentActivity() {
         boundCamera.cameraInfo.zoomState.observe(this) { state ->
             zoomRatio = state.zoomRatio
             renderStatus()
+            overlayView.invalidate()
         }
         boundCamera.cameraInfo.torchState.observe(this) { state ->
             torchEnabled = state == TorchState.ON
@@ -212,11 +222,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Shows the focus ring centred on a display point for a short time. */
+    private fun showFocusRing(point: PixelPoint) {
+        val rootLocation = IntArray(2)
+        (focusRing.parent as View).getLocationOnScreen(rootLocation)
+        val half = resources.getDimension(R.dimen.focus_ring_size) / 2
+        focusRing.translationX = point.x - rootLocation[0] - half
+        focusRing.translationY = point.y - rootLocation[1] - half
+        focusRing.visibility = View.VISIBLE
+        focusRing.removeCallbacks(hideFocusRing)
+        focusRing.postDelayed(hideFocusRing, Constants.FocusTap.RING_MILLIS)
+    }
+
+    private val hideFocusRing = Runnable { focusRing.visibility = View.GONE }
+
     /** Mirrors only the preview view. The overlay with the label is a sibling, so its text stays readable. */
     private fun applyPreviewFlip() {
         val scale = PreviewFlipLogic.scale(camera.previewFlip, camera.effectiveRotation)
         previewView.scaleX = scale.scaleX
         previewView.scaleY = scale.scaleY
+        overlayView.invalidate()
         renderStatus()
     }
 

@@ -121,7 +121,8 @@ def test_events_stream_ends_when_the_monitor_closes(client: TestClient, monitor:
     monitor.closing.set()
     response = client.get("/api/events")
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert response.text == ": keepalive\n\n"
+    # The first event is the code version (a page from before a restart reloads itself), then the stream ends.
+    assert response.text == f'event: version\ndata: {{"version":"{monitor.code_version}"}}\n\n'
 
 
 async def test_mcp_calls_are_recorded_with_the_model_input(server_and_monitor: tuple[MCPServer, Monitor]) -> None:
@@ -243,6 +244,49 @@ async def test_cropped_frame_for_other_processes(tmp_path: Path) -> None:
         assert image.size == (64, 48)
     assert owned.status_code == 503
     assert "owns the webcam" in info["error"]
+
+
+async def test_each_crop_change_is_one_log_entry_with_a_preview(tmp_path: Path) -> None:
+    process = FakeStreamProcess(b"", eof=False)
+
+    async def spawner(args):
+        return process
+
+    options = StreamOptions(
+        ffmpeg_path="ffmpeg", device=Path("/dev/video0"), warmup_frames=0, timeout=timedelta(seconds=1)
+    )
+    stream = WebcamStream(options, spawner=spawner)
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), parts=MonitorParts(stream=stream))
+    stream.start()
+    feeder = asyncio.create_task(feed_frames(process))
+    await stream.next_frame(0, timedelta(seconds=1))
+    crop = {"x": 4, "y": 2, "width": 20, "height": 10}
+    transport = httpx.ASGITransport(app=create_app(monitor))
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as http:
+            await http.put("/api/settings", json={"webcam_crop": crop})
+            # The same crop again (for example Save of the other settings): no new entry.
+            await http.put("/api/settings", json={"webcam_crop": crop, "vision_model": "x/model"})
+            await http.delete("/api/settings/crop")
+            calls = (await http.get("/api/state")).json()["calls"]
+            preview = await http.get(f"/api/calls/{calls[0]['id']}/images/0")
+    finally:
+        feeder.cancel()
+        await stream.stop()
+    assert [(call["tool"], call["source"], call["summary"]) for call in calls] == [
+        ("webcam_crop", "ui", "4,2,20,10"),
+        ("webcam_crop", "ui", "none (the whole frame)"),
+    ]
+    assert [len(call["images"]) for call in calls] == [1, 1]
+    with Image.open(io.BytesIO(preview.content)) as image:
+        assert image.size == (20, 10)
+
+
+def test_crop_change_without_a_webcam_frame(client: TestClient) -> None:
+    client.put("/api/settings", json={"webcam_crop": {"x": 1, "y": 2, "width": 30, "height": 40}})
+    [call] = client.get("/api/state").json()["calls"]
+    assert call["summary"] == "1,2,30,40 (no webcam frame for a preview)"
+    assert call["images"] == []
 
 
 class RecordingOpener:
