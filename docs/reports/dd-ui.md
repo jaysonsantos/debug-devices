@@ -1811,3 +1811,27 @@ I read `docs/phone-api.md` again first: an empty `overlay_region` sits at the ce
   - two flip changes at the same time (two states on one file), and a sync update of an old state keeps the other flip;
   - the arrows of an empty region at the centre (J4 right, U2 up, "~3 cm" each), and a plain box becomes an arrow with its tag. Both run under `np.errstate(all="raise")`, so a division by zero would fail them.
 - `uv run pytest`: 917 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 45: follow-up of the last-round check (QA round 10, dd-ui part)
+
+I read `docs/phone-api.md` again first (the new N11 sentence: the rotation response waits for the layout of the new orientation). The server already takes the `overlay_region` of that response (`seen_status` in `phone_rotation`, round 42). I did not edit `multimeter.py`, `meter_frames.py`, `config.py`, `constants.py`, or `pyproject.toml` in this round.
+
+### What I did
+
+- **N27, a target at the centre of an empty view**: `edge_point` returns the centre when there is no direction (before, `min()` got an empty list and raised `ValueError`). In `plan`, a part exactly at the centre of an empty view gets no arrow and the note "at the centre of the view, but the phone has no room for boxes now: no arrow". `follow_boxes` gives no arrow for such a box. The live tracking paths in `pointing.py` also catch a `ValueError`, log a warning, and try again with the next frame.
+- **N28, the distance for a centred band**: a view with no area (a point, or a band of width or height 0) shows nothing, so `edge_point` measures the distance from its centre. The QA case (a band `(200, 400, 600, 0)` px, a part 0.5 cm left of the centre) now says "~0.5 cm", not "~2 cm".
+- **N29, the crop delete**: `Monitor.clear_crop()` removes only `webcam_crop`, in a read-modify-write inside the settings file lock. `DELETE /api/settings/crop` uses it, so a Screen view change or another server's change at the same time stays.
+- **N30, a secondary's own screen stream**: `PhoneScreen.selection` (set by `connect_services`, the same selection as the ingest check) is checked before each start and each restart of the session. When the user selected another phone, the stream stops (state error "<serial> is not the selected phone any more: the screen stream stopped") and sends no more adb commands to the old serial. The new phone's stream starts at its `phone_connect`.
+
+### Tests
+
+- New `mcp/tests/test_qa_round10.py` (9 tests):
+  - a part and a box at the centre of an empty view, `edge_point` with no direction, and a geometry error in a tracked frame (a warning, the tracking stays);
+  - the band distance "~0.5 cm" at 180°;
+  - a crop delete keeps a rotation change made by another writer, directly and through the route;
+  - the screen stream stops after a restart when another phone is selected, with no adb command after that (all calls to the old serial only); and it does not start for a phone that is not selected.
+- `uv run pytest`: 952 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+### Notes
+
+- One prek run printed a Nix "unexpected end-of-file" error while another agent edited the tree; a second run on each of my files passed.

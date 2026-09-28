@@ -1,5 +1,6 @@
 """The local bench record (bench_state.py). Report: "P2: Keep a compact bench state"."""
 
+import asyncio
 import json
 import re
 import uuid
@@ -25,21 +26,26 @@ from debug_devices_mcp.bench_state import (
     PowerState,
     ResidualPoint,
     StepKind,
+    add_photo,
     clear_all_points,
     gate,
     is_safe,
+    lcd_voltage,
+    note_meter_reading,
     recent_user_mode,
     residual_volts,
+    result_voltage,
 )
 from debug_devices_mcp.board.dump import BoardDump
 from debug_devices_mcp.board.model import Board
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import REPO_ROOT
+from debug_devices_mcp.meter_frames import combine
 from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, MultimeterReading, check_reading
 from debug_devices_mcp.server import Services, build_server
 
 from .test_board import fixture
-from .test_meter_frames import DIODE_VOLTS, answers, confirm_mode
+from .test_meter_frames import DIODE_VOLTS, LIMITS, answers, confirm_mode, frame
 from .test_multimeter import READING
 from .test_server import FakePhone, make_services, no_vision
 
@@ -976,6 +982,172 @@ def test_a_ground_point_is_never_the_safe_reading_of_a_bulk_clear() -> None:
     )
     with pytest.raises(ToolError, match="no safe DC reading after the latest isolation confirmation"):
         clear_all_points(state, USER_WORDS)
+
+
+# endregion
+
+
+# region: QA round 10 (N13 rest, N24, N25, N26, and the N16 and N17 gaps)
+
+
+@pytest.mark.parametrize(
+    ("display_text", "mode", "volts"),
+    [
+        ("5.10", MeterMode.DIODE, 5.1),  # above the diode test voltage: the dial is probably on DC V
+        ("0.60", MeterMode.DIODE, None),  # a diode drop
+        ("2.95", MeterMode.DIODE, None),
+        ("OL", MeterMode.DIODE, None),  # an open diode
+        ("5.10", MeterMode.OTHER, 5.1),  # the model could not tell the mode
+    ],
+)
+def test_the_gate_voltage_of_diode_and_other_readings(display_text: str, mode: MeterMode, volts: float | None) -> None:
+    unit = "" if mode is MeterMode.OTHER else "V"
+    voltage = lcd_voltage(display_text, unit, mode)
+    assert (voltage.volts if voltage else None) == (pytest.approx(volts) if volts is not None else None)
+    assert lcd_voltage("2.50", "V", MeterMode.DIODE, max_diode_volts=2.0) is not None
+
+
+def test_each_frame_uses_its_own_mode() -> None:
+    diode = frame("0.60", 0.60, mode="diode")
+    volts = frame("5.10", 5.10, mode="dc_voltage")
+    result = combine([diode, volts], LIMITS)
+    assert result.mode is MeterMode.DIODE
+    voltage = result_voltage(result)
+    assert voltage is not None
+    assert voltage.text == "5.10 V"
+
+
+async def test_a_diode_reading_above_the_limit_closes_the_gate(settings: Settings) -> None:
+    services = make_services(settings, FakePhone(), answers({**DIODE_VOLTS}))
+    async with Client(build_server(services)) as client:
+        read = await call(client, "multimeter_read")
+        state = await call(client, "bench_state")
+
+    assert read["status"] == "uncertain"
+    assert "5.10 V is above the safe residual limit" in read["bench_notice"]
+    assert state["state"]["residual_points"][0]["point"] == f"unknown point {read['capture_id']}"
+
+
+async def test_the_diode_limit_comes_from_the_setting() -> None:
+    store = BenchStateStore(max_diode_volts=6.0)
+    diode = combine([frame("5.10", 5.10, mode="diode")] * 2, LIMITS.model_copy(update={"max_diode_volts": 6.0}))
+    assert await note_meter_reading(store, diode) is None
+    assert store.load().residual_points == []
+
+
+async def test_a_point_kept_by_the_bulk_clear_is_not_lost_when_its_capture_gets_a_name(bench: Bench) -> None:
+    # N24: the 5.10 V reading at C12.1 comes after the anchor, so the bulk clear keeps it (as an unknown point).
+    async with Client(bench.server) as client:
+        await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "C12.1")
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        late = meter("dc_voltage", "V", 5.1, "5.10", confidence=0.3)
+        await note_meter_reading(bench.services.bench, late)
+        cleared = await bulk_clear(client)
+        named = await refused(client, "bench_record_measurement", capture_id=bench.add_meter(late), label="C12.1")
+        await isolate(client)
+        after = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+
+    assert cleared["state"]["residual_clearances"][-1]["cleared_points"] == ["c12.1"]
+    assert "the bench safety gate is closed at 'C12.1'" in named
+    points = {point["point"]: point for point in after["state"]["residual_points"]}
+    assert points["c12.1"]["safe"] is False
+    assert not any(key.startswith("unknown point") for key in points)
+    assert after["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_a_meter_read_during_a_slow_record_is_not_lost(bench: Bench) -> None:
+    # N25: bench_record_measurement waits for the board; multimeter_read writes an unsafe point meanwhile.
+    started, go = asyncio.Event(), asyncio.Event()
+
+    async def slow_restore() -> None:
+        started.set()
+        await go.wait()
+
+    bench.services.board.restore = slow_restore  # type: ignore[method-assign]
+    async with Client(bench.server) as client:
+        await isolate(client)
+        safe = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
+        record = asyncio.create_task(call(client, "bench_record_measurement", capture_id=safe, label="VBUS"))
+        await started.wait()
+        unsafe = meter("dc_voltage", "V", 5.1, "5.10")
+        notice = await note_meter_reading(bench.services.bench, unsafe)
+        go.set()
+        recorded = await record
+
+    assert notice is not None
+    assert [point["point"] for point in recorded["state"]["residual_points"]] == [
+        f"unknown point {unsafe.capture_id}",
+        "vbus",
+    ]
+    assert recorded["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_parallel_writers_on_the_file_lose_nothing(tmp_path: Path) -> None:
+    store = BenchStateStore(tmp_path / "bench-state.json")
+    ids = [f"photo-{index}" for index in range(40)]
+    unsafe = meter("dc_voltage", "V", 5.1, "5.10")
+    await asyncio.gather(
+        *(asyncio.to_thread(add_photo, store, capture_id) for capture_id in ids),
+        note_meter_reading(store, unsafe),
+    )
+    state = store.load()
+    assert sorted(state.photo_ids) == sorted(ids)
+    assert [point.point for point in state.residual_points] == [f"unknown point {unsafe.capture_id}"]
+
+
+async def test_a_later_unsafe_reading_reopens_the_power_check(bench: Bench) -> None:
+    # N26
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_probe_short")
+        check_id = state["next_step"]["step_id"]
+        await isolate(client)
+        done = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS", step_id=check_id)
+        reopened = await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12.1")
+        again = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+
+    assert done["next_step"] is None
+    check = reopened["state"]["steps"][0]
+    assert (check["done"], check["evidence_id"]) == (False, None)
+    assert check["reason"] == "reopened: the unsafe reading 5.10 V at 'C12.1' closed the safety gate"
+    assert reopened["next_step"]["step_id"] == check_id
+    assert again["state"]["steps"][0]["done"] is True
+    assert again["state"]["steps"][0]["reason"] is None
+
+
+@pytest.mark.parametrize("label", ["GROUND", "Ground", "GRND", "0 V", "chassis_gnd", "SIG_GROUND"])
+def test_more_ground_names_are_refused(label: str) -> None:
+    with pytest.raises(PointNameError, match="ground net"):
+        point_name(label, None)
+
+
+def test_the_gate_ignores_an_old_ground_point() -> None:
+    confirmed = datetime.now(UTC)
+    state = BenchState(
+        power=PowerRecord(state=PowerState.ISOLATED, user_confirmed_isolation=True, confirmed_at=confirmed),
+        residual_points=[
+            ResidualPoint(point="gnd", label="GND", at=confirmed, safe=True, reading="0.00 V", source_id="a")
+        ],
+    )
+    assert gate(state).missing == [
+        "no safe residual-voltage measurement (multimeter_read in DC voltage mode) after the confirmation"
+    ]
+
+
+async def test_the_refusal_asks_for_a_step_that_fits(bench: Bench) -> None:
+    # N17 wording: a DC V reading with a resistance step.
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_state_update", add_steps=[{"text": "Rail to GND", "kind": "resistance"}])
+        await isolate(client)
+        volts = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
+        refusal = await refused(
+            client, "bench_record_measurement", capture_id=volts, label="VBUS", step_id=state["next_step"]["step_id"]
+        )
+
+    assert "is a resistance step, but this measurement is dc_voltage" in refusal
+    assert "a step that fits this reading (a voltage or power-check step)" in refusal
 
 
 # endregion

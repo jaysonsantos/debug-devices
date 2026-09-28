@@ -35,6 +35,9 @@ class ScreenError(Exception):
     """The screen stream could not start."""
 
 
+NOT_SELECTED = "{serial} is not the selected phone any more: the screen stream stopped"
+
+
 class ScreenStatus(StrEnum):
     OFF = "off"
     STARTING = "starting"
@@ -159,6 +162,9 @@ type StateListener = Callable[[ScreenState], None]
 class PhoneScreen:
     """Keeps one scrcpy server stream for the selected serial and hands the frames to the pages."""
 
+    # The serial that the user selected now (page, then config); setup sets it. None: no check (tests).
+    selection: Callable[[], str] | None = None
+
     def __init__(
         self,
         options: PhoneScreenOptions,
@@ -259,6 +265,15 @@ class PhoneScreen:
 
     async def _run(self, serial: str) -> None:
         while True:
+            if self.selection is not None and self.selection() != serial:
+                # The user selected another phone (maybe in the primary page): no more adb commands to this one (N30
+                # of QA round 10). The new phone's stream starts at its phone_connect.
+                logger.warning(
+                    "phone screen %s: the selected phone is %s now: stopped", serial, self.selection() or "none"
+                )
+                self._set_state(ScreenStatus.ERROR, NOT_SELECTED.format(serial=serial))
+                self._cache.clear()
+                return
             self._set_state(ScreenStatus.STARTING)
             try:
                 await self._session(serial)

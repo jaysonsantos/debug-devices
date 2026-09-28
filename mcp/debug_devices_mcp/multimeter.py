@@ -9,23 +9,10 @@ import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from debug_devices_mcp.constants import CONTENT_TYPE_HEADER, ERROR_BODY_PREVIEW_CHARS, JSON_CONTENT_TYPE, openrouter
+from debug_devices_mcp.meter_mode import MeterMode  # its own module: sevenseg.reading needs it without this module
+from debug_devices_mcp.sevenseg.reading import LocalReading
 
 # region: reading
-
-
-class MeterMode(StrEnum):
-    DC_VOLTAGE = "dc_voltage"
-    AC_VOLTAGE = "ac_voltage"
-    DC_CURRENT = "dc_current"
-    AC_CURRENT = "ac_current"
-    RESISTANCE = "resistance"
-    CONTINUITY = "continuity"
-    DIODE = "diode"
-    CAPACITANCE = "capacitance"
-    FREQUENCY = "frequency"
-    TEMPERATURE = "temperature"
-    DUTY_CYCLE = "duty_cycle"
-    OTHER = "other"
 
 
 class MeterSource(StrEnum):
@@ -454,6 +441,10 @@ class MeterResult(BaseModel):
     # Why this reading closed the bench safety gate (bench_state.note_meter_reading): a voltage above the safe
     # residual limit, confirmed or not. None: no change to the gate.
     bench_notice: str | None = None
+    # --meter-local-decoder compare: the local 7-segment decoder on the same frames, and whether it agrees with the
+    # vision reading. For its evaluation only: it never changes the fields above. None when the mode is off.
+    local_reading: LocalReading | None = None
+    local_agrees: bool | None = None
 
 
 def check_reading(

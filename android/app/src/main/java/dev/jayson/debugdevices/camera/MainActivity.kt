@@ -25,7 +25,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,7 +141,7 @@ class MainActivity : ComponentActivity() {
         server = ApiServer(camera, BuildConfig.VERSION_NAME) { cause ->
             Log.e(Constants.Log.TAG, Constants.Messages.UNEXPECTED, cause)
         }
-        lifecycleScope.launch(Dispatchers.IO) { server.start() }
+        server.start()
         // The focus distance changes without an event, so the label reads it again while the app is visible.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -202,7 +201,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Stop in place, so the port is free before a new instance starts.
+        // N21: the stop runs on the server thread, so the main thread does not wait for running requests (they can
+        // need it to end). A new instance can start before this destroy: its start stopped this server already.
         server.stop()
         super.onDestroy()
     }

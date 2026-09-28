@@ -64,6 +64,7 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
         env.MAX_DIODE_VOLTAGE,
         env.METER_FRAME_INTERVAL,
         env.METER_COUNTS,
+        env.METER_LOCAL_DECODER,
     ):
         monkeypatch.delenv(name, raising=False)
     return Settings(

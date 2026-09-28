@@ -12,10 +12,21 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import java.net.HttpURLConnection
+import java.net.ServerSocket
+import java.net.URI
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -95,7 +106,11 @@ class ApiServerTest {
         override suspend fun setTorch(enabled: Boolean): CameraStatus =
             gate.control { status().copy(torchEnabled = enabled).also { status = it } }
 
+        /** Runs inside the rotation request before its status read, like the layout wait of the real camera. */
+        var beforeRotationRead: suspend () -> Unit = {}
+
         override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
+            beforeRotationRead()
             val degrees = OrientationLogic.surfaceDegrees(lockedRotation ?: SENSOR_ROTATION)
             status().copy(rotationDegrees = degrees, rotationLocked = lockedRotation != null).also { status = it }
         }
@@ -857,8 +872,137 @@ class ApiServerTest {
         assertEquals(ErrorCode.NOT_FOUND, response.error().error)
     }
 
+    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+
+    /** A plain HTTP call; it closes the connection first, so the server port has no TIME_WAIT for the next bind. */
+    private fun call(port: Int, path: String, body: String? = null): Pair<Int, String> {
+        val connection = URI("http://${Constants.Server.HOST}:$port$path").toURL().openConnection() as HttpURLConnection
+        try {
+            if (body != null) {
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(body.toByteArray()) }
+            }
+            val code = connection.responseCode
+            val stream = if (code <
+                HttpURLConnection.HTTP_BAD_REQUEST
+            ) {
+                connection.inputStream
+            } else {
+                connection.errorStream
+            }
+            return code to stream.use { it.readBytes().decodeToString() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** Waits until the server on [port] answers `/v1/health` with [version]. */
+    private fun awaitHealth(port: Int, version: String) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SERVER_WAIT_MILLIS)
+        while (System.nanoTime() < deadline) {
+            val answer = runCatching { call(port, Constants.Paths.HEALTH) }.getOrNull()
+            if (answer?.first == HttpURLConnection.HTTP_OK && version in answer.second) return
+            Thread.sleep(POLL_MILLIS)
+        }
+        throw AssertionError("no server with version $version on port $port")
+    }
+
+    @Test
+    fun `a cancelled call is not an unexpected error`() {
+        val camera = ready(ready).apply { statusError = CancellationException("server stop") }
+        api(camera) { runCatching { client.get(Constants.Paths.STATUS) } }
+        assertTrue(unexpected.toString(), unexpected.isEmpty())
+    }
+
+    @Test
+    fun `stop does not block a thread that a running request needs (N21)`() {
+        val main = Executors.newSingleThreadExecutor()
+        val lifecycle = Executors.newSingleThreadExecutor()
+        val client = Executors.newSingleThreadExecutor()
+        try {
+            val mainDispatcher = main.asCoroutineDispatcher()
+            val entered = CountDownLatch(1)
+            val camera = ready(ready).apply {
+                // Like the rotation layout wait: the request needs the main thread again before it can end.
+                beforeRotationRead = {
+                    withContext(mainDispatcher) { entered.countDown() }
+                    delay(REQUEST_PAUSE_MILLIS)
+                    withContext(mainDispatcher) {}
+                }
+            }
+            val port = freePort()
+            val server = ApiServer(camera, APP_VERSION, port, ServerHost(lifecycle)) { unexpected += it }
+            server.start()
+            awaitHealth(port, APP_VERSION)
+            val rotation = client.submit<Int> { call(port, Constants.Paths.ROTATION, """{"degrees":90}""").first }
+            assertTrue(entered.await(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS))
+            // onDestroy calls stop on the main thread.
+            val stopMillis = main.submit<Long> { measureTimeMillis { server.stop() } }.get()
+            assertTrue("stop took $stopMillis ms", stopMillis < Constants.Server.STOP_GRACE_PERIOD_MILLIS)
+            // The request ends inside the grace period of the stop, with its normal answer.
+            assertEquals(HttpURLConnection.HTTP_OK, rotation.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS))
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertTrue(unexpected.toString(), unexpected.isEmpty())
+        } finally {
+            listOf(main, lifecycle, client).forEach { it.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `a new server starts after the old one stopped, on the same port (N21)`() {
+        val lifecycle = Executors.newSingleThreadExecutor()
+        try {
+            val host = ServerHost(lifecycle)
+            val port = freePort()
+            val old = ApiServer(ready(ready), OLD_APP_VERSION, port, host) { unexpected += it }
+            old.start()
+            awaitHealth(port, OLD_APP_VERSION)
+            val next = ApiServer(ready(ready), APP_VERSION, port, host) { unexpected += it }
+            // The next activity instance starts its server at once; the old stop is still queued before it.
+            old.stop()
+            next.start()
+            awaitHealth(port, APP_VERSION)
+            next.stop()
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertTrue(unexpected.toString(), unexpected.isEmpty())
+        } finally {
+            lifecycle.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a new instance that starts before the old one is destroyed takes the port (N21)`() {
+        val lifecycle = Executors.newSingleThreadExecutor()
+        try {
+            val host = ServerHost(lifecycle)
+            val port = freePort()
+            val old = ApiServer(ready(ready), OLD_APP_VERSION, port, host) { unexpected += it }
+            old.start()
+            awaitHealth(port, OLD_APP_VERSION)
+            // Android can create the next activity before it destroys the old one.
+            val next = ApiServer(ready(ready), APP_VERSION, port, host) { unexpected += it }
+            next.start()
+            awaitHealth(port, APP_VERSION)
+            // The late destroy of the old activity does not stop the next server.
+            old.stop()
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertEquals(HttpURLConnection.HTTP_OK, call(port, Constants.Paths.HEALTH).first)
+            next.stop()
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertTrue(unexpected.toString(), unexpected.isEmpty())
+        } finally {
+            lifecycle.shutdownNow()
+        }
+    }
+
     private companion object {
         const val APP_VERSION = "0.1.0"
+        const val OLD_APP_VERSION = "0.0.9"
+        const val SERVER_WAIT_MILLIS = 10_000L
+        const val POLL_MILLIS = 20L
+        const val REQUEST_PAUSE_MILLIS = 50L
         const val CONCURRENT_REQUESTS = 10
         const val OUTSIDE_PREVIEW_Y = 0.9f
         const val SENSOR_ROTATION = android.view.Surface.ROTATION_0

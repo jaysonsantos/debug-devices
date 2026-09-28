@@ -651,6 +651,13 @@ class Monitor:
         """`update_settings` on the event loop: the file lock wait runs in a worker thread (N3 of QA round 6)."""
         return self._apply_settings(await self._store.update_async(self._keep_owned(saved)))
 
+    async def clear_crop(self) -> EffectiveSettings:
+        """Remove the webcam crop, and only it: a read-modify-write of the file inside the lock, so a change of
+        another setting at the same time stays (N29 of QA round 10)."""
+        return self._apply_settings(
+            await self._store.update_async(lambda current: current.model_copy(update={"webcam_crop": None}))
+        )
+
     def _keep_owned(self, saved: UiSettings) -> Callable[[UiSettings], UiSettings]:
         # The values that other parts own (the flips, the camera choices, the Markings toggle, the selected phone)
         # come from the file under the lock, not from this page: a save of the other settings never writes an old

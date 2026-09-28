@@ -558,6 +558,34 @@ Brief: `docs/briefs/qa-round8-followup.md`, dd-android-2. Contract: `docs/phone-
   No response had `null`. No crash. End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` stays.
 - Note (not changed): `overlay_region` also follows the height of the status label. If the label text changes its line count (for example the "≈ NN cm" part), the label band and `overlay_region` change. Clients read `overlay_region` again before they place boxes.
 
+### Round: QA round 10 follow-up (N21, N22, N23)
+
+Brief: `docs/briefs/qa-round10-followup.md`, dd-android-2. Contract: `docs/phone-api.md` (the N11 sentence with `ROTATION_LAYOUT_WAIT`).
+
+- **N21 (`onDestroy` blocks Main):** the server no longer starts or stops on the main thread. `ServerHost` (in `ApiServer.kt`) runs every start and stop on one background thread (`api-server-lifecycle`), in call order. `ServerHost.process` is the host of the app process. `onDestroy` returns at once. A request that needs the main thread to end (for example the rotation layout wait) ends inside the stop grace period with its normal answer.
+- **N21, a crash that I found during the device check:** my first version had one ordered thread only. On the S22, the app crashed (`BindException: Address already in use` on `api-server-lifecycle`) when I pressed BACK and ran `am start` 0.3 s later. Cause (from the `wm_on_*` events): Android calls `onCreate` of the new instance 80-150 ms **before** `onDestroy` of the old one. So the new server started while the old server still held the port. The old code has the same order problem: it started the new server on `Dispatchers.IO` in `onCreate`, and the old server stopped only in `onDestroy`. I found this by reading the code; I did not run the old APK. Fix: a start first stops the server that still runs, and a stop acts only on its own server. So a late `onDestroy` of the old instance does nothing. After the fix: 6 of 6 cycles (BACK, `am start` 0.3 s later, rotation requests in parallel) had no crash, the same process stayed up, and `/v1/status` answered 200 within 0.5 s after each cycle.
+- **Also changed:** the `Throwable` handler of StatusPages rethrows a `CancellationException`. A server stop cancels running calls, and these cancels are not "unexpected" errors (before, each one wrote a `Log.e` with a stack trace).
+- **N22 (foreground after a wait):** `setRotation`, `updateZoom`, and `setTorch` read the status through `activeCamera()` again after their suspension point. A pause during the wait or the CameraX call now gives 503 `camera_not_ready`. `setCameraSettings` and `setInSensorZoom` already did this. `setOverlay`, `setOverlayVisible`, `focusAt`, and `setPreviewFlip` do not suspend before their status read.
+- **N23 (timeout log):** a rotation layout wait that ends without the layout pass writes `Log.w` with the tag `DebugCamera`: "Rotation response without overlay_region: no layout pass in ms: 500".
+- The rotation wiring is now the pure function `changeThenAwaitLayout` in `Waits.kt` (measured, change, onTimeout, read). The QA note "no test of the `setRotation` wiring" is now covered by JVM tests.
+- The constants have new names that match the contract: `Constants.Overlay.ROTATION_LAYOUT_WAIT_MILLIS` (500) and `ROTATION_LAYOUT_POLL_MILLIS` (16). `Constants.Server.LIFECYCLE_THREAD` and `Constants.Messages.ROTATION_LAYOUT_TIMEOUT` are new.
+- New unit tests, 177 in total, all pass (`--no-daemon`):
+  - `WaitsTest` +4: the response is read after the layout pass; a missing layout pass logs one time and still answers; a view that was not measured before gets no wait; a pause during the wait gives 503.
+  - `ApiServerTest` +4, with a real CIO server on a free port:
+    - `stop` on a "main" thread returns in less than 100 ms, and the running rotation request (which needs that thread) gets 200.
+    - A new server after the old stop gets the same port.
+    - A new instance that starts before the old one is destroyed gets the port, and the late stop of the old one does not stop it.
+    - A cancelled call is not reported as an unexpected error.
+  - I checked that the takeover test and the cancel test fail without their fix. The server tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked):
+  - `{"degrees":90}`, `{"degrees":0}`, `{"degrees":270}`, and `{"auto":true}`: each response had a non-null `overlay_region`, equal to the status 1.5 s later (63-182 ms).
+  - Paused app (HOME): rotation, torch, and zoom return 503 `camera_not_ready` "Camera is not active".
+  - I could not make a pause fall exactly inside a wait on the phone (the wait is shorter than an adb key event). The unit test covers this case.
+  - The N23 log line did not show, because every layout pass ended in time.
+  - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` and the scrcpy forward stay.
+- Not changed: during a restart, clients can get a refused connection (`000`) or 503 for a short time (old server stopped, or the start state of the new instance). Clients already retry `/v1/health` after a start.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

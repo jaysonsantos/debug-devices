@@ -22,7 +22,7 @@ PART_PIN = re.compile(r"^(?P<part>[^\s.:]+)\s*(?:[.:]|\s+pin\s+)\s*(?P<pin>[^\s.
 MAX_LISTED_PINS = 6
 NAME_THE_POINT = "name the point: part.pin or net (for example C12.1 or PP3V3_S5)"
 # Ground nets: a reading there is always about 0 V, so it is not a residual point (and never "the safe reading").
-GROUND_NET_PATTERNS = ("*GND*", "*VSS*", "0V", "EARTH*", "CHASSIS*")
+GROUND_NET_PATTERNS = ("*GND*", "*GRND*", "*GROUND*", "*VSS*", "0V", "EARTH*", "CHASSIS*")
 
 
 class PointName(BaseModel):
@@ -43,7 +43,9 @@ def words(label: str) -> list[str]:
 
 
 def is_ground(name: str) -> bool:
-    return any(fnmatch.fnmatchcase(name.casefold(), pattern.casefold()) for pattern in GROUND_NET_PATTERNS)
+    # Without spaces: "0 V" is "0V".
+    text = name.casefold().replace(" ", "")
+    return any(fnmatch.fnmatchcase(text, pattern.casefold()) for pattern in GROUND_NET_PATTERNS)
 
 
 def ground_error(label: str, net: str) -> PointNameError:

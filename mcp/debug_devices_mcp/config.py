@@ -12,6 +12,7 @@ from debug_devices_mcp.board.constants import env as board_env
 from debug_devices_mcp.constants import ENV_FILE, PROGRAM_NAME, defaults, env
 from debug_devices_mcp.instructions import DEFAULT_BENCH_STATE_FILE, DEFAULT_INSTRUCTIONS_FILE
 from debug_devices_mcp.schematic import defaults as schematic_defaults
+from debug_devices_mcp.sevenseg.constants import LocalDecoderMode
 from debug_devices_mcp.ui.constants import UiStart
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
@@ -107,6 +108,12 @@ class Settings(BaseSettings):
         ),
     )
     # endregion: meter plausibility
+    meter_local_decoder: LocalDecoderMode = Field(
+        default=LocalDecoderMode.OFF,
+        description="off: no local code runs. compare: the local 7-segment decoder (debug-devices-sevenseg) also "
+        "reads the webcam frames of multimeter_read and bench_measure; local_reading and local_agrees go next to "
+        "the vision result, which stays the measurement. It saves the frames to a local dataset.",
+    )
     meter_model: str = Field(
         default="",
         description='Make and model of the multimeter, for example "PROSTER T21D". The vision prompt names it.',

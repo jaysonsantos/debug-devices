@@ -714,8 +714,9 @@ class CameraController(
             endFocusHold(camera)
             val ratio = target(readStatus(camera))
             setZoomAlongPath(camera, camera.cameraInfo.zoomState.value?.zoomRatio ?: Constants.Zoom.UNIT_RATIO, ratio)
-            // The zoom LiveData updates later, so report the ratio that CameraX accepted.
-            readStatus(camera).copy(zoomRatio = ratio)
+            // The zoom LiveData updates later, so report the ratio that CameraX accepted. N22: the app can pause
+            // during the zoom steps, so check the foreground again.
+            readStatus(activeCamera()).copy(zoomRatio = ratio)
         }
     }
 
@@ -723,7 +724,8 @@ class CameraController(
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
             runControl { camera.cameraControl.enableTorch(enabled).await() }
-            readStatus(camera).copy(torchEnabled = enabled)
+            // N22: the app can pause during the torch call, so check the foreground again.
+            readStatus(activeCamera()).copy(torchEnabled = enabled)
         }
     }
 
@@ -740,17 +742,21 @@ class CameraController(
 
     override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
-            val camera = activeCamera()
-            val measuredBefore = phoneFrameInput() != null
-            rotation.lock(lockedRotation)
+            activeCamera()
             // N11: a turn between portrait and sideways lays the overlay out again. Wait for that layout pass, so the
             // response has the overlay_region of the new orientation (null only when it really is not measured).
-            if (measuredBefore) {
-                awaitCondition(Constants.Overlay.LAYOUT_WAIT_MILLIS, Constants.Overlay.LAYOUT_POLL_MILLIS) {
-                    phoneFrameInput() != null
-                }
-            }
-            readStatus(camera)
+            changeThenAwaitLayout(
+                measured = { phoneFrameInput() != null },
+                change = { rotation.lock(lockedRotation) },
+                onTimeout = {
+                    Log.w(
+                        Constants.Log.TAG,
+                        Constants.Messages.ROTATION_LAYOUT_TIMEOUT + Constants.Overlay.ROTATION_LAYOUT_WAIT_MILLIS
+                    )
+                },
+                // N22: the app can pause during the wait, so check the foreground again.
+                read = { readStatus(activeCamera()) }
+            )
         }
     }
 

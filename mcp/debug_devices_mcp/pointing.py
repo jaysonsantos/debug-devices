@@ -353,7 +353,8 @@ class Pointing:
         if self.target is not None and self.target.registration_id == tracker.registration_id:
             try:
                 await self._refresh(force=False)
-            except ToolError as exc:
+            except (ToolError, ValueError) as exc:
+                # A frame never ends the live tracking with an error (N27 of QA round 10): the next frame tries again.
                 logger.warning("cannot move the pointing boxes: %s", exc)
 
     async def _clear_lost(self) -> None:
@@ -404,7 +405,12 @@ class Pointing:
             return
         geometry = boxes.geometry
         frame = ImageFrame((geometry.width, geometry.height), geometry.orientation, self._view(geometry))
-        shown, arrows = follow_boxes(boxes.boxes, boxes.tracker.board_to_current(), frame)
+        try:
+            shown, arrows = follow_boxes(boxes.boxes, boxes.tracker.board_to_current(), frame)
+        except ValueError as exc:
+            # A frame never ends the live tracking with an error (N27 of QA round 10): the next frame tries again.
+            logger.warning("cannot move the highlight boxes: %s", exc)
+            return
         overlay = []
         for box in shown:
             try:

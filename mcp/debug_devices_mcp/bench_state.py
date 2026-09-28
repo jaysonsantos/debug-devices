@@ -9,15 +9,22 @@ gate, also when it is not confirmed (fail safe). A probe short sends the record 
 The record holds only what the agent passes (a few part names), never data copied from a board file.
 """
 
+import asyncio
 import contextlib
+import fcntl
 import json
 import math
 import os
 import tempfile
+import threading
+import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -26,6 +33,7 @@ from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
 from debug_devices_mcp.bench_points import PointName, PointNameError, is_ground, point_name, text_key
 from debug_devices_mcp.board.model import Board
+from debug_devices_mcp.constants import defaults
 from debug_devices_mcp.evidence import CaptureLog
 from debug_devices_mcp.meter_frames import PREFIX_FACTORS
 from debug_devices_mcp.multimeter import (
@@ -43,6 +51,10 @@ STATE_VERSION = 1
 # A residual voltage at or below this is safe for a resistance, continuity, or diode test (a board without power).
 SAFE_RESIDUAL_VOLTS = 0.5
 MAX_PHOTO_IDS = 1000
+# The lock file next to the record, and how long a writer waits for it (the pattern of the monitor settings store).
+LOCK_SUFFIX = ".lock"
+LOCK_TIMEOUT = timedelta(seconds=5)
+LOCK_RETRY = timedelta(milliseconds=10)
 # A mode that the user confirmed on the dial is context for multimeter_read for this long.
 USER_MODE_MAX_AGE = timedelta(minutes=10)
 USER_SOURCE = "user"
@@ -53,6 +65,8 @@ USER_REPORT = "user_report"
 SKIPPED = "skipped"
 MAX_CANDIDATES = 20
 VOLTAGE_MODES = frozenset({MeterMode.DC_VOLTAGE, MeterMode.AC_VOLTAGE})
+# With an unreadable unit symbol, these modes count as volts for the safety gate (fail safe).
+UNKNOWN_UNIT_VOLT_MODES = frozenset({MeterMode.DC_VOLTAGE, MeterMode.AC_VOLTAGE, MeterMode.OTHER})
 # Only DC voltage shows the charge that a capacitor holds: an AC reading is not a residual-voltage check.
 RESIDUAL_MODE = MeterMode.DC_VOLTAGE
 AC_RESIDUAL_NOTE = (
@@ -257,34 +271,42 @@ class LcdVoltage(BaseModel):
     text: str
 
 
-def lcd_voltage(display_text: str, unit: str, mode: MeterMode) -> LcdVoltage | None:
+def lcd_voltage(
+    display_text: str, unit: str, mode: MeterMode, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE
+) -> LcdVoltage | None:
     """The number on the LCD in volts, for the safety gate. It needs no confirmed value (fail safe): the unit prefix
-    counts, an unreadable unit in a voltage mode counts as volts, and an overload is above every limit.
+    counts, an unreadable unit in a voltage mode (or a mode that the model could not tell) counts as volts, and an
+    overload is above every limit.
 
-    None: not a voltage reading (another unit, a diode test that shows the meter's own test voltage, or no digits).
+    A diode test shows the meter's own test voltage (a diode drop is about 0.6 V), so a diode reading counts only
+    above `max_diode_volts`: then the dial is probably on DC V. None: not a voltage reading (another unit, a diode
+    reading at or below the limit, an open diode "OL", or no digits).
     """
     family, prefix = unit_parts(unit)
-    if mode is MeterMode.DIODE:
-        return None
     if family is UnitFamily.VOLTAGE:
         factor = PREFIX_FACTORS.get(prefix, 1.0)
-    elif family is UnitFamily.UNKNOWN and mode in VOLTAGE_MODES:
+    elif family is UnitFamily.UNKNOWN and mode in UNKNOWN_UNIT_VOLT_MODES:
         factor = 1.0
     else:
         return None
     text = f"{display_text} {unit}".strip()
-    if is_overload(display_text):
-        return LcdVoltage(volts=math.inf, text=text)
+    overload = is_overload(display_text)
     digits, point = signature(display_text)
+    if mode is MeterMode.DIODE:
+        volts = None if overload or not digits else signed_value(display_text, digits, point) * factor
+        return LcdVoltage(volts=volts, text=text) if volts is not None and abs(volts) > max_diode_volts else None
+    if overload:
+        return LcdVoltage(volts=math.inf, text=text)
     if not digits:
         return None
     return LcdVoltage(volts=signed_value(display_text, digits, point) * factor, text=text)
 
 
-def result_voltage(result: MeterResult) -> LcdVoltage | None:
-    """The highest voltage on the LCD of the result and of each frame (one frame can show a misread point)."""
-    readings = [lcd_voltage(result.display_text, result.unit, result.mode)]
-    readings += [lcd_voltage(frame.display_text, frame.unit, result.mode) for frame in result.frames]
+def result_voltage(result: MeterResult, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> LcdVoltage | None:
+    """The highest voltage on the LCD of the result and of each frame, each with its own mode (one frame can show a
+    misread point, or another mode)."""
+    readings = [lcd_voltage(result.display_text, result.unit, result.mode, max_diode_volts)]
+    readings += [lcd_voltage(frame.display_text, frame.unit, frame.mode, max_diode_volts) for frame in result.frames]
     found = [reading for reading in readings if reading is not None]
     return max(found, key=lambda reading: abs(reading.volts)) if found else None
 
@@ -349,7 +371,8 @@ def gate(state: BenchState) -> GateReport:
         missing.append(UNSAFE_AFTER_CONFIRMATION)
     missing.extend(point_problem(point) for point in state.residual_points if not point.safe)
     measured_after = confirmed_at is not None and any(
-        point.safe and point.source_id is not None and point.at >= confirmed_at for point in state.residual_points
+        point.safe and point.source_id is not None and point.at >= confirmed_at and not is_ground(point.point)
+        for point in state.residual_points
     )
     if not measured_after:
         missing.append(
@@ -359,11 +382,58 @@ def gate(state: BenchState) -> GateReport:
 
 
 class BenchStateStore:
-    """Reads the file on each call (another MCP server can write it). Without a path: memory only (tests)."""
+    """Reads the file on each call (another MCP server can write it). Without a path: memory only (tests).
 
-    def __init__(self, path: Path | None = None) -> None:
+    Every writer changes the record through `update` (or `update_async`): one lock from load to save, so two writers
+    (two tools, a tool and multimeter_read, or two MCP servers) never lose each other's change.
+    """
+
+    def __init__(self, path: Path | None = None, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> None:
         self.path = path
+        # The diode test voltage of the meter (--max-diode-voltage): a diode reading above it counts as a voltage.
+        self.max_diode_volts = max_diode_volts
         self._memory = BenchState()
+        self._thread_lock = threading.Lock()
+
+    def update[T](self, change: Callable[[BenchState], T]) -> tuple[BenchState, T]:
+        """Load, change, and save under the lock. A ResidualKeptError from `change` saves the record, then goes up
+        (the reading changed the safety gate); any other error saves nothing. `change` must only change the record."""
+        with self._locked():
+            state = self.load()
+            try:
+                value = change(state)
+            except ResidualKeptError:
+                self.save(state)
+                raise
+            self.save(state)
+        return state, value
+
+    async def update_async[T](self, change: Callable[[BenchState], T]) -> tuple[BenchState, T]:
+        """`update` for code on the event loop: the lock wait and the file work run in a worker thread."""
+        return await asyncio.to_thread(self.update, change)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._thread_lock:
+            if self.path is None:
+                yield
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.path.with_name(f"{self.path.name}{LOCK_SUFFIX}")
+            with lock_path.open("a") as handle:
+                deadline = time.monotonic() + LOCK_TIMEOUT.total_seconds()
+                while True:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise ToolError(f"the bench state is locked by another writer: {lock_path}") from None
+                        time.sleep(LOCK_RETRY.total_seconds())
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
 
     def load(self) -> BenchState:
         if self.path is None:
@@ -463,14 +533,20 @@ class GateEvent(BaseModel):
     name_error: str | None = None
 
 
-def gate_event(state: BenchState, result: MeterResult, label: str | None, board: Board | None) -> GateEvent:
+def gate_event(
+    state: BenchState,
+    result: MeterResult,
+    label: str | None,
+    board: Board | None,
+    max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE,
+) -> GateEvent:
     """Apply one reading to the safety gate.
 
     Every voltage reading above the safe limit closes the gate: confirmed or not, in any power state (a misread only
     costs a new reading). Without a valid point name it goes to an unknown point of its capture id. A safe reading
     counts only when it is confirmed, DC, and at a named point; an unconfirmed safe reading never opens the gate.
     """
-    voltage = result_voltage(result)
+    voltage = result_voltage(result, max_diode_volts)
     if voltage is None or result.capture_id is None or result.captured_at is None:
         return GateEvent()
     name, name_error = None, None
@@ -529,7 +605,8 @@ def unsafe_event(
         point = ResidualPoint(point=name.key, label=label, at=result.captured_at, safe=False, reading=voltage.text)
         where = repr(label)
     point.source_id = result.capture_id
-    set_point(state, point)
+    if set_point(state, point):
+        reopen_power_checks(state, f"{voltage.text} at {where}")
     note_unsafe(state, result.captured_at)
     notes = [
         f"{voltage.text} is above the safe residual limit of {SAFE_RESIDUAL_VOLTS} V (this result is "
@@ -564,13 +641,15 @@ def label_conflict(state: BenchState, capture_id: str, label: str, board: Board 
     )
 
 
-def refuse_unconfirmed(state: BenchState, result: MeterResult, label: str, board: Board | None) -> None:
+def refuse_unconfirmed(
+    state: BenchState, result: MeterResult, label: str, board: Board | None, max_diode_volts: float
+) -> None:
     """A result that is not confirmed is no measurement. An unsafe voltage in it still closes the gate (saved)."""
     text = (
         f"this meter result is {result.status}, not confirmed: it cannot enter the confirmed measurements. "
         f"{result.request or ''}"
     ).strip()
-    event = gate_event(state, result, label, board)
+    event = gate_event(state, result, label, board, max_diode_volts)
     if event.changed:
         extra = [*event.notes, *filter(None, [event.name_error])]
         raise ResidualKeptError(f"{text} " + " ".join(extra))
@@ -584,6 +663,7 @@ def record_measurement(
     step_id: str | None,
     done_before_gate: str | None = None,
     board: Board | None = None,
+    max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE,
 ) -> tuple[Measurement, str | None]:
     """Add a confirmed meter result. Other results are refused: they are not measurements.
 
@@ -606,10 +686,10 @@ def record_measurement(
     if conflict is not None:
         raise ToolError(conflict)
     if result.status is not MeterStatus.CONFIRMED:
-        refuse_unconfirmed(state, result, label, board)
+        refuse_unconfirmed(state, result, label, board, max_diode_volts)
     step = next((item for item in state.steps if item.step_id == step_id), None) if step_id else None
     refusal = step_refusal(state, result, step_id, step, done_before_gate)
-    event = gate_event(state, result, label, board)
+    event = gate_event(state, result, label, board, max_diode_volts)
     if event.name_error is not None:
         if event.changed:
             raise ResidualKeptError(f"{event.name_error}. " + " ".join(event.notes))
@@ -625,7 +705,8 @@ def record_measurement(
         if event.changed:
             raise ResidualKeptError(
                 f"{refusal}. The voltage reading is recorded without the step, because it counts for the safety gate. "
-                "To attach it to a step, record the same capture_id again with that step_id and the same label."
+                "To attach it to a step that fits this reading (a voltage or power-check step), record the same "
+                "capture_id again with that step_id and the same label."
             )
         if new:
             state.measurements.remove(measurement)
@@ -648,19 +729,19 @@ def finish_step(
     return notes
 
 
-def note_meter_reading(store: BenchStateStore, result: MeterResult) -> str | None:
+async def note_meter_reading(store: BenchStateStore, result: MeterResult) -> str | None:
     """multimeter_read and bench_measure: an unsafe voltage closes the safety gate at once (an unknown point until the
-    agent records the capture with its point name). The notice, or None when the gate did not change."""
-    voltage = result_voltage(result)
+    agent records the capture with its point name), under the store lock. The notice, or None when the gate did not
+    change."""
+    voltage = result_voltage(result, store.max_diode_volts)
     if voltage is None or abs(voltage.volts) <= SAFE_RESIDUAL_VOLTS:
         return None
     try:
-        state = store.load()
+        _, event = await store.update_async(
+            partial(gate_event, result=result, label=None, board=None, max_diode_volts=store.max_diode_volts)
+        )
     except ToolError as exc:
         return f"{voltage.text} is above the safe residual limit, but the bench state cannot record it: {exc}"
-    event = gate_event(state, result, None, None)
-    if event.changed:
-        store.save(state)
     return "; ".join(event.notes) or None
 
 
@@ -735,20 +816,13 @@ def clear_all_points(state: BenchState, user_words: str | None) -> str:
             + f" the safe reading at {anchor.label!r}; measure those points again"
         )
     cleared_at = now()
-    for point in cleared:
-        set_point(
-            state,
-            point.model_copy(
-                # A clearance is no reading: it never counts as the safe reading after the confirmation.
-                update={
-                    "at": cleared_at,
-                    "safe": True,
-                    "reading": "cleared by the user",
-                    "source_id": None,
-                    "user_reason": user_words,
-                }
-            ),
-        )
+    # The clearance covers the readings up to the anchor, so it has the anchor's time: a kept unsafe reading (newer
+    # than the anchor) still wins when its capture gets this point's name later. A clearance is no reading: it never
+    # counts as the safe reading after the confirmation.
+    update = {"at": anchor.at, "safe": True, "reading": "cleared by the user", "source_id": None}
+    cleared = [
+        point for point in cleared if set_point(state, point.model_copy(update={**update, "user_reason": user_words}))
+    ]
     state.residual_clearances.append(
         ResidualClearance(
             point=ALL_POINTS,
@@ -790,11 +864,19 @@ def add_measurement(
     return measurement, True
 
 
+def reopen_power_checks(state: BenchState, reading: str) -> None:
+    """A new unsafe point closes the gate: a completed power check is open again, so the next step is the check."""
+    for check in state.steps:
+        if check.kind is StepKind.POWER_CHECK and check.done:
+            check.done, check.done_at, check.evidence_id, check.completed_by = False, None, None, None
+            check.reason = f"reopened: the unsafe reading {reading} closed the safety gate"
+
+
 def complete_power_checks(state: BenchState, evidence_id: str) -> None:
     for check in state.steps:
         if check.kind is StepKind.POWER_CHECK and not check.done:
             check.done, check.done_at, check.evidence_id = True, now(), evidence_id
-            check.completed_by = EVIDENCE
+            check.completed_by, check.reason = EVIDENCE, None
 
 
 def change_power(state: BenchState, power: PowerState | None, user_confirmed_isolation: bool | None) -> None:
@@ -837,14 +919,15 @@ def change_step(
 
 
 def add_photo(store: BenchStateStore, capture_id: str) -> None:
-    """Every phone_snapshot goes into the record. A record that cannot be read is left as it is."""
-    try:
-        state = store.load()
-    except ToolError:
-        return
-    if capture_id not in state.photo_ids:
-        state.photo_ids = [*state.photo_ids, capture_id][-MAX_PHOTO_IDS:]
-        store.save(state)
+    """Every phone_snapshot goes into the record (under the store lock; call it in a worker thread). A record that
+    cannot be read or locked is left as it is."""
+
+    def change(state: BenchState) -> None:
+        if capture_id not in state.photo_ids:
+            state.photo_ids = [*state.photo_ids, capture_id][-MAX_PHOTO_IDS:]
+
+    with contextlib.suppress(ToolError):
+        store.update(change)
 
 
 def probe_short(state: BenchState) -> None:
@@ -863,6 +946,51 @@ def probe_short(state: BenchState) -> None:
 class NewStep(BaseModel):
     text: str
     kind: StepKind = StepKind.OTHER
+
+
+@dataclass(frozen=True)
+class StateUpdate:
+    """The fields of one bench_state_update call."""
+
+    power: PowerState | None = None
+    user_confirmed_isolation: bool | None = None
+    meter_mode_confirmed_by_user: MeterMode | None = None
+    probe_contact: str | None = None
+    photo_id: str | None = None
+    part_candidates: list[str] | None = None
+    add_steps: list[NewStep] | None = None
+    complete_step: str | None = None
+    skip_step: str | None = None
+    step_reason: str | None = None
+    clear_residual_point: str | None = None
+    clear_residual_reason: str | None = None
+    clear_all_residual_points: bool = False
+    user_words: str | None = None
+
+
+def apply_update(state: BenchState, update: StateUpdate, board: Board | None) -> str | None:
+    """Apply a bench_state_update call to the record (under the store lock). The notice of a bulk clear, or None."""
+    if update.photo_id is not None and update.photo_id not in state.photo_ids:
+        state.photo_ids = [*state.photo_ids, update.photo_id][-MAX_PHOTO_IDS:]
+    change_power(state, update.power, update.user_confirmed_isolation)
+    if update.meter_mode_confirmed_by_user is not None:
+        state.meter_mode = MeterModeRecord(
+            mode=update.meter_mode_confirmed_by_user, source=USER_SOURCE, recorded_at=now()
+        )
+    if update.probe_contact is not None:
+        if update.photo_id is None:
+            raise ToolError("a probe contact needs `photo_id`: a current phone_snapshot that shows the probes")
+        state.probe_contact = ProbeContact(
+            description=update.probe_contact, photo_id=update.photo_id, recorded_at=now()
+        )
+    if update.part_candidates is not None:
+        state.part_candidates = list(dict.fromkeys(update.part_candidates))[:MAX_CANDIDATES]
+    for new in update.add_steps or []:
+        state.steps.append(Step(step_id=str(uuid.uuid7()), text=new.text, kind=new.kind))
+    change_step(state, update.complete_step, update.skip_step, update.step_reason, update.photo_id)
+    if update.clear_residual_point is not None:
+        clear_point(state, update.clear_residual_point, update.clear_residual_reason, board)
+    return clear_all_points(state, update.user_words) if update.clear_all_residual_points else None
 
 
 type OpenBoard = Callable[[], Awaitable[Board | None]]
@@ -919,27 +1047,28 @@ def register_bench_state_tools(
         a step from the user's report (for example a test that they did themselves), so the next step moves on.
         Every phone_snapshot goes into `photo_ids` by itself.
         """
-        state = store.load()
         if photo_id is not None:
             captures.require_current_photo(photo_id)
-            if photo_id not in state.photo_ids:
-                state.photo_ids = [*state.photo_ids, photo_id][-MAX_PHOTO_IDS:]
-        change_power(state, power, user_confirmed_isolation)
-        if meter_mode_confirmed_by_user is not None:
-            state.meter_mode = MeterModeRecord(mode=meter_mode_confirmed_by_user, source=USER_SOURCE, recorded_at=now())
-        if probe_contact is not None:
-            if photo_id is None:
-                raise ToolError("a probe contact needs `photo_id`: a current phone_snapshot that shows the probes")
-            state.probe_contact = ProbeContact(description=probe_contact, photo_id=photo_id, recorded_at=now())
-        if part_candidates is not None:
-            state.part_candidates = list(dict.fromkeys(part_candidates))[:MAX_CANDIDATES]
-        for new in add_steps or []:
-            state.steps.append(Step(step_id=str(uuid.uuid7()), text=new.text, kind=new.kind))
-        change_step(state, complete_step, skip_step, step_reason, photo_id)
-        if clear_residual_point is not None:
-            clear_point(state, clear_residual_point, clear_residual_reason, await open_board())
-        notice = clear_all_points(state, user_words) if clear_all_residual_points else None
-        return store.view(store.save(state), notice)
+        update = StateUpdate(
+            power=power,
+            user_confirmed_isolation=user_confirmed_isolation,
+            meter_mode_confirmed_by_user=meter_mode_confirmed_by_user,
+            probe_contact=probe_contact,
+            photo_id=photo_id,
+            part_candidates=part_candidates,
+            add_steps=add_steps,
+            complete_step=complete_step,
+            skip_step=skip_step,
+            step_reason=step_reason,
+            clear_residual_point=clear_residual_point,
+            clear_residual_reason=clear_residual_reason,
+            clear_all_residual_points=clear_all_residual_points,
+            user_words=user_words,
+        )
+        # The board check runs before the lock: the lock holds only the load, the change, and the save.
+        board = await open_board() if clear_residual_point is not None else None
+        state, notice = await store.update_async(partial(apply_update, update=update, board=board))
+        return store.view(state, notice)
 
     @server.tool()
     async def bench_record_measurement(
@@ -969,14 +1098,17 @@ def register_bench_state_tools(
         result = captures.meter_results.get(capture_id)
         if result is None:
             raise ToolError(f"no multimeter_read result with capture id {capture_id} in this server session")
-        state = store.load()
+        # The board check runs before the lock: the lock holds only the load, the change, and the save.
         board = await open_board()
-        try:
-            _, notice = record_measurement(state, result, label, step_id, done_before_gate, board)
-        except ResidualKeptError:
-            store.save(state)
-            raise
-        return store.view(store.save(state), notice)
+
+        def change(state: BenchState) -> str | None:
+            _, notice = record_measurement(
+                state, result, label, step_id, done_before_gate, board, store.max_diode_volts
+            )
+            return notice
+
+        state, notice = await store.update_async(change)
+        return store.view(state, notice)
 
     @server.tool()
     async def bench_begin_step(step_id: str) -> BenchStateView:
@@ -1002,9 +1134,8 @@ def register_bench_state_tools(
         The record goes back to the power check: the power state is unknown, the isolation confirmation and the
         residual-voltage check are cleared, and a power check step comes next.
         """
-        state = store.load()
-        probe_short(state)
-        return store.view(store.save(state))
+        state, _ = await store.update_async(probe_short)
+        return store.view(state)
 
 
 def is_recent_user_mode(record: MeterModeRecord | None, max_age: timedelta = USER_MODE_MAX_AGE) -> bool:

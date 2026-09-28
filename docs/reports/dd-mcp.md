@@ -1067,3 +1067,43 @@ Result: "93.2 V" with 6000 counts, or at a low confidence, is now "disputed" wit
 ### Checks
 
 - `uv run pytest`: 943 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## QA round 10 follow-up: N13 rest, N24, N25, N26, and the N16 and N17 gaps
+
+I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.py`, the README, and my tests. I did not edit `multimeter.py`, `meter_frames.py`, `config.py`, `constants.py`, or `pyproject.toml` (dd-meter works in them).
+
+### What I did
+
+- N13 rest (`lcd_voltage`, `result_voltage`):
+  - A diode reading above the diode test voltage (`--max-diode-voltage`, default 3.0 V) counts as a voltage for the gate, because the dial is probably on DC V. A diode reading at or below the limit, and an open diode ("OL"), do not count.
+  - Each frame uses its own mode (`FrameReading.mode`), so a "0.60" diode frame and a "5.10" DC V frame count as 5.10 V.
+  - The low gap (3): with an unreadable unit, the mode "other" counts as volts too (`UNKNOWN_UNIT_VOLT_MODES`), as DC V and AC V do.
+  - `BenchStateStore` has the limit (`max_diode_volts`), and `server.py` gives it `settings.max_diode_voltage`.
+- N24 (`clear_all_points`): a cleared point now has the anchor's time, not the time of the clear, because the bulk clear covers only the readings up to the anchor. So a kept unsafe reading (newer than the anchor) replaces the clearance when its capture gets that point's name later. The case from the report now keeps C12.1 unsafe. `cleared_points` lists only the points that were really cleared.
+- N25 (the store lock):
+  - `BenchStateStore.update(change)` holds one lock from load to save: a lock file next to the record (`fcntl.flock` with a 5 s limit, as in the monitor settings store) and a thread lock. `update_async` runs it in a worker thread.
+  - Every writer uses it: `bench_state_update` (its body is now `apply_update` with a `StateUpdate`), `bench_record_measurement`, `bench_probe_short`, `add_photo`, and `note_meter_reading` (now async; `read_meter` awaits it).
+  - `open_board()` runs before the lock, so a slow board load does not hold the lock.
+  - A `ResidualKeptError` saves the record, then goes up; any other error saves nothing.
+- N26 (`reopen_power_checks`): when a point becomes unsafe, each completed power-check step opens again, with the reason "reopened: the unsafe reading 5.10 V at 'C12.1' closed the safety gate". The next safe reading that opens the gate completes it again and clears the reason.
+- N16 gaps: `GROUND_NET_PATTERNS` also has "*GRND*" and "*GROUND*", and `is_ground` removes spaces ("0 V" is "0V"). `gate()` ignores a ground point from an old record.
+- N17 wording: "To attach it to a step that fits this reading (a voltage or power-check step), record the same capture_id again with that step_id and the same label."
+- Docs: the "Bench state" bullet in `mcp/README.md` and the safety sentence in the `multimeter_read` description.
+
+### Tests (`mcp/tests/test_bench_state.py`, "QA round 10")
+
+- N13:
+  - Diode 5.10 V counts; 0.60 V, 2.95 V, and "OL" do not; mode "other" with no unit counts; a limit of 2.0 V counts 2.50 V.
+  - A "0.60" diode frame and a "5.10" DC V frame count as 5.10 V.
+  - `multimeter_read` with "5.10 V" diode in both frames: uncertain, with `bench_notice` and an unknown point.
+  - A limit of 6 V in the store counts nothing.
+- N24: the case from the report. After the bulk clear, recording the kept capture as "C12.1" makes C12.1 unsafe. A new confirmation and "VBUS" 0.01 V do not open the gate.
+- N25:
+  - A slow `open_board` in `bench_record_measurement` while `note_meter_reading` writes an unsafe point: both entries are saved, and the gate is closed.
+  - 40 `add_photo` threads and one `note_meter_reading` on a real file: nothing is lost.
+- N26: a completed power check opens again after 5.10 V at another point, and completes again after the new safe readings.
+- N16 and N17: "GROUND", "Ground", "GRND", "0 V", "chassis_gnd", and "SIG_GROUND" are refused. An old GND point does not count. The refusal asks for a step that fits.
+
+### Checks
+
+- `uv run pytest`: 972 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

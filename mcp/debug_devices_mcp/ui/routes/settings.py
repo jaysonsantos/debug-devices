@@ -46,7 +46,7 @@ async def put_settings(request: Request) -> JSONResponse:
 async def delete_crop(request: Request) -> JSONResponse:
     monitor = monitor_of(request)
     before = monitor.effective.webcam_crop
-    await monitor.save_settings(monitor.saved.model_copy(update={"webcam_crop": None}))
+    await monitor.clear_crop()
     await monitor.log_crop_change(before)
     return json_response(settings_view(monitor))
 

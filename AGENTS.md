@@ -9,6 +9,7 @@ Tools that let a coding agent (Claude Code) see and measure real hardware while 
   - Phone tools (`phone_*`): through `adb forward` to the app.
   - Webcam and multimeter (`webcam_snapshot`, `multimeter_read`): one shared ffmpeg stream of the PC webcam. The multimeter tool sends the cropped frame to an OpenRouter vision model (default `openai/gpt-6-luna`).
   - Board tools (`board_*`): run `obv-dump` and answer part, net, and position questions.
+  - Local 7-segment decoder (`mcp/debug_devices_mcp/sevenseg/`, CLI `debug-devices-sevenseg`): reads the multimeter LCD from the webcam crop with a calibrated profile. Only in compare mode (`--meter-local-decoder compare`, default `off`): it adds `local_reading` next to the vision result and never changes the result or the bench gate.
   - Monitor page (`mcp/debug_devices_mcp/ui/`): local web page on `127.0.0.1:18766` with the webcam, the phone screen (scrcpy-server H.264), the controls, and a live tool-call log.
   - Lazy start (`--ui-start lazy`, default): nothing runs at process start. The first tool call starts the page, the first webcam use starts ffmpeg, and `phone_connect` starts adb. `bench_start` and `bench_stop` start and stop everything.
 - `boardview/`: C++ CLI `obv-dump` on the OpenBoardView 10.0.0 parsers (MIT). The flake builds it from a pinned tag plus `boardview/patches/`.

@@ -1051,3 +1051,128 @@ New findings (Android):
 3. Contract text: the N11 `null` cases, and whether `overlay_region` follows the label text.
 4. Low: N27 (centre target), N28 (band distance), N17 wording, N16 names ("GROUND", "GRND", "0 V").
 5. When the user allows an app restart: `--after-start` and `--expect starting-race` on the S22.
+
+## Round 11: check
+
+Date: 2026-09-28. Scope: `docs/briefs/qa-round10-followup.md` (all sections), the N11 contract sentence (`ROTATION_LAYOUT_WAIT`), the dd-android-2 crash fix (fast Back and restart: `BindException`, `ServerHost`), and the new local 7-segment decoder (`docs/briefs/sevenseg.md`, `docs/reports/dd-meter.md`). The working tree at `681cecf` with the uncommitted changes. All other agents had stopped editing. I did not change product code or my scripts, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1045 passed, 1 skipped |
+| `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file (`git ls-files -co --exclude-standard`, 313 files) and `git status --porcelain` before and after (after pytest had ended) | All 15 hooks pass. Hashes and git status unchanged: the tree stays unchanged. |
+| `(cd android && nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest)` | BUILD SUCCESSFUL (`UP-TO-DATE`). Forced `testDebugUnitTest --rerun`: BUILD SUCCESSFUL, 177 tests in 16 suites, 0 failures. |
+
+### 2. QA scripts
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 13 modes |
+| `python3 scripts/fake_phone.py --port 18893`, then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18893 --strict --after-start` | 30/30 |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` (server with `--no-ui`; the local decoder is off by default) | 15/15, with `fire-tv` |
+
+### 3. Re-check
+
+Three read-only agents re-checked every item against the code and the contract text, ran the cases in memory, and compared the decoder modes with `HEAD`. I checked the main findings myself ("checked"). All changes are uncommitted. Paths are in `mcp/debug_devices_mcp/` unless they start with another directory; `A/` and `AT/` are the Android source and test directories.
+
+#### Bench safety (N13 rest, N24, N25, N26, N16, N17)
+
+`uv run pytest -q mcp/tests/test_bench_state.py mcp/tests/test_meter_frames.py`: 144 passed. The reviewer ran every case in memory and through the real tools (`register_bench_state_tools`, file store in a temporary directory).
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N13 rest | fixed, low gap | `bench_state.py:274-302` (diode rule `:295-297`: counts above the limit), `:305-311` (each frame uses its own mode, `:309`), `:69` (mode "other" counts), `:391-394`, `server.py:690`, `:838`; tests `test_bench_state.py:1003-1031` | Gate closed (correct): diode "5.10 V" in both frames; "0.60" diode + "5.10" DC V; diode 3.01 V and 3001 mV; -5.10 V; "OL" diode + "OL" DC; mode "other" with no unit and "5.10". Gate stays open (correct): diode 3.00 V, 2.95 V, 0.60 V; diode "OL" alone (an open diode test shows OL). Gap: diode mode with an unreadable unit and "5.10" never counts (`:69`, `:288`). |
+| N24 | fixed | `bench_state.py:819-825`, `:604`, `:608`; test `test_bench_state.py:1038` | The round 10 case through the real tools: after naming the capture "C12.1", the point stays unsafe at 5.10 V, and after a new confirmation and "VBUS" 0.01 V the gate stays closed. |
+| N25 | fixed | `bench_state.py:398-413` (`update`: load, change, save under one lock; `update_async` in a thread), `:415-436` (thread lock and `flock` on `bench-state.json.lock`, 5 s limit); tests `test_bench_state.py:1059`, `:1086` | Every writer uses the lock: `bench_state_update` `:1070`, `bench_record_measurement` `:1110`, `bench_probe_short` `:1137`, `add_photo` `:930`, `note_meter_reading` `:740`. The round 10 case (slow `open_board` with a 5.10 V reading in the middle) keeps both entries and closes the gate. 60 photo ids and 10 unsafe readings from two stores on one file: all saved. The event loop kept running while another holder had the lock. See N31 and N33. |
+| N26 | fixed | `reopen_power_checks` `bench_state.py:867-872`, `:608-609`, `:702-703`; test `test_bench_state.py:1099` | See N35. |
+| N16 | fixed | `bench_points.py:25`, `:45-48`, `:86-89`, `:103`, `bench_state.py:374`, `:800`; tests `test_bench_state.py:1121`, `:1126` | "GROUND", "Ground", "GRND", "0 V", "G N D", and board nets with these names are refused. See N36. |
+| N17 | fixed | `bench_state.py:706-710`; test `test_bench_state.py:1139` | The tool docstring (`:1092-1093`) still says "record the same capture_id again with the step". |
+
+New findings (bench):
+
+- **N31 (low, checked): `bench-state.json.lock` is not git-ignored.** The running MCP server made `bench-state.json.lock` in the repository root at 22:17:58 (`bench_state.py:55`, `:422`); `git status` shows `?? bench-state.json.lock`. `.gitignore:23` lists only `bench-state.json`.
+- **N32 (safety, low): a recent user-confirmed diode mode hides a DC voltage from 0.5 to 3.0 V.** The user mode (up to 10 min old, `bench_state.py:59`) replaces the model's mode (`multimeter.py:464`), and `lcd_voltage` does not look at the model's mode (`bench_state.py:308-309`). Case: user mode diode, the model reads DC V "2.50 V" in 2 frames: confirmed diode, it does not count, and the gate stays open.
+- **N33 (safety, low): an unsafe reading is lost when the lock wait passes 5 s.** `note_meter_reading` then returns only a notice (`bench_state.py:739-744`, `:424-431`). Case: another process holds the lock file, then a 7.00 V reading: after 5 s, "cannot record it", and nothing is saved.
+- **N34 (low): the refusal text can say "closed" while the gate is open.** `unsafe_event` always writes "the bench safety gate is closed at 'C12.1'" (`bench_state.py:611-618`), also when `set_point` (`:608`) keeps a newer safe entry. Case: a newer safe 0.02 V at C12.1, then the older 5.10 V capture named "C12.1". Also, `refuse_unconfirmed` joins notes with no separator (`:654-655`).
+- **N35 (low): a reopened power check stays open when the gate opens through a user clearance** (`complete_power_checks` runs only in `record_measurement`, `:702-703`). Case: 5.10 V at C12.1, new confirmation, "VBUS" 0.01 V, `clear_residual_point C12.1`: gate open, `next_step` still `power_check`.
+- N36 (low): `*GROUND*` also matches BACKGROUND and FOREGROUND (`bench_points.py:25`): "BACKGROUND_LED" is refused as a ground net. The name is refused, so the gate is not weakened.
+- Low: naming a capture after a second bulk clear closes the gate again (errs on the safe side, `:604`); cosmetic texts for unknown points (`:602`, `:609`, `:811`, `:872`).
+
+#### Local 7-segment decoder (`docs/briefs/sevenseg.md`)
+
+73 sevenseg tests pass; with the multimeter, meter frame, and meter decimal tests: 191 passed; with the bench tests: 134 passed. The reviewer compared `HEAD` (`git archive` to a scratch folder) with the working tree on the same fake frames and fake vision answers, in off and compare mode, with the state in a temporary directory.
+
+| Rule | Status | Evidence | Case / note |
+|---|---|---|---|
+| 1. Off mode: no local code runs, results unchanged | pass, with a schema note | The only call site is `server.py:869-871` (checks `LocalDecoderMode.COMPARE`); default `off` (`config.py:111`); a bad env value gives a validation error. The imports at `server.py:133-134` only define things (the state dir stayed empty). Test `test_sevenseg_compare.py:279` | `multimeter_read` and `bench_measure` equal `HEAD` except two new keys, `"local_reading": null` and `"local_agrees": null`, in the text JSON and in `structured_content`. The output schema has 2 new optional properties and 2 new `$defs`; the `required` list does not change (`multimeter.py:446-447`). Additive. |
+| 2. Compare mode never changes the vision result, the confidence, the status, the bench gate, or `bench_measure` | pass | `server.py:868-871` (the gate call runs before `compare_local`), `sevenseg/compare.py:204` (`model_copy` of the two local fields only), `bench_state.py:840-857` (only vision fields), page `app.js:712` (only vision fields) | Field by field, off vs compare (without the 2 local fields, ids, and times): no difference. Cases: vision 5.10 V vs local 51.0 V (confirmed; same gate and notice); vision 0.51 vs local 51.0; vision frames 5.10/51.0 (disputed); vision confidence 0.3; vision kΩ vs local V; `bench_measure`. The vision requests and the bench state are the same too. |
+| 3. Privacy and dataset | **fail (checked)** | Dataset in `<state>/sevenseg/dataset` (`sevenseg/profile.py:124-126`), at most 500 (`sevenseg/constants.py:86`), oldest removed by UUID v7 name (`sevenseg/dataset.py:315-319`); test `test_sevenseg_compare.py:180`. No image files in `git status`; the tests draw all images. | `sevenseg/compare.py:147-148` saves every frame, also when its size does not match the profile (the crop changed or was cleared). Case: a 1280x720 frame with a 420x300 profile: status `unreadable`, and the full 1280x720 JPEG was saved. With no `--webcam-crop`, up to 500 full webcam frames (they can show people) stay on disk. This disagrees with `sevenseg/dataset.py:3` ("the webcam crop only") and the AGENTS.md privacy rule. Fix: save only when the frame size equals the profile size and a crop is set. |
+| 4. Failure isolation | pass | `sevenseg/compare.py:195-200` (any exception: the result unchanged), `:135-141` (no profile); tests `test_sevenseg_compare.py:151`, `:164` | Broken profile JSON, missing profile, a profile with a missing segment (KeyError), a decoder `RuntimeError`: the vision result is unchanged every time. |
+| 5. Performance | pass | `sevenseg/compare.py:196` and `sevenseg/stability.py:297` run in a thread | 6-18 ms per frame; 13-33 ms for 2 frames in compare mode. |
+| 6. Tests | pass, gaps | `test_sevenseg_decode.py` (digits, points, sign, OL, symbols, blur, noise, glare, JPEG q50, perspective), profile round trip (`sevenseg/calibrate.py:81`), toggle through the tool (`sevenseg/compare.py:261`) | No tool-level test with a local result that disagrees in the risky direction (local 51.0 vs vision 5.10); no test of `bench_measure` in compare mode or of an unchanged bench state. The reviewer's runs cover these cases, and they pass. |
+| CLI (`debug-devices-sevenseg`) | pass | `sevenseg/cli.py`: files only at the given paths or in the state dir; no network code in `sevenseg/` | `calibrate` wrote only `profile.json` and `profile.annotated.png`; `evaluate` works on an empty and a filled dataset. |
+
+New findings (decoder):
+
+- **N37 (privacy, medium, checked): full webcam frames can go into the local dataset** (rule 3 above).
+- N38 (low): the monitor log line says "agrees" when `local_agrees` is false (`sevenseg/compare.py:107-110`, `:140`). Case: no profile gives "local: unreadable (no_profile), agrees, 0 ms" with `local_agrees: false`.
+- N39 (low): `sevenseg/dataset.py:304-319` writes the `.jpg` before the `.json`, and the prune finds entries by `*.json` only. If the JSON write fails, the `.jpg` stays and the 500 limit never removes it.
+- N40 (low): `LcdLayout` (`sevenseg/profile.py:88-103`) does not check for 7 segments or for the number of decimal points; such a profile passes validation, then fails in `decode.py:312`; `local_reading` is then null with no log line, the same as off mode.
+- N41 (low): `reading_key` (`sevenseg/stability.py:238-243`) does not include the mode, so an AC/DC change between frames is not "unstable"; one unreadable frame of 2 gives "unstable", not "unreadable" (`:257-258`).
+- Low: the CLI prints raw tracebacks for a bad profile, a calibration error, or a missing file (`sevenseg/cli.py:49-92`); `stability.sample()` has no live caller (`:289`, also open in the dd-meter report); `docs/reports/dd-meter.md` open item 6 is out of date (AGENTS.md and `mcp/README.md` now describe the decoder).
+
+#### Server, page, and Android (N27-N30, N21-N23, N11 text, crash fix)
+
+`uv run pytest -q` on 12 test files of this area: 105 passed. The N27 and N28 cases ran in memory. The Android status comes from the code and its tests (the Gradle run in 1. passes).
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N27 | fixed | `pointer.py:94`, `:102-103`, `:168-170`, `:206-211` (no arrow; message "at the centre of the view"), `pointing.py:356`, `:408-413`; tests `test_qa_round10.py:45-67` | The round 10 case: no exception, no box, no arrow, the message. Cosmetic: the message text contains the QA id "(N27)" (`pointer.py:28`). |
+| N28 | fixed | `pointer.py:93-94`; test `test_qa_round10.py:90` | Band `(200, 400, 600, 0)`, part 0.5 cm left of the centre: "~0.5 cm" at 180°. |
+| N29 | fixed | `ui/monitor.py:654-659` (read-modify-write inside the lock), `ui/routes/settings.py:49`; tests `test_qa_round10.py:104`, `:117` | – |
+| N30 | fixed for restarts, small gaps | `phone_screen.py:166`, `:267-275` (the selection is checked before each restart), `ui/setup.py:33-35`, `devices.py:109-111`; tests `test_qa_round10.py:134`, `:170` | (1) A running session is not stopped (the check is only at the loop top, `:268`): the secondary keeps streaming phone A until that stream ends, while its phone tools go to phone B. No new adb command goes to A in that time. (2) A small gap: the check runs before `detect_version` (`:302`) and the push (`:305`). adb re-audit: no other adb call site changed in this round. |
+| N21 | fixed | `A/ApiServer.kt:32-55` (`ServerHost`: start and stop on one daemon thread, in call order), `A/MainActivity.kt:144`, `:206`; test `AT/ApiServerTest.kt:920` | – |
+| N22 | fixed | `A/CameraController.kt:758` (rotation), `:719` (zoom), `:728` (torch), `:798-803`; test `AT/WaitsTest.kt:78` (helper only) | No test for zoom and torch. Side effect: see N43. |
+| N23 | fixed | `A/CameraController.kt:750-756` (`Log.w` with tag `DebugCamera`), `A/Waits.kt:36`; test `AT/WaitsTest.kt:62` | The `null` of case (c) below writes no log line. |
+| N11 text | partly | `docs/phone-api.md:81` matches the app (`ROTATION_LAYOUT_WAIT_MILLIS = 500`, 16 ms steps, `A/Constants.kt:95-96`); S22: the responses have the new region | `docs/phone-api.md:101` is unchanged: it allows `null` only "while the safe area is not measured yet (the window has no size)". Still `null` with a sized window: (b) a `GET /v1/status` during a relayout (a physical turn in auto mode, or during the rotation wait; `A/OverlayLayout.kt:480`, `A/CameraController.kt:526-529`); (c) a `POST /v1/rotation` while a relayout is already pending (the request does not wait, `A/Waits.kt:25-37`). |
+| Crash fix (fast Back and restart) | fixed, low gaps | The crash: Android calls `onCreate` of the new activity before `onDestroy` of the old one, so the new server bound port 8765 while the old one still listened (`BindException` on a background thread, process crash). Fix: `ServerHost.start` stops the running server first (`A/ApiServer.kt:36-40`); `stop` acts only for the current server (`:42-47`), so a late `onDestroy` does nothing; one server per process (`:51`); Main never blocks; `singleTask` in the manifest. Tests `AT/ApiServerTest.kt:913`, `:954`, `:976` | (1) An exception in `startEngine` or `stopEngine` is not caught on the host thread, so Android kills the process (case: another app holds 127.0.0.1:8765). A try/catch with `Log.e` is missing. (2) The port reuse depends on the platform default of `SO_REUSEADDR`; Ktor CIO sets it only with `reuseAddress = true` (default false). It passed 6 of 6 on the device (dd-android report); set it explicitly. |
+
+New findings (server, page, Android):
+
+- N42 (low): `A/ApiServer.kt:94-95` rethrows every `CancellationException`, also one that does not come from a stop or a client cancel (for example a cancelled `await()`). Then there is no `Log.e`, and Ktor sends its default 500, not the contract `internal_error` JSON. Rethrow only when the call is no longer active.
+- N43 (low): with N22, a change is applied before the 503. Case: `{"step": "in"}`, the app pauses during the zoom, the response is 503, and a retry after the resume zooms in again. `docs/phone-api.md:104` does not say that a 503 can follow an applied change.
+- N44 (low): `except ValueError` in `pointing.py:356` and `:410` also catches pydantic `ValidationError` and numpy `LinAlgError` (subclasses). A programming error then becomes a warning on every frame, not a visible failure.
+- Low: after `onDestroy`, the old server answers for up to the stop grace period (100-500 ms): the camera endpoints give 503 and health 200, so no harm. Clients can get a refused connection for about 0.6 s during a restart. No test covers the `setRotation` lambdas of the real controller (`A/CameraController.kt:748-758`).
+
+### 4. Real phone
+
+- Selected serial (`~/.local/state/debug-devices/ui-settings.json`, `adb_serial`): the Wi-Fi serial of the Samsung S22 (`SM_S901B`). `adb devices -l` listed only this device, in state `device`. I used the adb binary of the running adb server (`android-tools-37.0.0`).
+- Separate forward `tcp:18793 tcp:8765` on the selected serial only. Health 200, status 200 (foreground, unlocked). The `app_start_id` is new since round 10 (the new APK).
+- `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18793 --strict`: 29/29 (turned pixels, EXIF absent or 1, headers, `preview_region` and `overlay_region` rules).
+- Rotation responses (N11): `{"degrees": 90}`, `{"degrees": 0}`, `{"auto": true}` each have the `overlay_region` of the new orientation, in 23-47 ms.
+- After the run: `{"in_sensor_zoom": true}` again (the saved setting), rotation auto. 3 s later, every field (except `focus`) equalled the first status.
+- I removed the forward. The MCP server forward (18765) and its scrcpy forward were there before my run and did not change. No command went to another device.
+- Not tested on the phone: the crash fix (fast Back and restart) and `--after-start` / `--expect starting-race`, because they need an app restart or user input on the phone.
+
+### Summary
+
+- Tests: all pass (pytest 1045, boardview 13, Android 177, fake self-check 13 modes, contract 30/30 on the fake and 29/29 on the S22, MCP stdio 15/15). prek passes and leaves the tree unchanged (313 file hashes and the git status equal before and after).
+- Fixed: N13 rest, N24, N25, N26, N16, N17, N21, N22, N23, N27, N28, N29, the crash fix (with two low gaps), and N30 for restarts.
+- Local 7-segment decoder: off mode runs no local code and adds only two `null` fields (an additive schema change); compare mode never changes the vision result, the status, the confidence, the bench gate, or `bench_measure` (field-by-field comparison). Failure isolation and performance pass.
+- Not fully fixed or new:
+  - **N37 (privacy, medium, checked): the compare dataset can keep up to 500 full webcam frames** when the frame does not match the profile or no crop is set (`sevenseg/compare.py:147-148`).
+  - N11 contract text (`docs/phone-api.md:101`): the `null` cases with a sized window (b) and (c).
+  - N31 (checked): `bench-state.json.lock` is untracked in the repository root and not in `.gitignore`: `git add -A` would commit it.
+  - Safety, low: N32 (a user-confirmed diode mode hides 0.5-3.0 V DC), N33 (an unsafe reading is lost after a 5 s lock wait).
+  - Low: N30 gaps, N34-N36, N38-N44.
+
+### What to do next
+
+1. N37: save a dataset frame only when its size equals the profile size and a crop is set.
+2. N31: add `bench-state.json.lock` to `.gitignore` (before the next `git add -A`).
+3. N33: do not drop an unsafe reading when the lock wait times out (retry, or keep it in memory and save later); N32: count a DC V reading from the model even when the user mode is diode.
+4. The N11 text in `docs/phone-api.md:101`, and the crash-fix gaps (catch start and stop errors; `reuseAddress = true`).
+5. When the user allows it: the fast Back and restart test, `--after-start`, and `--expect starting-race` on the S22.

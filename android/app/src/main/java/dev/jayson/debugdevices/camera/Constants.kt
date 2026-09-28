@@ -7,6 +7,9 @@ object Constants {
         const val PORT = 8765
         const val STOP_GRACE_PERIOD_MILLIS = 100L
         const val STOP_TIMEOUT_MILLIS = 500L
+
+        /** The one thread that starts and stops the server, in call order (N21). */
+        const val LIFECYCLE_THREAD = "api-server-lifecycle"
     }
 
     object Log {
@@ -85,9 +88,12 @@ object Constants {
         const val MAX_LABEL_LENGTH = 32
         const val MAX_ARROWS = 4
 
-        /** How long a rotation response waits for the layout pass of the new orientation (N11), and how often it checks. */
-        const val LAYOUT_WAIT_MILLIS = 500L
-        const val LAYOUT_POLL_MILLIS = 16L
+        /**
+         * How long a rotation response waits for the layout pass of the new orientation (N11, `ROTATION_LAYOUT_WAIT`
+         * in the contract), and how often it checks.
+         */
+        const val ROTATION_LAYOUT_WAIT_MILLIS = 500L
+        const val ROTATION_LAYOUT_POLL_MILLIS = 16L
 
         /** Space below the app's status label that the overlay layout leaves free (the phone view). */
         const val LABEL_GAP_DP = 4f
@@ -175,6 +181,7 @@ object Constants {
         const val FOCUS_OUTSIDE_PREVIEW = "outside the preview"
         const val START_STATE_PENDING = "Camera start state is not set yet"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "
+        const val ROTATION_LAYOUT_TIMEOUT = "Rotation response without overlay_region: no layout pass in ms: "
         const val START_STATE_FAILED = "Camera bind or start state failed"
         const val EXPECTED_NUMBER = "Expected a JSON number"
         const val EXPECTED_INTEGER = "Expected a JSON integer"

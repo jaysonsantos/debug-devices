@@ -130,6 +130,8 @@ from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.scene import SCENE_CHANGED_MESSAGE, SceneState
 from debug_devices_mcp.schematic import SchematicFinder, SchematicOptions, register_schematic_tools
+from debug_devices_mcp.sevenseg.compare import compare_local
+from debug_devices_mcp.sevenseg.constants import LocalDecoderMode
 from debug_devices_mcp.snapshot_crop import CropInfo, CropOutsideError, SnapshotCrop, crop_snapshot, precheck_crop
 from debug_devices_mcp.ui.constants import tools as tool_names
 from debug_devices_mcp.ui.monitor import Monitor
@@ -685,7 +687,7 @@ class Services:
             markings=MarkingsChoice(SettingsStore.in_dir(state_dir())),
             selection=PhoneSelection(SettingsStore.in_dir(state_dir())),
             discovery=PhoneDiscovery.default(runner, settings.avahi_browse_path),
-            bench=BenchStateStore(settings.bench_state_file),
+            bench=BenchStateStore(settings.bench_state_file, settings.max_diode_voltage),
             webcam_controls=V4l2Controls(
                 runner,
                 settings.webcam,
@@ -863,7 +865,10 @@ async def read_meter(
     ]
     result = combine(results, limits, user_mode, expected_value=expected_value, counts=settings.meter_counts)
     # An unsafe voltage closes the bench safety gate at once, confirmed or not (fail safe).
-    result.bench_notice = note_meter_reading(services.bench, result)
+    result.bench_notice = await note_meter_reading(services.bench, result)
+    if settings.meter_local_decoder is LocalDecoderMode.COMPARE:
+        # The local 7-segment decoder reads the same frames: it adds local_reading and local_agrees only.
+        result = await compare_local(result, source, [jpeg for jpeg, _ in captured], readings)
     for _, capture in captured:
         services.captures.meter_results[capture.capture_id] = result
     return result, captured
@@ -1237,9 +1242,10 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         Known limit: a decimal point shift that keeps the digit count and stays below the bench limit (for example
         "14.15" for 1.415 V) can pass as "confirmed". For a value that decides a repair step, give `expected_value`,
         or ask the user to confirm the LCD.
-        Safety: a voltage above 0.5 V on the LCD (any frame, any status) closes the bench safety gate at once, at an
-        unknown point of this capture; `bench_notice` says so. Record the capture with its point name
-        (bench_record_measurement) so that a later safe reading at that point can clear it.
+        Safety: a voltage above 0.5 V on the LCD (any frame, any status; a diode reading only above
+        --max-diode-voltage) closes the bench safety gate at once, at an unknown point of this capture;
+        `bench_notice` says so. Record the capture with its point name (bench_record_measurement) so that a later
+        safe reading at that point can clear it.
         `source` "webcam" (default) uses the PC webcam with its crop. "phone" uses a phone snapshot (call
         phone_connect first). The image goes to the vision model, so use "phone" only when the phone points at the
         meter, never when it points at the board. `include_image` also returns the exact images that the model saw.

@@ -24,6 +24,8 @@ from debug_devices_mcp.tracking import Matrix, apply
 OTHER_SIDE_MESSAGE = "on the other side: isolate the power before you turn the board"
 IN_VIEW_MESSAGE = "in view: green box"
 OUT_OF_VIEW_MESSAGE = "outside the view: follow the arrow, {distance} away on the board"
+# An empty view (no room for boxes on the phone) and a target exactly at its centre: there is no direction.
+AT_CENTRE_MESSAGE = "at the centre of the view, but the phone has no room for boxes now: no arrow (N27)"
 # A part that the file labels on the other side, in a file with mixed side labels: it is not ruled out.
 MIXED_LABEL_NOTE = " (the file labels it {side}, but its side labels are mixed: check it in the photo)"
 
@@ -85,7 +87,11 @@ def shown_angle(angle_deg: float, orientation: SnapshotOrientation) -> float:
 
 
 def edge_point(center: np.ndarray, target: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
-    """Where the ray from the view center to the target leaves the view (the rectangle low..high)."""
+    """Where the ray from the view center to the target leaves the view (the rectangle low..high). A view with no area
+    (an empty overlay_region: a point, or a band of width or height 0) shows nothing: the distance is measured from
+    its centre (N28). No direction (the target at the centre): the centre (N27)."""
+    if high[0] <= low[0] or high[1] <= low[1]:
+        return center.copy()
     direction = target - center
     limits = []
     for axis in (0, 1):
@@ -93,6 +99,8 @@ def edge_point(center: np.ndarray, target: np.ndarray, low: np.ndarray, high: np
             limits.append((high[axis] - center[axis]) / direction[axis])
         elif direction[axis] < 0:
             limits.append((low[axis] - center[axis]) / direction[axis])
+    if not limits:
+        return center.copy()
     return center + direction * min(limits)
 
 
@@ -157,6 +165,9 @@ def follow_boxes(boxes: list[PixelBox], matrix: Matrix, frame: ImageFrame) -> tu
             size_px = np.maximum(corners.max(axis=0) - box_low, MIN_BOX_PX)
             update = {"x": float(box_low[0]), "y": float(box_low[1]), "width": float(size_px[0])}
             shown.append(box.model_copy(update={**update, "height": float(size_px[1])}))
+        elif np.allclose(middle, center):
+            # The centre of an empty view: no direction, so no arrow (N27).
+            continue
         elif len(arrows) < phone.OVERLAY_MAX_ARROWS:
             angle = arrow_angle(center, middle, frame.orientation)
             label = (box.label or box.tag or "")[: phone.OVERLAY_MAX_LABEL]
@@ -191,6 +202,12 @@ def plan(
                 label = part.name[: phone.OVERLAY_MAX_LABEL]
                 boxes.append(PixelBox(x=box_low[0], y=box_low[1], width=size_px[0], height=size_px[1], label=label))
             targets.append(TargetState(refdes=part.name, side=part.side, in_view=True, message=IN_VIEW_MESSAGE + note))
+            continue
+        if np.allclose(target, center):
+            # The centre of an empty view: no direction, so no arrow (N27).
+            targets.append(
+                TargetState(refdes=part.name, side=part.side, in_view=False, message=AT_CENTRE_MESSAGE + note)
+            )
             continue
         edge = edge_point(center, target, low, high)
         edge_mm, target_mm = apply(inverse, np.array([edge, target]))
