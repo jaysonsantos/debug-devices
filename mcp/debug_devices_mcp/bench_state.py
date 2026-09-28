@@ -10,6 +10,7 @@ The record holds only what the agent passes (a few part names), never data copie
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import uuid
@@ -22,16 +23,17 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
 from debug_devices_mcp.evidence import CaptureLog
-from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, UnitFamily
+from debug_devices_mcp.meter_frames import PREFIX_FACTORS
+from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, UnitFamily, unit_parts
 
 STATE_VERSION = 1
 # A residual voltage at or below this is safe for a resistance, continuity, or diode test (a board without power).
 SAFE_RESIDUAL_VOLTS = 0.5
-MILLI = 1e-3
 MAX_PHOTO_IDS = 1000
 # A mode that the user confirmed on the dial is context for multimeter_read for this long.
 USER_MODE_MAX_AGE = timedelta(minutes=10)
 USER_SOURCE = "user"
+READING_SOURCE = "reading"
 # Step.completed_by values.
 EVIDENCE = "evidence"
 USER_REPORT = "user_report"
@@ -120,8 +122,11 @@ class PowerRecord(BaseModel):
     # The user said that the charger and the battery or bench supply are off.
     user_confirmed_isolation: bool = False
     confirmed_at: AwareDatetime | None = None
-    # A confirmed voltage measurement taken after the confirmation.
+    # The residual reading that decides the gate: the highest unsafe point, else the latest safe reading.
     residual: Measurement | None = None
+    # The latest confirmed voltage reading at each point (the measurement label) after the confirmation. An unsafe
+    # point stays until a new reading at the same point, or a new isolation confirmation, replaces it.
+    residual_points: list[Measurement] = Field(default_factory=list)
 
 
 class MeterModeRecord(BaseModel):
@@ -161,6 +166,8 @@ class BenchStateView(BaseModel):
     state: BenchState
     next_step: Step | None
     gate: GateReport
+    # Why a step of this call stays open (for example a power check with an unsafe residual voltage).
+    notice: str | None = None
 
 
 # endregion: record
@@ -171,9 +178,52 @@ def now() -> datetime:
 
 
 def residual_volts(measurement: Measurement) -> float | None:
-    if measurement.value is None:
+    """The reading in volts with its unit prefix (u, m, k, M), or None: an overload, not volts, or an unknown prefix."""
+    family, prefix = unit_parts(measurement.unit)
+    factor = PREFIX_FACTORS.get(prefix)
+    if measurement.value is None or family is not UnitFamily.VOLTAGE or factor is None:
         return None
-    return measurement.value * MILLI if measurement.unit.strip().lower().startswith("m") else measurement.value
+    return measurement.value * factor
+
+
+def is_safe(measurement: Measurement) -> bool:
+    volts = residual_volts(measurement)
+    return volts is not None and abs(volts) <= SAFE_RESIDUAL_VOLTS
+
+
+def danger(measurement: Measurement) -> float:
+    """For the order of unsafe readings: the volts, and an overload or unknown prefix above every number."""
+    volts = residual_volts(measurement)
+    return math.inf if volts is None else abs(volts)
+
+
+def point_key(label: str) -> str:
+    return " ".join(label.casefold().split())
+
+
+def residual_readings(power: PowerRecord) -> list[Measurement]:
+    # A record from before residual_points has only `residual`.
+    return power.residual_points or ([power.residual] if power.residual is not None else [])
+
+
+def add_residual(power: PowerRecord, measurement: Measurement) -> None:
+    """A voltage reading after the confirmation replaces only an earlier reading at the same point.
+
+    So a safe reading at another point does not hide an unsafe one: the board can still hold a charge there.
+    """
+    key = point_key(measurement.label)
+    others = [reading for reading in residual_readings(power) if point_key(reading.label) != key]
+    power.residual_points = [*others, measurement]
+    unsafe = [reading for reading in power.residual_points if not is_safe(reading)]
+    power.residual = max(unsafe, key=danger) if unsafe else measurement
+
+
+def unsafe_text(reading: Measurement) -> str:
+    return (
+        f"the residual voltage {reading.display_text} {reading.unit} at {reading.label!r} is not safe (limit "
+        f"{SAFE_RESIDUAL_VOLTS} V): stop, let the board discharge, and measure again at the same point with the same "
+        "label (a safe reading at another point does not clear it)"
+    )
 
 
 def gate(state: BenchState) -> GateReport:
@@ -184,16 +234,10 @@ def gate(state: BenchState) -> GateReport:
         missing.append("the record does not show the power as isolated")
     if not power.user_confirmed_isolation or power.confirmed_at is None:
         missing.append("the user has not confirmed that the charger and the battery or bench supply are off")
-    residual = power.residual
-    if residual is None:
+    readings = residual_readings(power)
+    if not readings:
         missing.append("no residual-voltage measurement (multimeter_read in voltage mode) after the confirmation")
-    else:
-        volts = residual_volts(residual)
-        if volts is None or abs(volts) > SAFE_RESIDUAL_VOLTS:
-            missing.append(
-                f"the residual voltage {residual.display_text} {residual.unit} is not safe "
-                f"(limit {SAFE_RESIDUAL_VOLTS} V): stop, and let the board discharge"
-            )
+    missing.extend(unsafe_text(reading) for reading in readings if not is_safe(reading))
     return GateReport(unpowered_tests_allowed=not missing, missing=missing)
 
 
@@ -231,10 +275,14 @@ class BenchStateStore:
             raise
         return state
 
-    def view(self, state: BenchState | None = None) -> BenchStateView:
+    def view(self, state: BenchState | None = None, notice: str | None = None) -> BenchStateView:
         state = state if state is not None else self.load()
         return BenchStateView(
-            path=str(self.path) if self.path else None, state=state, next_step=state.next_step, gate=gate(state)
+            path=str(self.path) if self.path else None,
+            state=state,
+            next_step=state.next_step,
+            gate=gate(state),
+            notice=notice,
         )
 
 
@@ -248,14 +296,30 @@ def find_step(state: BenchState, step_id: str) -> Step:
     raise ToolError(f"no step {step_id!r} in the bench state")
 
 
+def power_check_problem(state: BenchState, measurement: Measurement, residual: bool) -> str | None:
+    """A power check completes only with a safe residual reading after the user's isolation confirmation."""
+    if not residual:
+        return (
+            "a power check needs a voltage reading after the user confirmed the isolation (bench_state_update power "
+            "isolated, user_confirmed_isolation true)"
+        )
+    if not is_safe(measurement):
+        return unsafe_text(measurement)
+    missing = gate(state).missing
+    return "; ".join(missing) if missing else None
+
+
 def record_measurement(
     state: BenchState, result: MeterResult, label: str, step_id: str | None, done_before_gate: str | None = None
-) -> Measurement:
+) -> tuple[Measurement, str | None]:
     """Add a confirmed meter result. Other results are refused: they are not measurements.
 
     `done_before_gate` (the user's reason) records a resistance, continuity, or diode measurement that was done
     before the gate was complete (for example with the power off, before the residual-voltage check). The flag stays
     on the measurement; bench_begin_step stays strict for new steps.
+
+    The second value tells why the step stays open: a power-check step completes only with a safe residual reading
+    after the user's confirmation. The measurement enters the record in any case, so an unsafe reading blocks the gate.
     """
     if result.status is not MeterStatus.CONFIRMED or result.capture_id is None or result.captured_at is None:
         raise ToolError(
@@ -278,11 +342,15 @@ def record_measurement(
         done_before_gate=done_before_gate,
     )
     state.measurements.append(measurement)
-    state.meter_mode = MeterModeRecord(mode=result.mode, source="reading", recorded_at=result.captured_at)
+    # A reading does not replace a recent mode that the user confirmed on the dial: multimeter_read uses it.
+    if not is_recent_user_mode(state.meter_mode):
+        state.meter_mode = MeterModeRecord(mode=result.mode, source=READING_SOURCE, recorded_at=result.captured_at)
     power = state.power
     after_confirmation = power.confirmed_at is not None and result.captured_at >= power.confirmed_at
-    if result.mode in VOLTAGE_MODES and result.unit_family is UnitFamily.VOLTAGE and after_confirmation:
-        power.residual = measurement
+    residual = result.mode in VOLTAGE_MODES and result.unit_family is UnitFamily.VOLTAGE and after_confirmation
+    if residual:
+        add_residual(power, measurement)
+    notice = None
     step = find_step(state, step_id) if step_id else None
     if step is not None:
         if result.mode not in STEP_MODES.get(step.kind, frozenset()):
@@ -293,15 +361,20 @@ def record_measurement(
                 + "; ".join(gate(state).missing)
                 + ". If the user already did this test safely (power off), pass done_before_gate with their reason."
             )
-        step.done, step.done_at, step.evidence_id = True, now(), measurement.source_id
-        step.completed_by = EVIDENCE
-        step.reason = done_before_gate
-    # A safe residual voltage completes the open power checks.
-    if power.residual is measurement and gate(state).unpowered_tests_allowed:
+        problem = power_check_problem(state, measurement, residual) if step.kind is StepKind.POWER_CHECK else None
+        if problem is None:
+            step.done, step.done_at, step.evidence_id = True, now(), measurement.source_id
+            step.completed_by = EVIDENCE
+            step.reason = done_before_gate
+        else:
+            notice = f"step {step.step_id} stays open: {problem}"
+    # A safe residual voltage (and no unsafe point) completes the open power checks.
+    if residual and gate(state).unpowered_tests_allowed:
         for check in state.steps:
             if check.kind is StepKind.POWER_CHECK and not check.done:
                 check.done, check.done_at, check.evidence_id = True, now(), measurement.source_id
-    return measurement
+                check.completed_by = EVIDENCE
+    return measurement, notice
 
 
 def change_step(
@@ -427,6 +500,9 @@ def register_bench_state_tools(server: MCPServer, store: BenchStateStore, captur
         the measurement completes that step (its kind must fit the meter mode; resistance, continuity, and diode
         steps need the safety gate). A confirmed voltage reading after the user confirmed the isolation is the
         residual-voltage check of the gate. Each measurement keeps the power state and the user's confirmation.
+        Each point (the `label`) keeps its latest residual reading: an unsafe point blocks the gate until a new
+        reading with the same label is safe, or the user confirms the isolation again. A power-check step completes
+        only with a safe residual reading after the user's confirmation; otherwise `notice` tells why it stays open.
         `done_before_gate`: the user's reason when a resistance, continuity, or diode test was already done before the
         gate was complete (for example with the power off, before the residual check); the measurement keeps it.
         """
@@ -434,8 +510,8 @@ def register_bench_state_tools(server: MCPServer, store: BenchStateStore, captur
         if result is None:
             raise ToolError(f"no multimeter_read result with capture id {capture_id} in this server session")
         state = store.load()
-        record_measurement(state, result, label, step_id, done_before_gate)
-        return store.view(store.save(state))
+        _, notice = record_measurement(state, result, label, step_id, done_before_gate)
+        return store.view(store.save(state), notice)
 
     @server.tool()
     async def bench_begin_step(step_id: str) -> BenchStateView:
@@ -466,15 +542,17 @@ def register_bench_state_tools(server: MCPServer, store: BenchStateStore, captur
         return store.view(store.save(state))
 
 
+def is_recent_user_mode(record: MeterModeRecord | None, max_age: timedelta = USER_MODE_MAX_AGE) -> bool:
+    return record is not None and record.source == USER_SOURCE and now() - record.recorded_at <= max_age
+
+
 def recent_user_mode(store: BenchStateStore, max_age: timedelta = USER_MODE_MAX_AGE) -> MeterMode | None:
     """The meter mode that the user confirmed on the dial, if it is recent enough to trust as context."""
     try:
         record = store.load().meter_mode
     except ToolError:
         return None
-    if record is None or record.source != USER_SOURCE or now() - record.recorded_at > max_age:
-        return None
-    return record.mode
+    return record.mode if record is not None and is_recent_user_mode(record, max_age) else None
 
 
 def current_step_text(store: BenchStateStore) -> str | None:

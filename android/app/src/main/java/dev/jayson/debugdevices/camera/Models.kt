@@ -33,6 +33,7 @@ data class CameraStatus(
     @SerialName("af_mode") val afMode: AfMode,
     @SerialName("app_start_id") val appStartId: String,
     @SerialName("preview_region") val previewRegion: PreviewRegion?,
+    @SerialName("overlay_region") val overlayRegion: PreviewRegion?,
     @SerialName("overlay_visible") val overlayVisible: Boolean
 )
 
@@ -56,6 +57,9 @@ data class RotationRequest(
     @Serializable(with = StrictIntSerializer::class) val degrees: Int? = null,
     @Serializable(with = StrictBooleanSerializer::class) val auto: Boolean? = null
 )
+
+/** A `/v1/snapshot` result. Not a data class: it holds a byte array. */
+class Snapshot(val jpeg: ByteArray, val rotationDegrees: Int, val appStartId: String)
 
 /** At least one field (see [CameraSettingsLogic.validate]). `ApiJson` refuses unknown fields and values. */
 @Serializable

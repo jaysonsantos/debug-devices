@@ -21,6 +21,7 @@ On a real board, two highlighted pads can be 40-80 px apart in a 1568 px photo. 
 
 The rules above, made exact, so that the Python layout (`mcp/debug_devices_mcp/overlay_layout.py`) and the app give the same numbers. `docs/overlay-layout-vectors.json` has inputs and expected outputs; every implementation must pass them (tolerance 0.01 unit). The unit is an image pixel (the annotated image and the page, in the pixels of the drawn picture) or a dp (the phone). Text is not measured: sizes come from the character count.
 
+- **The phone view**: on the phone, the view is the safe area of the preview: the preview area without the status bar, the navigation bar, display cutouts, and the app's own status label. Boxes outside that area count as outside the view (no badge; the legend still lists them, rule 2 and B-S2).
 - **Inputs**: the view size `width`, `height`; `min_box` (32 for images, 24 for the phone); the boxes in view units (`x`, `y`, `width`, `height`, optional `tag`, `label`) in their order; the arrows (`angle_deg`, optional `tag`, `label`); `inset` (true for the page and images, false for the phone).
 - **Tags**: a box or arrow without a tag gets the first letter from `A` to `Z` that no other box or arrow uses, in the order boxes then arrows. Only the first 3 characters of a tag count.
 - **Colours**: item `i` in the order boxes then arrows gets colour `i % 4` of `#00E676`, `#00E5FF`, `#FFEA00`, `#FF4081`.

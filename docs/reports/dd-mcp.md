@@ -776,3 +776,131 @@ The display profile (`--meter-counts`) gave false "uncertain" results for real r
 
 - `uv run pytest`: 721 passed, 1 skipped. `uv run ruff check` and `ruff format --check` on my files: pass. `nix develop --command prek run --files <my files> mcp/README.md .env.example`: all pass.
 - Bench rule kept: fakes only, no webcam or phone, no change to `.env` or the settings file, no restart, no change to `ui/static/`. Nothing committed.
+
+## Meter decimal point: check against the bench misreads (priority 4)
+
+### What I did
+
+I checked rounds 1-5 against the four bench misreads. Each case goes through `multimeter_read` with a recorded model answer. The new tests are in the "bench misreads" part of `mcp/tests/test_meter_decimal.py`. The real `.env` has `DEBUG_DEVICES_METER_COUNTS=6000`, so the "6000 counts" results apply to the live server.
+
+| Case (model answer) | Result with 6000 counts | Other context | Tests | Open |
+| --- | --- | --- | --- | --- |
+| "51.0 V", the LCD showed 5.10 V | uncertain, no value: "the meter shows 4 digits; the model read 3" | 0 counts: disputed (above the 30 V bench limit). `expected_value` 5: also "5.1 V, with the point one place to the left" | `test_bench_51_0_volts_is_not_confirmed` (new), `test_51_0_with_6000_counts_is_uncertain`, `test_tool_disputes_a_misread_decimal_point` | A, B |
+| "93.2 V" at a USB-C point (about 5.1 V) | uncertain, no value: the digit problem; with `expected_value` 5: "19 × the expected 5 V" | 0 counts: disputed (bench limit) | `test_bench_93_2_volts_at_usb_c_is_not_confirmed` (new), `test_plausibility_limits` | A, B, C |
+| About 443 kΩ read as "443.0 V" | disputed, no value (bench limit; 4 digits, so the profile accepts it) | `expected_mode` resistance: disputed ("expects resistance"). User-confirmed resistance: disputed | `test_bench_443_kohm_read_as_volts_is_disputed` (new), `test_443_volts_during_a_resistance_test_is_disputed` | none for 443 V; see E |
+| DC V dial read as "diode" ("5.10" V) | uncertain (3 digits) | User-confirmed DC V, 2 frames or more: confirmed as `dc_voltage` (`model_mode` diode). `expected_mode` dc_voltage: uncertain. No mode context and no digit problem: confirmed as diode | `test_bench_dc_volts_read_as_diode_is_uncertain_in_a_dc_voltage_test` (new), `test_recent_user_mode_confirms_when_two_frames_agree`, `test_user_mode_in_the_single_frame_check` | D |
+
+No case gives a value. The only exception is the diode case without mode context: the value (5.1 V) is correct, but the mode is wrong.
+
+### Open items
+
+- A. The bench limit uses the frame value, which exists only for a confirmed frame. When a different check lowers a frame (the digit count, low confidence), the limit check does not run. So with 6000 counts, "93.2 V" is "uncertain", not "disputed", and the "above the bench limit" problem is not shown. Proposal: calculate the limit from the LCD digits, as `expected_problems` does (a small change in `meter_frames.limit_problem`).
+- B. The bench-limit problem repeats once for each frame (3 identical lines for 3 frames). Proposal: remove the duplicates.
+- C. The point-shift suggestion is only a candidate. For "93.2" with an expected 5 V, it names 9.32 V, but the real value was about 5.1 V: a digit was also misread. The request still says "ask the user to read the LCD".
+- D. Without a user-confirmed mode or an `expected_mode`, a diode reading of 5.1 V is "confirmed" as diode. Proposal: a diode reading above the diode test voltage (for example 3 V) is "uncertain": the dial is probably on DC V.
+- E. Known from round 4: a point shift that keeps 4 digits and stays below the limit (for example "14.15" for 1.415 V) is "confirmed" without `expected_value`.
+
+### Live check
+
+Not done. The user's MCP server (`--ui-start eager`) holds `/dev/video0` through its ffmpeg. A test server on UI port 18799 (`--no-ui-open-browser`, adb `/bin/false`, state and runtime folders in my scratch directory) got "Device or resource busy" from `webcam_snapshot`. The test server did not get a frame and did not send an OpenRouter request. It stopped at the end of the call.
+
+### Checks
+
+- `uv run pytest`: 746 passed, 1 skipped. ruff and prek on `mcp/tests/test_meter_decimal.py`: pass. I made no change to the code. Nothing committed.
+
+## QA round 4 fixes, round 1: bench limit for all frames (open items A and B, QA B-F4)
+
+### What I did
+
+- A: `meter_frames.base_value` now takes the number from the LCD text (digits, point, sign) and the unit prefix. It does not use `value`, because a frame has a value only when it is confirmed. So the bench limit also applies to a frame that a different check lowered (the digit count, a low confidence). An overload or an LCD without digits gives no limit problem.
+- B: `combine` shows each limit problem once. Two frames with different LCD texts above the limit keep both texts.
+
+Result: "93.2 V" with 6000 counts, or at a low confidence, is now "disputed" with "93.2 V is above the bench limit of 30 V". Before the fix, it was "uncertain". A confirmed frame gives the same result as before, because its value must agree with the LCD text.
+
+### Tests
+
+- `test_bench_93_2_volts_at_usb_c_is_not_confirmed`: with 6000 counts and `expected_value` 5, "disputed", and the limit problem shows only once.
+- `test_the_bench_limit_applies_to_a_frame_that_another_check_lowered`: "51.0 V" at confidence 0.3 (0 counts), and "51.0 V" with 6000 counts. Every frame is "uncertain" without a value, and the result is "disputed" with one limit problem.
+- `test_the_bench_limit_uses_the_prefix_and_skips_an_overload`: "45.00 mV" is confirmed. "O.L" gives no limit problem.
+- `test_two_frames_above_the_limit_keep_both_texts`: "51.0 V" and "93.2 V" give two lines.
+
+### Checks
+
+- `uv run pytest`: 758 passed, 1 skipped. ruff and prek on `meter_frames.py` and `test_meter_decimal.py`: pass. Nothing committed.
+
+## QA round 4 fixes, round 2: the safety gate (B-E3, B-E4, B-E8)
+
+### What I did (`mcp/debug_devices_mcp/bench_state.py`)
+
+- B-E3: `PowerRecord.residual_points` keeps the latest confirmed voltage reading at each point after the isolation confirmation. The point is the measurement `label` (case and spaces do not count). A new reading replaces only the reading at the same point. So a safe reading at another point does not clear an unsafe one. The gate lists each unsafe point: "the residual voltage 5.10 V at 'C12 positive side' is not safe (limit 0.5 V): stop, let the board discharge, and measure again at the same point with the same label (a safe reading at another point does not clear it)". `residual` is now the highest unsafe point, or the latest safe reading when no point is unsafe. A new isolation confirmation (`bench_state_update` power isolated, user_confirmed_isolation true) clears the points, and the gate then needs a new residual reading. A record from before this change (only `residual`) still works.
+- B-E4: a power-check step completes only when three conditions are true: the reading comes after the user's isolation confirmation, it is safe, and the gate is open (no other unsafe point). Otherwise the step stays open, and the tool result has a new `notice` field with the reason. The measurement enters the record in all cases, so an unsafe reading blocks the gate. I did not refuse it, because a refusal would lose the unsafe reading. The automatic completion of the open power checks has the same condition, and it now sets `completed_by` "evidence".
+- B-E8: `residual_volts` uses `unit_parts` (µ and μ become u) and `meter_frames.PREFIX_FACTORS`, with the correct case. "450 µV" is 0.00045 V (safe). "0.4 kV" is 400 V and "0.4 MV" is 400000 V (not safe). A unit that is not volts, an unknown prefix, or an overload gives no number, so it is not safe.
+- Docs: the `bench_record_measurement` description, rule 10 in `instructions.py` (a safe residual voltage at every measured point; use the same label to measure a point again), and the "Bench state" bullet in `mcp/README.md`.
+
+### Tests (`mcp/tests/test_bench_state.py`, "QA round 4, the safety gate")
+
+- `test_a_safe_reading_at_another_point_does_not_hide_an_unsafe_one`: 5.10 V at one point, then 0.01 V at "VBUS": the gate stays closed, and the power check stays open. 8.0 mV at the same point (another case and other spaces) opens the gate.
+- `test_the_highest_unsafe_point_decides_and_a_new_confirmation_clears_the_points`: 5.1 V at A and 12 V at B give two unsafe lines, and `residual` is B. After B reads 0.00 V, `residual` is A. A new confirmation clears the points.
+- `test_a_power_check_step_needs_a_safe_residual_after_the_confirmation`: a reading before the confirmation, and 5.10 V after it, leave the step open with a `notice`. The unsafe reading is in the record. 0.02 V completes the step.
+- `test_residual_volts_use_the_unit_prefix` (9 cases: µV, μV, uV, mV, V, kV, MV, Ω, an unknown prefix) and `test_450_microvolts_opens_the_gate_and_0_4_kilovolts_blocks_it`.
+
+### Checks
+
+- The bench, meter, and instructions tests pass (111). ruff and prek on my files pass.
+- The full `uv run pytest` run has failures in files of other agents' work in progress: `test_phone_stop.py`, `test_lazy.py`, and `test_discovery.py`. One more is in `test_board_identity.py`: the new photo-size check in `board/tools.py` (QA B-E5/B-F2, another agent) refuses the test's 64x48 photo against a 1200x1000 registration. I did not change these files. Nothing committed.
+
+## QA round 4 fixes, round 3: a measurement keeps the user's meter mode (B-F3)
+
+### What I did (`mcp/debug_devices_mcp/bench_state.py`)
+
+- `record_measurement` does not replace a recent mode that the user confirmed on the dial (source "user", at most 10 minutes old). Before the fix, each measurement wrote the mode with the source "reading", and `recent_user_mode` then returned None. So the next `multimeter_read` lost the user's mode.
+- A reading can still replace an expired user mode, because `multimeter_read` does not use it.
+- The new helper `is_recent_user_mode` holds the age rule for `recent_user_mode` and `record_measurement`. The new constant `READING_SOURCE` replaces the literal "reading".
+
+### Tests (`mcp/tests/test_bench_state.py`, "a measurement keeps the user's meter mode")
+
+- `test_recording_a_measurement_keeps_the_users_meter_mode`: the user confirms DC V, and the model reads "diode". `multimeter_read` confirms the reading, and `bench_record_measurement` records it. The record keeps the source "user", and the next `multimeter_read` still has `mode_source` "user".
+- `test_a_reading_replaces_an_expired_user_mode`: an 11-minute-old user mode is replaced by a resistance reading (source "reading").
+
+### Checks
+
+- `test_bench_state.py` and `test_meter_frames.py`: 47 passed. ruff on my files: pass. Nothing committed.
+
+## QA round 4 fixes, round 4: the frames must agree on the unit, the mode, and the sign (B-E1, B-E2)
+
+### What I did (`mcp/debug_devices_mcp/meter_frames.py`)
+
+- The new function `disagreements` compares the frames on three items:
+  - The unit: family and prefix, through `unit_parts`, so "µV" and "uV" are the same. An unreadable unit is not a different unit, because that frame is already "uncertain".
+  - The checked mode: a mode that the user confirmed replaces the model's mode.
+  - The sign: "−" (MINUS SIGN) and "-" are the same. A zero has no sign, because a meter can show "-0.00" and "0.00".
+- A difference gives "disputed", no value, `stable` false, and the problem "the unit changed between the frames (V, mV): one of the frames is a misread" (the same for mode and sign). The request asks for a new read.
+- Before the fix, "4.98 V" and "4.98 mV" gave a confirmed 4.98 V, and "-0.12" and "0.12" gave a confirmed -0.12 V.
+- Docs: the `multimeter_read` description and the "Meter frames" bullet in `mcp/README.md`.
+
+### Tests (`mcp/tests/test_meter_frames.py`, "the frames must agree")
+
+- Disputed: V and mV, DC V and AC V, "-0.12" and "0.12". The unit problem names both units. Through the tool, V and mV are disputed.
+- Still confirmed: "-0.00" and "0.00"; MINUS SIGN and hyphen-minus; MICRO SIGN and "u".
+- A "V" frame and a frame with an unreadable unit stay "uncertain", with no unit problem.
+
+## QA round 4 fixes, round 5: the orchestrator's decisions on open items C, D, and E
+
+### What I did
+
+- C: no change (the orchestrator's decision).
+- D: the new setting `--max-diode-voltage` (`DEBUG_DEVICES_MAX_DIODE_VOLTAGE`, default 3.0 V; in `.env.example`, the config table, and the test fixture's variable list). The limit check uses the number on the LCD and the unit prefix. If a diode reading is above the setting, the result is "uncertain" with this problem: "5.10 V in diode mode is above the diode test voltage of 3 V: the dial is probably on DC V". The request tells the agent to ask the user for the dial mode and to record DC V. A DC V mode that the user confirmed replaces "diode", so the problem does not show then. The limit goes to `combine` through `MeterLimits.max_diode_volts` (`read_meter` in `server.py`).
+- E: a known limit in the `multimeter_read` and `bench_measure` descriptions and in the "Decimal point" bullet of the README. A decimal point shift that keeps the digit count and stays below the bench limit (for example "14.15" for 1.415 V) can pass as "confirmed". For a value that decides a repair step, give `expected_value`, or ask the user to confirm the LCD.
+- `server.py` edits (small, after a new read): the `MeterLimits` call in `read_meter` and the two tool descriptions.
+
+### Tests (`mcp/tests/test_meter_frames.py`, "a diode reading above the diode test voltage")
+
+- "5.10 V" in diode mode: "uncertain", with the note once and the dial request.
+- Still confirmed: "0.512" V, "512" mV, "O.L", and "2.950" V.
+- A limit of 6 V confirms "5.10 V". `--max-diode-voltage 2.5` is parsed.
+- Through the tool: "uncertain" without a user mode; "confirmed" as `dc_voltage` after the user confirms DC V.
+
+### Checks (rounds 1-5)
+
+- `uv run pytest`: 824 passed, 1 skipped (all tests, also the files of the other agents). ruff and prek on my files: pass.
+- The running MCP server loads these changes only after a restart. I did not restart it. Nothing committed.

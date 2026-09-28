@@ -22,6 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
+from debug_devices_mcp.adb import DeviceGoneError
 from debug_devices_mcp.app_restart import RestartNotice
 from debug_devices_mcp.board.tools import BoardSummary
 from debug_devices_mcp.camera_choice import AfModeChoice, InSensorZoomChoice
@@ -29,7 +30,7 @@ from debug_devices_mcp.constants import images
 from debug_devices_mcp.devices import PhoneSelection
 from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, transform_jpeg
 from debug_devices_mcp.orientation import OrientationState
-from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError
+from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError, Still
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState, ScreenStatus
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
 from debug_devices_mcp.scene import SceneWatcher
@@ -48,6 +49,9 @@ from debug_devices_mcp.ui.version import code_version
 from debug_devices_mcp.webcam import Crop
 from debug_devices_mcp.webcam_stream import FrameSource, WebcamStream, crop_jpeg
 
+PHONE_STOPPED = "stopped"
+OLD_PHONE_GONE = "the old phone was already gone: its adb forward and screen stream are cleared"
+
 logger = logging.getLogger(__name__)
 
 STARTUP_POLL_SECONDS = 0.05
@@ -63,6 +67,13 @@ TRACKING_FOLLOWING = "following"
 BOARD_PATH_ARGUMENT = "path"
 # SnapshotInfo.turn_degrees: the page draws the snapshot and its boxes with the same turn.
 TURN_FIELD = "turn_degrees"
+FLIP_FIELDS = ("flip_horizontal", "flip_vertical")
+# bench_measure: the SnapshotInfo of its photo is under this key.
+PHOTO_FIELD = "photo"
+# The tools whose first image is a phone photo for the page (B-E9 of QA round 4: also bench_measure).
+SNAPSHOT_TOOLS = frozenset({tools.PHONE_SNAPSHOT, tools.BENCH_MEASURE})
+# The cache key part of the scaled snapshot flipped again (no raw still).
+REFLIPPED = "reflipped"
 PHONE_STATUS_TOOLS = frozenset(
     {
         tools.PHONE_STATUS,
@@ -79,9 +90,10 @@ type ToolCaller = Callable[..., Awaitable[Any]]
 type SettingsListener = Callable[[EffectiveSettings], None]
 type StatusReader = Callable[[], Awaitable[CameraStatus]]
 # Removes the adb forward of the camera API for this serial (bench_stop).
-type ForwardRemover = Callable[[str], Awaitable[None]]
+# Removes the camera API forward that this server made (Services.release_forward); returns a note.
+type ForwardRemover = Callable[[], Awaitable[str]]
 type Clock = Callable[[], float]
-type SnapshotReader = Callable[[], Awaitable[bytes]]
+type SnapshotReader = Callable[[], Awaitable[Still]]
 
 
 NO_CROP_TEXT = "none (the whole frame)"
@@ -97,16 +109,31 @@ def crop_preview(jpeg: bytes, crop: Crop | None) -> bytes:
     return downscale_jpeg(area, defaults.CROP_PREVIEW_MAX_SIDE).data
 
 
-def snapshot_turn(texts: list[str]) -> int:
-    """The `turn_degrees` of a phone_snapshot result (its text is SnapshotInfo JSON). 0 when it has none."""
+def snapshot_info(texts: list[str]) -> dict[str, Any]:
+    """The SnapshotInfo JSON of a phone_snapshot result, or the `photo` part of a bench_measure result. Empty when
+    it has none."""
     for text in texts:
         try:
             data = json.loads(text)
         except ValueError:
             continue
+        if isinstance(data, dict) and isinstance(data.get(PHOTO_FIELD), dict):
+            data = data[PHOTO_FIELD]
         if isinstance(data, dict) and isinstance(data.get(TURN_FIELD), int):
-            return data[TURN_FIELD]
-    return 0
+            return data
+    return {}
+
+
+def snapshot_turn(texts: list[str]) -> int:
+    """The `turn_degrees` of a phone_snapshot (or bench_measure) result. 0 when it has none."""
+    return snapshot_info(texts).get(TURN_FIELD, 0)
+
+
+def snapshot_flips(texts: list[str]) -> SnapshotOrientation:
+    """The flips that the image of a phone_snapshot (or bench_measure) result has."""
+    info = snapshot_info(texts)
+    horizontal, vertical = (bool(info.get(name)) for name in FLIP_FIELDS)
+    return SnapshotOrientation(flip_horizontal=horizontal, flip_vertical=vertical)
 
 
 class ConnectedPhone(BaseModel):
@@ -219,6 +246,10 @@ class OnDemandFrameSource:
 class Monitor:
     # The MCP server's Markings action (setup sets it): save the choice and tell the phone.
     markings_setter: Callable[[bool], Awaitable[Any]] | None = None
+    # The MCP client name from initialize (for example "codex").
+    client_name: str | None = None
+    # The flips that `last_snapshot` has (the flips when it was taken); a new snapshot sets it.
+    last_snapshot_flips: SnapshotOrientation = SnapshotOrientation()
 
     def __init__(
         self,
@@ -239,7 +270,8 @@ class Monitor:
         self.in_sensor_zoom = parts.in_sensor_zoom
         self.af_mode = parts.af_mode
         # Rendered page images of the raw snapshot: (snapshot number, orientation, full size) -> JPEG.
-        self._rendered: dict[tuple[int, SnapshotOrientation, bool], bytes] = {}
+        # Rendered page snapshots by (snapshot number, flips, turn, full) or (snapshot number, flips, REFLIPPED).
+        self._rendered: dict[tuple[object, ...], bytes] = {}
         self._forward_remover = parts.forward_remover
         self._clock = parts.clock
         self._page_lock = asyncio.Lock()
@@ -280,7 +312,8 @@ class Monitor:
         self.phone_selection: PhoneSelection | None = None
         # Changes with each server start and each change of the page files: an open page reloads itself.
         self.code_version = code_version()
-        self.client_name: str | None = None
+        # The newest overlay number of each secondary origin (IngestOverlay.seq).
+        self._remote_overlay_seq: dict[str, int] = {}
         self.forwarder: CallForwarder | None = None
         self.token_dir: Path = token_dir()
         self.ingest_token: str | None = None
@@ -359,12 +392,13 @@ class Monitor:
     async def render_snapshot(self, full: bool) -> bytes | None:
         """The last snapshot for the page, in the current orientation: full size, or scaled for the panel.
 
-        Without the raw still (no recorder), the scaled tool result as it was taken.
+        Without the raw still (no recorder), the scaled tool result, flipped from the flips when it was taken to the
+        flips of now: the page draws the boxes with the flips of now (B-S11 of QA round 4).
         """
         raw = self.last_snapshot_raw
-        if raw is None:
-            return self.last_snapshot
         orientation = self.orientation.current if self.orientation is not None else SnapshotOrientation()
+        if raw is None:
+            return await self._reflipped_snapshot(orientation)
         # The turn of this snapshot (the same as the agent's image) and the flips of now.
         turn = self.bus.phone.snapshot_turn
         key = (self.bus.phone.snapshot_seq, orientation, turn, full)
@@ -377,15 +411,27 @@ class Monitor:
             self._rendered[key] = oriented
         return self._rendered[key]
 
+    async def _reflipped_snapshot(self, orientation: SnapshotOrientation) -> bytes | None:
+        image, taken = self.last_snapshot, self.last_snapshot_flips
+        if image is None or orientation == taken:
+            return image
+        key = (self.bus.phone.snapshot_seq, orientation, REFLIPPED)
+        if key not in self._rendered:
+            # Flips in the final frame commute: flipping again by the difference gives the flips of now.
+            horizontal = orientation.flip_horizontal != taken.flip_horizontal
+            vertical = orientation.flip_vertical != taken.flip_vertical
+            self._rendered[key] = await asyncio.to_thread(transform_jpeg, image, 0, horizontal, vertical)
+        return self._rendered[key]
+
     def phone_snapshot_recorder(self, snapshot: SnapshotReader) -> SnapshotReader:
         """Wrap the phone client snapshot: keep the full JPEG of the running tool call for the full screen view."""
 
-        async def recorded() -> bytes:
-            jpeg = await snapshot()
+        async def recorded() -> Still:
+            still = await snapshot()
             call = current_call()
             if call is not None:
-                self._full_snapshots[call.id] = jpeg
-            return jpeg
+                self._full_snapshots[call.id] = still.jpeg
+            return still
 
         return recorded
 
@@ -422,8 +468,9 @@ class Monitor:
         elif call.tool == tools.BOARD_OPEN and structured is not None and self.board_panel is not None:
             with contextlib.suppress(ValidationError):
                 self.board_panel.summary = BoardSummary.model_validate(structured)
-        elif call.tool == tools.PHONE_SNAPSHOT and result_images:
+        elif call.tool in SNAPSHOT_TOOLS and result_images:
             self.last_snapshot = result_images[0]
+            self.last_snapshot_flips = snapshot_flips(texts)
             # The full image of the same call, for the full screen view. Without it, the scaled one.
             self.last_snapshot_raw = self._full_snapshots.pop(call.id, None)
             self._rendered.clear()
@@ -454,9 +501,15 @@ class Monitor:
             call.summary = f"{'shown' if result.visible else 'hidden'}; phone: {result.phone}"
         self.bus.update_phone(markings_visible=result.visible, markings_phone=result.phone)
 
-    def remote_overlay(self, origin: str, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
-        """The boxes and arrows of a secondary server (the ingest route)."""
+    def remote_overlay(self, origin: str, boxes: list[OverlayBox], arrows: list[OverlayArrow], seq: int = 0) -> bool:
+        """The boxes and arrows of a secondary server (the ingest route). False: an older change that came after a
+        newer one (dropped)."""
+        if seq:
+            if seq <= self._remote_overlay_seq.get(origin, 0):
+                return False
+            self._remote_overlay_seq[origin] = seq
         self.bus.update_phone(highlights=boxes, arrows=arrows, overlay_origin=origin)
+        return True
 
     # region: phone screen of a secondary
 
@@ -563,20 +616,27 @@ class Monitor:
         return self.effective.webcam_crop
 
     def update_settings(self, saved: UiSettings) -> EffectiveSettings:
+        # The values that other parts own (the flips, the camera choices, the Markings toggle, the selected phone)
+        # come from the file under the lock, not from this page: a save of the other settings never writes an old
+        # value of them (B-W9 and B-S8 of QA round 4). The owner's value is the fallback when the file has none.
+        owned: dict[str, object] = {"markings_visible": self.bus.phone.markings_visible}
         if self.orientation is not None:
-            # OrientationState owns the flips: a page that saves other settings must not change them.
-            saved = saved.model_copy(update={"snapshot_orientation": self.orientation.current})
+            owned["snapshot_orientation"] = self.orientation.current
         if self.in_sensor_zoom is not None:
-            saved = saved.model_copy(update={"in_sensor_zoom": self.in_sensor_zoom.enabled})
+            owned["in_sensor_zoom"] = self.in_sensor_zoom.enabled
         if self.af_mode is not None:
-            saved = saved.model_copy(update={"af_mode": self.af_mode.mode})
-        # The Markings toggle owns its value: a save of the other settings keeps it.
-        saved = saved.model_copy(update={"markings_visible": self.bus.phone.markings_visible})
+            owned["af_mode"] = self.af_mode.mode
         if self.phone_selection is not None:
-            # The Devices part owns the selected phone: a save of the other settings keeps it.
-            saved = saved.model_copy(update={"adb_serial": self.phone_selection.page_serial})
+            owned["adb_serial"] = self.phone_selection.page_serial
+
+        def keep_owned(current: UiSettings) -> UiSettings:
+            values = {name: getattr(current, name) for name in owned}
+            return saved.model_copy(
+                update={name: fallback if values[name] is None else values[name] for name, fallback in owned.items()}
+            )
+
         old = self.effective
-        self._store.save(saved)
+        saved = self._store.update(keep_owned)
         self.saved = saved
         self.effective = self._start_settings.with_saved(saved)
         if self.stream is not None and old.webcam_warmup_frames != self.effective.webcam_warmup_frames:
@@ -818,8 +878,10 @@ class Monitor:
 
     # region: phone
 
-    async def stop_phone(self) -> None:
-        """Stop the phone screen, scrcpy, and the status poll, and remove the adb forward of the camera API."""
+    async def stop_phone(self) -> str:
+        """Stop the phone screen, scrcpy, and the status poll, and remove the adb forward of the camera API. A phone
+        that is already gone (adb: device not found, device offline, listener not found) is not an error: the page
+        state is cleared, and the note says so."""
         if self.scene_watcher is not None:
             await self.scene_watcher.stop()
         if self.remote_screen is not None and self.remote_screen.watcher is not None:
@@ -834,9 +896,15 @@ class Monitor:
                 await self._status_task
             self._status_task = None
         serial = self.bus.phone.serial
-        self.bus.update_phone(scrcpy_running=False)
-        if serial is not None and self._forward_remover is not None:
-            await self._forward_remover(serial)
+        # Not connected any more, whether or not the forward can be removed. A second stop finds nothing to do.
+        self.bus.update_phone(scrcpy_running=False, serial=None, status=None)
+        if self._forward_remover is None:
+            return PHONE_STOPPED
+        try:
+            return await self._forward_remover()
+        except DeviceGoneError as exc:
+            logger.info("the old phone %s was already gone: %s", serial, exc)
+            return OLD_PHONE_GONE
 
     # endregion: phone
 

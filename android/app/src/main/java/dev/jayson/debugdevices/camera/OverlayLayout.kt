@@ -17,7 +17,12 @@ data class LayoutBoxInput(
     val width: Float,
     val height: Float,
     val tag: String?,
-    val label: String
+    val label: String,
+    /**
+     * False for a box outside the phone view: it keeps its tag, colour, and legend row (the same as on the page), but
+     * gets no drawn box and no badge, and the placement ignores it.
+     */
+    val visible: Boolean = true
 )
 
 /** An arrow: a direction in the layout frame (0 = right, 90 = down), an optional tag, and the label. */
@@ -48,7 +53,13 @@ data class LaidBadge(
 data class LegendRow(val tag: String, val label: String, val colour: String)
 
 /** [outside]: every corner overlaps a box. Images get a strip below; the phone draws it see-through at [rect]. */
-data class LaidLegend(val rect: PixelRect, val rows: List<LegendRow>, val outside: Boolean)
+data class LaidLegend(
+    val rect: PixelRect,
+    val rows: List<LegendRow>,
+    val outside: Boolean,
+    /** The first corner of the sorted list: where the phone draws an outside legend (at 50% opacity). */
+    val firstCorner: PixelRect
+)
 
 data class LaidArrow(
     val tag: String,
@@ -125,9 +136,11 @@ object OverlayLayout {
 
     fun layout(input: LayoutInput): LayoutResult {
         val tags = tags(input.boxes.map { it.tag } + input.arrows.map { it.tag })
-        val given = input.boxes.map { PixelRect(it.x, it.y, it.x + it.width, it.y + it.height) }
+        // Tags, colours, and legend rows come from the full list; the placement uses the visible boxes only.
+        val visible = input.boxes.indices.filter { input.boxes[it].visible }
+        val given = visible.map { i -> input.boxes[i].let { PixelRect(it.x, it.y, it.x + it.width, it.y + it.height) } }
         val drawn = given.map { grow(it, input.minBox) }
-        val boxes = input.boxes.mapIndexed { i, box -> LaidBox(tags[i], colour(i), box.label, drawn[i]) }
+        val boxes = visible.mapIndexed { j, i -> LaidBox(tags[i], colour(i), input.boxes[i].label, drawn[j]) }
         val rows = input.boxes.mapIndexed { i, box -> LegendRow(tags[i], box.label, colour(i)) } +
             input.arrows.mapIndexed { i, arrow ->
                 val index = input.boxes.size + i
@@ -136,7 +149,8 @@ object OverlayLayout {
         val legend = if (rows.isEmpty()) null else placeLegend(input.width, input.height, drawn, rows)
         val legendInside = legend?.takeIf { !it.outside }?.rect
         val badges = mutableListOf<LaidBadge>()
-        drawn.forEachIndexed { i, rect ->
+        drawn.forEachIndexed { j, rect ->
+            val i = visible[j]
             badges +=
                 placeBadge(
                     rect,
@@ -193,18 +207,19 @@ object OverlayLayout {
     fun placeLegend(width: Float, height: Float, drawn: List<PixelRect>, rows: List<LegendRow>): LaidLegend {
         val size = legendSize(rows)
         val corners = cornerRects(width, height, size)
-        if (drawn.isEmpty()) return LaidLegend(corners.first(), rows, outside = false)
+        if (drawn.isEmpty()) return LaidLegend(corners.first(), rows, outside = false, firstCorner = corners.first())
         val grown = drawn.map { inflate(it, CLEARANCE) }
         // sortedByDescending is stable: equal distances keep the corner order.
         val order = corners.sortedByDescending { corner -> drawn.minOf { distance(corner, it) } }
         val free = order.firstOrNull { corner -> grown.none { overlaps(corner, it) } }
         return if (free != null) {
-            LaidLegend(free, rows, outside = false)
+            LaidLegend(free, rows, outside = false, firstCorner = order.first())
         } else {
             LaidLegend(
                 PixelRect(MARGIN, height + MARGIN, MARGIN + size.x, height + MARGIN + size.y),
                 rows,
-                outside = true
+                outside = true,
+                firstCorner = order.first()
             )
         }
     }
@@ -402,7 +417,7 @@ object OverlayLayout {
                 }
             )
         },
-        legend = legend?.copy(rect = legend.rect.rounded()),
+        legend = legend?.copy(rect = legend.rect.rounded(), firstCorner = legend.firstCorner.rounded()),
         arrows = arrows.map { it.copy(anchor = it.anchor.rounded()) },
         inset = inset?.let { LaidInset(it.source.rounded(), it.dest.rounded(), r(it.scale)) },
         extraHeight = r(extraHeight)
@@ -418,6 +433,35 @@ object OverlayLayout {
         val b = pointToViewer(PixelPoint(rect.right, rect.bottom), viewerDegrees, screenWidth, screenHeight)
         return PixelRect(minOf(a.x, b.x), minOf(a.y, b.y), maxOf(a.x, b.x), maxOf(a.y, b.y))
     }
+
+    /**
+     * The phone view (`docs/overlay-layout.md`, "The phone view"): the screen without the system bars and cutouts
+     * ([insets], in screen pixels), in the viewer's frame, without the band at the viewer's top that holds the app's
+     * status label ([labelBand], viewer-frame pixels from the safe top; the label turns with the viewer).
+     */
+    fun phoneFrame(
+        screenWidth: Float,
+        screenHeight: Float,
+        insets: PixelRect,
+        viewerDegrees: Int,
+        labelBand: Float
+    ): PixelRect {
+        val safe = PixelRect(insets.left, insets.top, screenWidth - insets.right, screenHeight - insets.bottom)
+        val viewer = toViewer(safe, viewerDegrees, screenWidth, screenHeight)
+        return viewer.copy(top = minOf(viewer.top + labelBand, viewer.bottom))
+    }
+
+    /** The inverse of [toViewer]: a viewer-frame rectangle back in screen pixels. */
+    fun fromViewer(rect: PixelRect, viewerDegrees: Int, screenWidth: Float, screenHeight: Float): PixelRect {
+        // Turning back is the same map with the opposite turn and the frame size swapped when sideways.
+        val sideways = Math.floorMod(viewerDegrees, 2 * Constants.Orientation.BUCKET_DEGREES) != 0
+        val frameWidth = if (sideways) screenHeight else screenWidth
+        val frameHeight = if (sideways) screenWidth else screenHeight
+        return toViewer(rect, -viewerDegrees, frameWidth, frameHeight)
+    }
+
+    /** True when some part of [rect] is inside [frame] (touching does not count). */
+    fun inFrame(rect: PixelRect, frame: PixelRect): Boolean = overlaps(rect, frame)
 
     /** The inverse of the canvas turn in `OverlayView`: `translate` to the viewer's top-left corner, then `rotate`. */
     fun pointToViewer(point: PixelPoint, viewerDegrees: Int, screenWidth: Float, screenHeight: Float): PixelPoint =

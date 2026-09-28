@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from debug_devices_mcp.adb import Adb, AdbError, AppNotInstalledError, parse_devices
+from debug_devices_mcp.adb import Adb, AdbError, AppNotInstalledError, NoSelectionError, parse_devices
 
 from .conftest import FakeRunner, failed, ok
 
@@ -26,16 +26,17 @@ def test_parse_devices_skips_header_and_daemon_lines() -> None:
     assert [(d.serial, d.state) for d in devices] == [("emulator-5554", "device"), ("ABC", "unauthorized")]
 
 
-async def test_select_only_device() -> None:
+async def test_no_selection_refuses_also_with_one_device() -> None:
+    # S1 of QA round 4: the only device can be a TV. Only the list goes to adb; no device command.
     adb, runner = adb_with(ONE_DEVICE)
-    device = await adb.select_device("")
-    assert device.serial == "R5CT1234567"
+    with pytest.raises(NoSelectionError, match="select the phone in the monitor page"):
+        await adb.select_device("")
     assert runner.calls == [["adb", "devices", "-l"]]
 
 
-async def test_several_devices_need_a_serial() -> None:
+async def test_no_selection_with_several_devices_lists_them() -> None:
     adb, _ = adb_with(TWO_DEVICES)
-    with pytest.raises(AdbError, match=r"several adb devices.*192\.0\.2\.43:5555.*R5CT1234567"):
+    with pytest.raises(NoSelectionError, match=r"No command went to any device.*192\.0\.2\.43:5555.*R5CT1234567"):
         await adb.select_device("")
 
 
@@ -48,8 +49,10 @@ async def test_select_by_serial() -> None:
 
 async def test_no_device() -> None:
     adb, _ = adb_with(b"List of devices attached\n\n")
-    with pytest.raises(AdbError, match="no ready adb device"):
+    with pytest.raises(NoSelectionError, match="adb sees: none"):
         await adb.select_device("")
+    with pytest.raises(AdbError, match="R5CT1234567 is not connected"):
+        await adb.select_device("R5CT1234567")
 
 
 async def test_forward_and_start_commands() -> None:

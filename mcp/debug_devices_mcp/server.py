@@ -17,7 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
-from debug_devices_mcp.adb import Adb, AdbDevice, AdbError
+from debug_devices_mcp.adb import Adb, AdbDevice, AdbError, DeviceNotListedError, DeviceStateError, ForwardRemoval
 from debug_devices_mcp.app_restart import (
     PHONE_TOOL_PREFIX,
     RESTART_STALE_REASON,
@@ -35,7 +35,7 @@ from debug_devices_mcp.bench_state import (
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
 from debug_devices_mcp.board.session_store import SESSION_FILE_NAME, BoardSessionStore
-from debug_devices_mcp.board.tools import BoardSession, register_board_tools
+from debug_devices_mcp.board.tools import BoardSession, register_board_tools, scene_stale_reason
 from debug_devices_mcp.camera_choice import (
     AF_MODE_NOT_ON_PHONE,
     AfModeChoice,
@@ -47,8 +47,10 @@ from debug_devices_mcp.camera_choice import (
 )
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import JPEG_FORMAT, SERVER_NAME, images, phone
+from debug_devices_mcp.constants import adb as adb_names
 from debug_devices_mcp.constants import defaults as core_defaults
-from debug_devices_mcp.devices import DeviceList, PhoneSelection, Transport, list_devices, transport_of
+from debug_devices_mcp.devices import SELECTED_GONE, DeviceList, PhoneSelection, Transport, list_devices, transport_of
+from debug_devices_mcp.discovery import PhoneDiscovery
 from debug_devices_mcp.evidence import (
     CameraView,
     Capture,
@@ -116,9 +118,9 @@ from debug_devices_mcp.pointer import PointResult
 from debug_devices_mcp.pointing import CarryResult, Pointing
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
-from debug_devices_mcp.scene import SceneState
+from debug_devices_mcp.scene import SCENE_CHANGED_MESSAGE, SceneState
 from debug_devices_mcp.schematic import SchematicFinder, SchematicOptions, register_schematic_tools
-from debug_devices_mcp.snapshot_crop import CropInfo, CropOutsideError, SnapshotCrop, crop_snapshot
+from debug_devices_mcp.snapshot_crop import CropInfo, CropOutsideError, SnapshotCrop, crop_snapshot, precheck_crop
 from debug_devices_mcp.ui.constants import tools as tool_names
 from debug_devices_mcp.ui.monitor import Monitor
 from debug_devices_mcp.ui.settings import SettingsStore, state_dir
@@ -145,6 +147,13 @@ TOOL_GUIDE = (
 
 PHONE_SOURCE = "phone"
 NO_SNAPSHOT_YET = "take a phone_snapshot first: {what} are pixels in the last phone_snapshot image"
+NO_OWN_FORWARD = "stopped (no adb forward of this server)"
+OVERLAY_EXPIRED_NOTE = "the boxes and arrows were older than 10 minutes: the phone app removed them"
+FORWARD_RELEASED = {
+    ForwardRemoval.REMOVED: "stopped (removed the forward tcp:{port} of {serial})",
+    ForwardRemoval.ALREADY_GONE: "stopped (the forward tcp:{port} was already removed)",
+    ForwardRemoval.OTHER_DEVICE: "stopped (tcp:{port} goes to another phone now: kept)",
+}
 # For the next phone tool result after a move without live tracking.
 SCENE_CLEARED_NOTE = "the board or the phone moved: the server cleared the boxes and arrows"
 
@@ -197,6 +206,8 @@ class SnapshotInfo(BaseModel):
     flip_vertical: bool | None = None
     # Phone only, with `crop`: the area of the extra full-resolution image.
     crop: CropInfo | None = None
+    # Phone only: why the crop image is missing (the area is not on this photo). The photo itself is valid.
+    crop_error: str | None = None
     # Phone only: the newest photo registration after the board or the phone moved: carried over by image
     # features to this snapshot (a new registration_id), or still stale with the reason.
     registration: CarryResult | None = None
@@ -229,6 +240,10 @@ class Services:
     in_sensor_zoom_sync: InSensorZoomSync = field(init=False)
     # The phone that the user selected in the monitor page (over --adb-serial); only the user selects it.
     selection: PhoneSelection = field(default_factory=PhoneSelection)
+    # The device of the camera API forward that this server made (phone_connect); stop and switch remove only it.
+    forwarded_serial: str | None = None
+    # Finds wireless-debugging phones on the network (no sources here: from_settings gives zeroconf and avahi).
+    discovery: PhoneDiscovery = field(default_factory=lambda: PhoneDiscovery([]))
     # Show or hide the markings (the page's drawings and the phone's boxes and arrows), and its sync.
     markings: MarkingsChoice = field(default_factory=MarkingsChoice)
     markings_sync: MarkingsSync = field(init=False)
@@ -255,8 +270,9 @@ class Services:
     # The highlight boxes and arrows on the phone now (true orientation, 0 to 1; angles in degrees).
     highlights: list[OverlayBox] = field(default_factory=list)
     arrows: list[OverlayArrow] = field(default_factory=list)
-    # The part of the still that the phone screen shows (CameraStatus.preview_region of the last status).
-    preview_region: PreviewRegion | None = None
+    # The part of the still where the phone shows boxes (CameraStatus.visible_region() of the last status:
+    # overlay_region, else preview_region). It changes with the flips and the rotation: every status updates it.
+    overlay_region: PreviewRegion | None = None
     # The app can hide its own boxes (CameraStatus.overlay_visible of the last status). False: an old app; while the
     # markings are hidden, the server keeps the boxes and arrows off the phone.
     app_hides_markings: bool = True
@@ -270,6 +286,8 @@ class Services:
     # tool call (for example the live tracking lost the board and cleared them).
     phone_note: str | None = None
     _overlay_listeners: list[OverlayListener] = field(default_factory=list)
+    # Forgets the boxes and arrows OVERLAY_TTL after the last overlay call, like the app.
+    _overlay_ttl: asyncio.TimerHandle | None = None
     _restart_listeners: list[RestartListener] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -355,13 +373,38 @@ class Services:
 
     async def _post_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> CameraStatus:
         try:
-            return await self.phone.overlay(OverlayRequest(boxes=boxes, arrows=arrows))
+            status = await self.phone.overlay(OverlayRequest(boxes=boxes, arrows=arrows))
         except PhoneApiError as exc:
-            if exc.status != HTTPStatus.BAD_REQUEST or not any(box.tag for box in boxes):
+            tagged = any(box.tag for box in boxes) or any(arrow.tag for arrow in arrows)
+            if exc.status != HTTPStatus.BAD_REQUEST or not tagged:
                 raise
-            logger.info("the phone app does not take box tags (an older app): sent without them")
+            logger.info("the phone app does not take box or arrow tags (an older app): sent without them")
             untagged = [box.model_copy(update={"tag": None}) for box in boxes]
-            return await self.phone.overlay(OverlayRequest(boxes=untagged, arrows=arrows))
+            plain = [arrow.model_copy(update={"tag": None}) for arrow in arrows]
+            status = await self.phone.overlay(OverlayRequest(boxes=untagged, arrows=plain))
+        self._restart_overlay_ttl(bool(boxes or arrows))
+        return status
+
+    def _restart_overlay_ttl(self, drawn: bool) -> None:
+        """The app forgets its boxes and arrows OVERLAY_TTL after the call: this server, the page, and the tracker
+        forget them at the same time (C11 of QA round 4)."""
+        if self._overlay_ttl is not None:
+            self._overlay_ttl.cancel()
+            self._overlay_ttl = None
+        if drawn:
+            loop = asyncio.get_running_loop()
+            self._overlay_ttl = loop.call_later(
+                phone.OVERLAY_TTL.total_seconds(), lambda: loop.create_task(self._overlay_expired())
+            )
+
+    async def _overlay_expired(self) -> None:
+        self._overlay_ttl = None
+        if not self.highlights and not self.arrows:
+            return
+        logger.info("the boxes and arrows are older than %s: the app removed them; forgetting them", phone.OVERLAY_TTL)
+        await self.pointing.stop()
+        await self._overlay_changed([], [])
+        self.overlay_note(OVERLAY_EXPIRED_NOTE)
 
     def server_hides_markings(self) -> bool:
         """Markings hidden and an old app: the server keeps the boxes and arrows off the phone."""
@@ -402,9 +445,11 @@ class Services:
         return None if self.markings.visible else MARKINGS_HIDDEN
 
     def seen_status(self, status: CameraStatus) -> None:
-        """Keep what later calls need from a status: the preview region, and whether the app can hide its boxes."""
-        if status.preview_region is not None:
-            self.preview_region = status.preview_region
+        """Keep what later calls need from a status: the region where boxes show, and whether the app can hide its
+        boxes."""
+        region = status.visible_region()
+        if region is not None:
+            self.overlay_region = region
         self.app_hides_markings = status.overlay_visible is not None
 
     async def _overlay_changed(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
@@ -416,7 +461,10 @@ class Services:
         self, registration_id: str, refdes: list[str], boxes: list[PixelBox], photo_size: tuple[int, int]
     ) -> tuple[PointResult, bytes | None]:
         """board_locate_in_photo with `highlight`: point to the parts, and draw them on the last snapshot."""
-        result = await self.pointing.point_to(refdes, registration_id)
+        # The same markings note as phone_point_to (B-S7 of QA round 4).
+        result = (await self.pointing.point_to(refdes, registration_id)).model_copy(
+            update={"markings": self.markings_note()}
+        )
         geometry, image = self.last_snapshot, self.last_snapshot_image
         if geometry is None or image is None or not boxes:
             return result, None
@@ -439,11 +487,18 @@ class Services:
         """The board or the phone moved: the boxes and the photo registrations are for the old scene, unless a
         live tracker follows the move (then its registration stays, and the boxes and arrows that it moves stay)."""
         tracker = self.pointing.tracker
+        # The registrations get the reason of this change (a new reason replaces an old one); a plain move keeps the
+        # move message.
+        scene_reason = self.scene.change_reason
+        reason = scene_stale_reason(scene_reason) if scene_reason not in (None, SCENE_CHANGED_MESSAGE) else None
         if await self.pointing.scene_changed() and tracker is not None:
             for registration in self.board.registrations.values():
-                registration.stale = registration.registration_id != tracker.registration_id
+                if registration.registration_id == tracker.registration_id:
+                    registration.stale, registration.stale_reason = False, None
+                else:
+                    registration.mark_stale(reason)
         else:
-            self.board.mark_registrations_stale()
+            self.board.mark_registrations_stale(reason)
         if self.pointing.overlay_tracked():
             return
         await self.pointing.stop()
@@ -479,7 +534,7 @@ class Services:
         # The boxes follow the board while the phone moves, when the phone screen stream matches the snapshot.
         tracking = await self.pointing.follow_plain_boxes(boxes, request.boxes)
         annotated, layout_summary = await asyncio.to_thread(draw_highlights, image, boxes)
-        seen, warning = visibility(overlay, status.preview_region or self.preview_region)
+        seen, warning = visibility(overlay, status.visible_region() or self.overlay_region)
         result = HighlightResult(
             count=len(overlay),
             boxes=overlay,
@@ -497,6 +552,16 @@ class Services:
         await self.pointing.stop()
         status = await self.send_overlay([], [])
         return HighlightResult(count=0, boxes=[], overlay_boxes=status.overlay_boxes, note=HighlightResult.CLEARED_NOTE)
+
+    async def release_forward(self) -> str:
+        """Remove the camera API forward that this server made, only while its port still goes to that phone. A
+        second call does nothing. Raises DeviceGoneError when adb says that the device is gone."""
+        serial, self.forwarded_serial = self.forwarded_serial, None
+        if serial is None:
+            return NO_OWN_FORWARD
+        port = self.settings.local_forward_port
+        removal = await self.adb.remove_own_forward(serial, port)
+        return FORWARD_RELEASED[removal].format(serial=serial, port=port)
 
     def reset_phone_syncs(self) -> None:
         """A new phone_connect: try the newer endpoints again (the app can have an update)."""
@@ -522,14 +587,22 @@ class Services:
     async def phone_snapshot(self) -> tuple[bytes, ImageTransform]:
         """One phone still, shown like the monitor preview: turned by the remaining turn, then the user's flips.
 
-        The status gives the rotation of the still that the app takes now (orientation.py has the geometry).
+        The still's `X-Rotation-Degrees` header gives its rotation; an older app without it: the status read just
+        before (orientation.py has the geometry).
         """
         status = await self.phone.status()
         self.seen_status(status)
         await self.check_app_start(status)
+        still = await self.phone.snapshot()
+        # The still's own headers (C12 of QA round 4): the phone can turn, or the app restart, after the status.
+        if still.app_start_id is not None and still.app_start_id != status.app_start_id:
+            status = status.model_copy(update={"app_start_id": still.app_start_id})
+            await self.check_app_start(status)
+        if still.rotation_degrees is not None and still.rotation_degrees != status.rotation_degrees:
+            status = status.model_copy(update={"rotation_degrees": still.rotation_degrees})
         transform = self.orientation.transform(status.rotation_degrees)
         self.last_view = CameraView.of(status, transform)
-        jpeg = await self.phone.snapshot()
+        jpeg = still.jpeg
         try:
             shown = await asyncio.to_thread(
                 transform_jpeg, jpeg, transform.turn_degrees, transform.flip_horizontal, transform.flip_vertical
@@ -572,6 +645,7 @@ class Services:
             af_mode=AfModeChoice(SettingsStore.in_dir(state_dir())),
             markings=MarkingsChoice(SettingsStore.in_dir(state_dir())),
             selection=PhoneSelection(SettingsStore.in_dir(state_dir())),
+            discovery=PhoneDiscovery.default(runner, settings.avahi_browse_path),
             bench=BenchStateStore(settings.bench_state_file),
             webcam_controls=V4l2Controls(
                 runner,
@@ -662,6 +736,12 @@ async def take_phone_snapshot(
 ) -> list[ContentBlock]:
     """The phone_snapshot tool (also used by bench_measure): the oriented still, its capture id, and the image.
     With `crop`: also a full-resolution crop of an area, enlarged (snapshot_crop.py)."""
+    if crop is not None:
+        # A crop area that cannot be on the image is refused before the still changes any state.
+        try:
+            precheck_crop(crop, max_side)
+        except CropOutsideError as exc:
+            raise ToolError(str(exc)) from exc
     with tool_errors():
         jpeg, transform = await services.phone_snapshot()
     content = await image_result(jpeg, PHONE_SOURCE, max_side, save_path, transform)
@@ -670,16 +750,19 @@ async def take_phone_snapshot(
     if crop is not None:
         try:
             crop_jpeg, crop_info = await asyncio.to_thread(crop_snapshot, jpeg, (info.width, info.height), crop)
+            info = info.model_copy(update={"crop": crop_info})
+            crop_image = Image(data=crop_jpeg, format=JPEG_FORMAT).to_image_content()
         except CropOutsideError as exc:
-            raise ToolError(str(exc)) from exc
-        info = info.model_copy(update={"crop": crop_info})
-        crop_image = Image(data=crop_jpeg, format=JPEG_FORMAT).to_image_content()
+            # The still is a valid photo: keep it, and say why the crop image is missing.
+            info = info.model_copy(update={"crop_error": str(exc)})
     services.last_snapshot = SnapshotGeometry(width=info.width, height=info.height, orientation=transform)
     services.last_snapshot_image = content[1].data  # type: ignore[union-attr]
     # This photo is the scene now: a later move of the board or the phone makes it stale.
     services.scene.snapshot_taken()
     # region: capture id (evidence.py)
-    capture = services.captures.record(CaptureKind.PHONE_SNAPSHOT, PHONE_SOURCE, services.last_view)
+    # The view with the size of the image that the agent got: the pixel tools scale another size of the same view.
+    view = services.last_view.with_size(info.width, info.height) if services.last_view is not None else None
+    capture = services.captures.record(CaptureKind.PHONE_SNAPSHOT, PHONE_SOURCE, view)
     # The bench record keeps every photo id (bench_state.py).
     await asyncio.to_thread(add_photo, services.bench, capture.capture_id)
     info = info.model_copy(update={"capture_id": capture.capture_id, "captured_at": capture.captured_at})
@@ -708,7 +791,11 @@ async def read_meter(
     Every image gets its own capture id; the result has the id of the first one, and every id finds the result.
     """
     settings = services.settings
-    limits = MeterLimits(max_volts=settings.max_voltage, max_amps=settings.max_current)
+    limits = MeterLimits(
+        max_volts=settings.max_voltage,
+        max_amps=settings.max_current,
+        max_diode_volts=settings.max_diode_voltage,
+    )
     user_mode = recent_user_mode(services.bench)
     captured: list[tuple[bytes, Capture]] = []
     reads: list[asyncio.Task[MultimeterReading]] = []
@@ -758,16 +845,27 @@ async def wait_until_ready(services: Services) -> tuple[Health, CameraStatus]:
 
 
 async def select_phone(services: Services) -> AdbDevice:
-    """The selected phone (page, then config). A lost Wi-Fi phone gets one `adb connect` before the error."""
+    """The selected phone (page, then config). A lost or offline Wi-Fi phone gets one `adb connect` (an offline one
+    an `adb disconnect` before it) before the error. A selected phone that is not in `adb devices` gives the "gone"
+    message (not an adb error)."""
     serial, _ = services.selection.effective(services.settings.adb_serial)
     try:
         return await services.adb.select_device(serial)
     except AdbError as first_error:
+        gone = isinstance(first_error, DeviceNotListedError)
         if not serial or transport_of(serial) is not Transport.WIFI:
+            if gone:
+                raise AdbError(SELECTED_GONE.format(serial=serial)) from first_error
             raise
         try:
+            if isinstance(first_error, DeviceStateError) and first_error.state == adb_names.STATE_OFFLINE:
+                # adb keeps a stale Wi-Fi connection as offline and answers "already connected" (B-W5 of QA round
+                # 4): drop it first, so that the connect is a real new one.
+                await services.adb.disconnect(serial)
             await services.adb.connect(serial)
         except AdbError as exc:
+            if gone:
+                raise AdbError(f"{SELECTED_GONE.format(serial=serial)} (adb connect failed: {exc})") from exc
             raise AdbError(f"{first_error}; adb connect {serial} failed too: {exc}") from exc
         return await services.adb.select_device(serial)
 
@@ -776,6 +874,8 @@ async def connect_phone(services: Services) -> PhoneConnection:
     settings = services.settings
     device = await select_phone(services)
     await services.adb.forward(device.serial, settings.local_forward_port)
+    # Only this forward is ours to remove later (stop, switch, Disconnect).
+    services.forwarded_serial = device.serial
     started_app = False
     try:
         await services.phone.health()
@@ -810,8 +910,8 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         """Find the phone over ADB, forward the camera API port, and start the camera app when it does not answer.
 
         The phone is the one that the user selected in the monitor page (Devices), else --adb-serial
-        (DEBUG_DEVICES_ADB_SERIAL), else the only device. With several devices and no choice, ask the user to select
-        the phone in the monitor page. Returns the app health and the camera status.
+        (DEBUG_DEVICES_ADB_SERIAL). Without a selection it refuses and sends nothing (also with one device): ask the
+        user to select the phone in the monitor page. Returns the app health and the camera status.
         """
         with tool_errors():
             return await connect_phone(services)
@@ -822,8 +922,11 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
 
         Read-only: only the user selects the phone in the monitor page (Devices); you cannot select, pair, or
         connect a phone. Tell the user when the phone they need is not selected, not authorized, or has no app.
+        `network`: wireless-debugging phones found on the network (also when adb has no mDNS), each with `kind`
+        (connect or pairing), `address`, `model`, and `adb_serial` when adb already has it. Give the user the exact
+        address: they press Connect or Pair (with the code on the phone) in the page.
         """
-        return await list_devices(services.adb, services.selection, services.settings.adb_serial)
+        return await list_devices(services.adb, services.selection, services.settings.adb_serial, services.discovery)
 
     @server.tool()
     async def phone_status() -> PhoneStatusReport:
@@ -851,7 +954,10 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
             raise ToolError("give exactly one of `ratio` or `step`")
         request = ZoomRatioRequest(ratio=ratio) if ratio is not None else ZoomStepRequest(step=step)
         with services.camera_command(), tool_errors():
-            return await services.phone.zoom(request)
+            status = await services.phone.zoom(request)
+        # Without a scene watcher, the old photos and registrations become stale (scene.py).
+        await services.scene.unwatched_view_change("zoom")
+        return status
 
     @server.tool()
     async def phone_torch(enabled: bool) -> CameraStatus:
@@ -870,7 +976,11 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
             raise ToolError("give exactly one of `degrees` or `auto: true`")
         request = RotationLockRequest(degrees=degrees) if degrees is not None else RotationAutoRequest()
         with services.camera_command(), tool_errors():
-            return await services.phone.rotation(request)
+            status = await services.phone.rotation(request)
+        # The rotation moves the region where boxes show (overlay_region).
+        services.seen_status(status)
+        await services.scene.unwatched_view_change("rotation")
+        return status
 
     @server.tool()
     async def phone_snapshot(
@@ -908,10 +1018,17 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         the monitor page. The phone mirrors its camera preview the same way (its status text stays readable);
         the phone camera and its zoom do not change.
         """
+        if flip_horizontal is None and flip_vertical is None:
+            # Only read: no save and no push to the phone, so a read never undoes another client's flips (B-S5).
+            return services.orientation.current
         orientation = services.orientation.update(flip_horizontal, flip_vertical)
         # The phone preview follows (only the camera image; the app's text stays readable).
         with services.camera_command():
-            await services.preview_sync.push()
+            pushed = await services.preview_sync.push()
+        if pushed is not None:
+            # The flips move the region where boxes show (overlay_region).
+            services.seen_status(pushed)
+        await services.scene.unwatched_view_change("flips")
         return orientation
 
 
@@ -953,6 +1070,7 @@ def register_camera_tools(server: MCPServer, services: Services) -> None:
         services.in_sensor_zoom.set(enabled)
         with services.camera_command(), tool_errors():
             status = await services.in_sensor_zoom_sync.send()
+        await services.scene.unwatched_view_change("in-sensor zoom")
         return PhoneStatusReport.of(status)
 
     @server.tool()
@@ -1058,11 +1176,13 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         Never read a meter value yourself from an image. It reads `frames` frames (default 2, about 1 s apart); each
         frame is checked, then they are combined. The result has the model's reading as evidence (`display_text` is
         the exact LCD text, `unit`, `mode`, and each frame in `frames`) and a checked `status`:
-        "confirmed" (unit and mode agree, confidence high enough, the same digits and decimal point in every frame,
-        and below --max-voltage/--max-current: `value` is the measurement), "uncertain" (unit symbol not readable, low
-        confidence, digits that change: see `value_min`/`value_max`), "disputed" (the unit does not fit the mode, a
-        moved decimal point, a value above the bench limit, or not the `expected_mode`), or "unreadable". Only
-        "confirmed" has a numeric `value`; for the others, report no numeric conclusion and follow `request`.
+        "confirmed" (unit and mode agree, confidence high enough, the same digits, decimal point, unit, mode, and sign
+        in every frame, and below --max-voltage/--max-current: `value` is the measurement), "uncertain" (unit symbol
+        not readable, low confidence, digits that change: see `value_min`/`value_max`; a diode reading above
+        --max-diode-voltage, 3 V: the dial is probably on DC V), "disputed" (the unit does not fit the mode, a moved
+        decimal point, another unit, mode, or sign between the frames, a value above the bench limit, or not the
+        `expected_mode`), or "unreadable". Only "confirmed" has a numeric `value`; for the others, report no numeric
+        conclusion and follow `request`.
         `expected_mode` is the mode of the current test: context only, it never confirms the LCD mode. A mode that the
         user confirmed on the dial in the last 10 minutes (bench_state_update meter_mode_confirmed_by_user) is used
         for the check (`mode_source: "user"`, the model's mode in `model_mode`).
@@ -1073,6 +1193,9 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         V or A without a prefix, above the count, an impossible leading zero) is "uncertain". `digits` and
         `digits_before_point` are the model's reading of the digits and the point; they must agree with
         `display_text` and `value`.
+        Known limit: a decimal point shift that keeps the digit count and stays below the bench limit (for example
+        "14.15" for 1.415 V) can pass as "confirmed". For a value that decides a repair step, give `expected_value`,
+        or ask the user to confirm the LCD.
         `source` "webcam" (default) uses the PC webcam with its crop. "phone" uses a phone snapshot (call
         phone_connect first). The image goes to the vision model, so use "phone" only when the phone points at the
         meter, never when it points at the board. `include_image` also returns the exact images that the model saw.
@@ -1123,6 +1246,8 @@ def register_bench_measure_tools(server: MCPServer, services: Services) -> None:
         (both capture ids are in the result). The meter part is the same as multimeter_read (only "confirmed" is a
         measurement; `expected_value` is the nominal value of the test, context only); the photo part is the same as
         phone_snapshot (the phone points at the board).
+        Known limit: a decimal point shift that stays below the bench limit can pass as "confirmed". For a value that
+        decides a repair step, give `expected_value`, or ask the user to confirm the LCD.
         """
         meter_task = asyncio.create_task(
             read_meter(services, MeterSource.WEBCAM, expected_mode, frames, expected_value)
@@ -1189,11 +1314,14 @@ def build_server(
 
     @asynccontextmanager
     async def lifespan(_: MCPServer) -> AsyncIterator[None]:
+        # Without a scene watcher, photos and registrations expire (scene.py, expire_unwatched).
+        expiry = asyncio.create_task(services.scene.expiry_loop(), name="scene-expiry")
         try:
             if monitor is not None:
                 await monitor.start()
             yield
         finally:
+            expiry.cancel()
             if monitor is not None:
                 await monitor.stop()
             await services.aclose()

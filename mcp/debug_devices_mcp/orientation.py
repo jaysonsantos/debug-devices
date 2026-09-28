@@ -201,8 +201,7 @@ class OrientationState:
         self._value = updated
         if self._store is not None:
             try:
-                saved = self._store.load()
-                self._store.save(saved.model_copy(update={"snapshot_orientation": updated}))
+                self._store.update(lambda saved: saved.model_copy(update={"snapshot_orientation": updated}))
             except OSError as exc:
                 logger.warning("cannot save the snapshot orientation: %s", exc)
         self._seen = updated
@@ -246,10 +245,19 @@ class PreviewSync:
         self._unsupported = False
         self._watch.reset()
 
-    async def push(self) -> CameraStatus | None:
-        """Send the current flips. Return the new status, or None when the phone does not take them now."""
+    async def push(self, status: CameraStatus | None = None) -> CameraStatus | None:
+        """Send the current flips. Return the new status, or None when the phone does not take them now.
+
+        The preview flips depend on the still rotation (in Auto, the page view turns with the phone): without a
+        fresh `status`, read one first, so the flips never use an old rotation (B-E10 of QA round 4)."""
         if self._unsupported:
             return None
+        try:
+            fresh = status if status is not None else await self._phone.status()
+        except PhoneError as exc:
+            logger.info("phone preview flips not sent: %s", exc)
+            return None
+        self._rotation_degrees = fresh.rotation_degrees
         desired = self.desired()
         request = PreviewFlipRequest(flip_horizontal=desired.flip_horizontal, flip_vertical=desired.flip_vertical)
         try:
@@ -275,9 +283,13 @@ class PreviewSync:
         # The wanted preview flips changed: the user changed the flips or the Screen view (maybe through another
         # server: all servers compute the same value), or the page view turned with the phone (auto).
         if self._sent is not None and self.desired() != self._sent:
-            return await self.push() or status
+            return await self.push(status) or status
         if not may_send:
             flips = f"flip_horizontal={status.preview_flip_horizontal}, flip_vertical={status.preview_flip_vertical}"
             self._watch.other_client(status, flips)
             return status
-        return await self.push() or status
+        pushed = await self.push(status)
+        if pushed is None and not self._unsupported:
+            # Only this send failed: the next status reads try again (B-S6 of QA round 4).
+            self._watch.failed()
+        return pushed or status

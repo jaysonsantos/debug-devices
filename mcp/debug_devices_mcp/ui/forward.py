@@ -84,6 +84,9 @@ class IngestOverlay(BaseModel):
     origin: str
     boxes: list[OverlayBox]
     arrows: list[OverlayArrow]
+    # Counts the overlay changes of this secondary: the primary drops an older one that comes late (B-F9 of QA round
+    # 4). 0: a secondary from before the number (always taken).
+    seq: int = 0
 
 
 def redacted(event: ToolCallEvent) -> ToolCallEvent:
@@ -131,6 +134,7 @@ class CallForwarder:
         self._backoff = ingest.BACKOFF_START
         self.sent = 0
         self._overlay_tasks: set[asyncio.Task[bool]] = set()
+        self._overlay_seq = 0
 
     @property
     def primary(self) -> str | None:
@@ -229,16 +233,19 @@ class CallForwarder:
                 return
 
     def send_overlay_soon(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
-        """Send in the background: a slow or gone primary never slows a tool call."""
-        task = asyncio.create_task(self.send_overlay(boxes, arrows), name="overlay-forward")
+        """Send in the background: a slow or gone primary never slows a tool call. The number is taken now, in the
+        order of the changes, so the primary keeps the newest one when two sends overtake each other."""
+        self._overlay_seq += 1
+        task = asyncio.create_task(self.send_overlay(boxes, arrows, self._overlay_seq), name="overlay-forward")
         self._overlay_tasks.add(task)
         task.add_done_callback(self._overlay_tasks.discard)
 
-    async def send_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> bool:
+    async def send_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow], seq: int = 0) -> bool:
         """The boxes and arrows of this server, for the primary's page (drawn on its snapshot with our origin)."""
         if not self._is_secondary() or not await self._find_primary():
             return False
-        body = IngestOverlay(origin=self._origin(), boxes=boxes, arrows=arrows).model_dump_json().encode()
+        overlay = IngestOverlay(origin=self._origin(), boxes=boxes, arrows=arrows, seq=seq)
+        body = overlay.model_dump_json().encode()
         return await self._post(ingest.OVERLAY_PATH, body, http.JSON_MEDIA_TYPE)
 
     async def _post(self, path: str, body: bytes, media_type: str, params: dict[str, str] | None = None) -> bool:

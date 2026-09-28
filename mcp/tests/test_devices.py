@@ -13,7 +13,7 @@ from mcp import Client
 
 from debug_devices_mcp.adb import Adb
 from debug_devices_mcp.config import Settings
-from debug_devices_mcp.devices import PhoneSelection, SelectionSource
+from debug_devices_mcp.devices import APP_NOT_SELECTED, PhoneSelection, SelectionSource
 from debug_devices_mcp.process import SubprocessRunner
 from debug_devices_mcp.server import Services, build_server
 from debug_devices_mcp.ui.device_panel import DevicePanel, PairBody
@@ -83,36 +83,44 @@ async def test_the_list_and_no_command_to_other_wifi_devices(bench: Bench) -> No
     devices = await bench.panel.devices()
     by_serial = {device.serial: device for device in devices.devices}
     phone, tv, locked = by_serial[PHONE], by_serial[TV], by_serial["ZY22ABC"]
+    # Nothing is selected: no device gets `pm path`, also not the USB phone (S2 of QA round 4).
     assert (phone.transport, phone.state, phone.model, phone.product, phone.app_installed) == (
         "usb",
         "device",
         "SM_A556B",
         "a55",
-        True,
+        None,
     )
-    assert (tv.transport, tv.app_installed) == ("wifi", None)
-    assert "no command goes to an unselected Wi-Fi device" in (tv.note or "")
+    assert phone.note == APP_NOT_SELECTED
+    assert (tv.transport, tv.app_installed, tv.note) == ("wifi", None, APP_NOT_SELECTED)
     assert locked.state == "unauthorized"
     assert "allow USB debugging" in (locked.note or "")
     assert devices.selected_from is SelectionSource.NONE
     assert "not supported" in (devices.mdns_note or "")
     assert "Only the user selects the phone" in devices.note
-    assert TV not in bench.device_serials_used()
+    assert bench.device_serials_used() == set()
+    # The selected phone gets the check.
+    bench.services.selection.set(PHONE)
+    selected = {device.serial: device for device in (await bench.panel.devices()).devices}
+    assert selected[PHONE].app_installed is True
+    assert bench.device_serials_used() == {PHONE}
 
 
 async def test_the_server_never_picks_one_of_several_devices(bench: Bench) -> None:
     async with Client(bench.server) as client:
         result = await client.call_tool("phone_connect", {})
     assert result.is_error
-    assert "select the phone in the monitor page" in result.content[0].text
-    assert bench.device_serials_used() <= {PHONE}  # only the pm path check of the USB phone
+    assert "select the phone in the monitor page (Devices)" in result.content[0].text
+    # No command to any device: the server never picks one (S1 of QA round 4).
+    assert bench.device_serials_used() == set()
 
 
 async def test_selection_is_saved_and_replaces_the_config(bench: Bench, settings: Settings) -> None:
     bench.services.settings = settings.model_copy(update={"adb_serial": "CONFIG123"})
     assert bench.services.selection.effective("CONFIG123") == ("CONFIG123", SelectionSource.CONFIG)
     action = await bench.panel.select(PHONE)
-    assert [step.step for step in action.steps] == ["stop the old phone", "select", "phone_connect"]
+    # The choice is saved first: a choice that cannot be saved does not stop the old phone (B-W8).
+    assert [step.step for step in action.steps] == ["select", "stop the old phone", "phone_connect"]
     assert all(step.ok for step in action.steps), action.steps
     assert bench.store.load().adb_serial == PHONE
     # Another server (a new selection object on the same file) sees it.
@@ -136,7 +144,7 @@ async def test_switch_to_wifi(bench: Bench) -> None:
     action = await bench.panel.switch_to_wifi(PHONE)
     assert all(step.ok for step in action.steps), action.steps
     names = [step.step for step in action.steps]
-    assert names[:5] == ["stop the old phone", "select", "Wi-Fi address", "adb tcpip 5555", f"adb connect {PHONE_WIFI}"]
+    assert names[:5] == ["select", "stop the old phone", "Wi-Fi address", "adb tcpip 5555", f"adb connect {PHONE_WIFI}"]
     assert names[-1] == "phone_connect"
     assert bench.store.load().adb_serial == PHONE_WIFI
     assert PHONE_WIFI in {device.serial for device in action.devices.devices}
@@ -162,7 +170,9 @@ async def test_a_lost_wifi_phone_gets_one_connect(bench: Bench) -> None:
         ["connect", "10.0.0.9:5555"],
     ]
     assert lost.is_error
-    assert "adb connect 10.0.0.9:5555 failed too" in lost.content[0].text
+    # A clear message (the phone is gone, what the user does), with the adb reason at the end.
+    assert "the selected phone 10.0.0.9:5555 is gone" in lost.content[0].text
+    assert "adb connect failed" in lost.content[0].text
 
 
 async def test_pair_and_connect(bench: Bench) -> None:

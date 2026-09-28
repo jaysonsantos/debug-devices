@@ -201,3 +201,48 @@ Date: 2026-09-27. Brief: `docs/briefs/bench-feedback-2.md`, section "dd-research
 - An upper-case `U` in a turned photo (a turned `n`) has no entry, because the table keeps only the lower-case pair `n`/`u`.
 - Value codes cover resistors only. Capacitor codes (pF with the 3-digit code) and the EIA 3-digit multipliers 8 and 9 are not decoded.
 - `schematic_find` needs a PDF with text. A scanned schematic (images only) gives no hits. OCR is not in scope.
+
+## QA round 4 fixes: evidence and tracking (dd-research-2)
+
+Date: 2026-09-28. Brief: `docs/briefs/qa-round4-fixes.md`, section "dd-research-2". Bugs from `docs/reports/dd-qa.md`, round 4. No device, no server restart, only fakes.
+
+### What changed
+
+| Bug | Fix | Files |
+|---|---|---|
+| B-F1 | `phone_point_to` without live tracking now also runs the camera-view check (`guard_snapshot_registration`): the last `phone_snapshot` must show the registered scene with the same zoom, lens, turn, and flips. A tracked registration maps live frames and needs no check. | `pointing.py` (`_registration`, `PointingHost`) |
+| B-F2 | `CameraView` stores the image size that the agent got (`width_px`, `height_px`; not part of `differences()`). The capture of each `phone_snapshot` records it. New `photo_scale()`: the same view at another size is scaled; another shape is refused. `board_parts_at_photo`, `board_match_marking` (with a position), and `board_identify` get the scale through `photo_to_registered()`. `board_parts_at_photo` and `board_match_marking` take an optional `photo_id` (default: the last `phone_snapshot`); `board_parts_at_photo` returns `photo_id` and `scale`. | `evidence.py`, `board/tools.py`, `server.py` |
+| B-E5 | `board_identify` checks its `photo_id` against the registration's photo (`CaptureLog.reuse_problem(registered, photo_id)`: same scene and camera view, or refused). With a stale registration that was carried over to that photo, it uses the carried one and says so in `reason`. The claim keeps the pixels as given. | `evidence.py`, `board/tools.py` (`registration_for_photo`) |
+| B-E6 | A unique landmark confirms only with a visual input: `user_confirmed: true` (only after the user said so). Without it, the claim is a candidate ("no visual input") with the request to read a marking or ask the user. A marking read in the photo confirms as before. New `VisualInput` model; the claim has `user_confirmed`. | `board/identity.py`, `board/tools.py`, `instructions.py` (rule 9), `mcp/README.md` |
+| B-E7 | `SceneState` knows if a scene watcher runs (`watcher_alive()` at each checked frame; `watching` within 5 s). Without one: (1) `expire_unwatched()` marks the scene changed 5 minutes (`unwatched_max_age`) after the last `phone_snapshot` or the last watched frame; a task in the server lifespan checks every second; (2) `phone_zoom`, `phone_rotation`, `phone_snapshot_orientation` (with a value), and `phone_in_sensor_zoom` call `unwatched_view_change()`, which marks it changed at once. Both use the normal scene-change path (capture epoch, stale registrations, boxes cleared) with their own reason. With a running watcher nothing changes. | `scene.py`, `server.py` |
+| B-F5 | One method sets the flag and the reason: `Registration.mark_stale(reason)`. A new reason replaces the old one. A carried registration starts with no reason. A lost live tracking gives `TRACKING_LOST_REASON`. A scene change gives the reason of that change (`scene_stale_reason()`), or the move message. Capture ids keep the reason of the first change after them (`CaptureLog` keeps the reason per epoch). | `board/tools.py`, `pointing.py`, `server.py`, `evidence.py` |
+| B-F7 | A registration restored after a server restart says "was restored after a server restart, so its scene cannot be checked: take a fresh phone_snapshot and call board_register_photo again" (`RESTORED_STALE_REASON`). | `board/tools.py` |
+| B-F8 | `precheck_crop()` refuses a crop area that cannot be on any image (all at negative pixels, or starting beyond `max_side`) before the still. When the area misses the real image, the photo is still returned and recorded, with `crop_error` and no crop image. | `snapshot_crop.py`, `server.py` |
+| Docs | `board_locate_in_photo(highlight)`: the last `phone_snapshot` must show the scene of the registered photo with the same camera view (any size), unless the live tracking follows it (was: "must be your last phone_snapshot"). | `board/tools.py`, `mcp/README.md` |
+
+Design choice for B-F2: the scale compares the image sizes of the two photos from the capture log (the photo of the pixels and the registered photo), not the size that the agent declared at registration. The same image size then always means no scaling.
+
+### Tests
+
+- New `mcp/tests/test_evidence_round4.py` (13 tests): `phone_point_to` after a zoom (B-F1); a half-size photo gives the same board point and parts, another shape is refused, the size is not a view difference (B-F2); `board_identify` with pixels of a photo of another zoom is refused, and a carried registration is followed (B-E5); expiry with a fake clock, a running watcher stops it, a view change without a watcher, the zoom through the tools (B-E7); a new reason replaces the old one after a carry-over, braces in reasons (B-F5); the restored registration message (B-F7); the crop checks (B-F8).
+- Changed tests:
+  - `test_board_identity.py`: `test_unique_landmark_confirms` is now `test_unique_landmark_needs_a_visual_input` (candidate without, confirmed with `user_confirmed`).
+  - `test_board_parts_at.py::test_zoom_change_refuses_the_old_registration` and `test_highlight.py::test_own_commands_ask_for_a_new_reference` test the case with a running watcher, so they call `watcher_alive()` first. Without a watcher, the zoom now makes the photos stale (tested in the new file).
+
+| Check | Command | Result |
+|---|---|---|
+| All Python tests | `uv run pytest` | 824 passed, 1 skipped |
+| Lint | `ruff check`, `ruff format --check` on the 12 changed Python files | pass |
+| Hooks | `prek run --files` on the changed files and `mcp/README.md` | pass |
+
+### Edits in shared files (small)
+
+- `server.py`: `SnapshotInfo.crop_error`; the crop pre-check and the kept photo in `take_phone_snapshot`; the capture view with the image size; the reasons in `_scene_changed`; 4 calls of `unwatched_view_change`; the expiry task in `lifespan`. 1 import line each for `scene_stale_reason`, `SCENE_CHANGED_MESSAGE`, `precheck_crop`.
+- `instructions.py`: evidence rule 9 text.
+- `phone_snapshot_orientation`: my line runs only when a flip value is given. dd-ui changes this function for B-S5 (read-only must not push): please keep the `unwatched_view_change("flips")` call in the set path.
+
+### Open
+
+- The expiry time (5 minutes) and the watch timeout (5 s) are `SceneOptions` defaults, not settings. Make them flags if the bench needs other values.
+- `phone_focus`, `phone_torch`, `phone_af_mode`, and highlight boxes do not make photos stale without a watcher: they do not change the pixel geometry.
+- `pointing._board_to_snapshot` still scales by the declared registration size (unchanged; it already refused another shape).

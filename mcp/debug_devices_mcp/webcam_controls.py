@@ -64,14 +64,15 @@ class WebcamControls(BaseModel):
     exposure: int | None = None
 
     def settings(self) -> dict[str, int]:
-        """The V4L2 control values to set, in a safe order (the exposure mode before the exposure time)."""
+        """The V4L2 control values to set, in a safe order (the exposure mode before the exposure time). With auto
+        exposure on, a saved fixed exposure time is left out: the camera refuses it then (B-F10 of QA round 4)."""
         values: dict[str, int] = {}
         for name, value in ((BRIGHTNESS, self.brightness), (CONTRAST, self.contrast), (GAIN, self.gain)):
             if value is not None:
                 values[name] = value
         if self.auto_exposure is not None:
             values[AUTO_EXPOSURE] = AUTO_EXPOSURE_AUTOMATIC if self.auto_exposure else AUTO_EXPOSURE_MANUAL
-        if self.exposure is not None:
+        if self.exposure is not None and self.auto_exposure is not True:
             values.setdefault(AUTO_EXPOSURE, AUTO_EXPOSURE_MANUAL)
             values[EXPOSURE] = self.exposure
         return values
@@ -164,8 +165,13 @@ class V4l2Controls:
                 problems.append(f"{name} {value} is outside {info.minimum}..{info.maximum}")
         if problems:
             raise ToolError("; ".join(problems))
-        if values:
-            await self._run(SET_FLAG, ",".join(f"{name}={value}" for name, value in values.items()))
+        # The exposure mode goes first, in its own call: in one call with the mode change, a UVC driver can refuse
+        # the exposure time (the control is still inactive) and then sets nothing (B-F10 of QA round 4).
+        mode = {name: value for name, value in values.items() if name == AUTO_EXPOSURE}
+        others = {name: value for name, value in values.items() if name != AUTO_EXPOSURE}
+        for group in (mode, others):
+            if group:
+                await self._run(SET_FLAG, ",".join(f"{name}={value}" for name, value in group.items()))
 
     async def ensure_applied(self) -> None:
         """Send the saved values one time per process, before the first webcam use. A failure only logs."""

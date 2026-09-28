@@ -22,8 +22,10 @@ from debug_devices_mcp.overlay_layout import (
 )
 
 COLOUR_WIDTH = 3
-# The dark outline: 2 px wider on each side than the colour outline, black at 60% opacity.
-DARK_WIDTH = COLOUR_WIDTH + 4
+# The dark outline: 2 px wider on each side than the colour outline, black at 60% opacity. PIL draws an outline
+# inward from the rectangle, so the dark one goes on the rectangle grown by DARK_MARGIN (B-S3 of QA round 4).
+DARK_MARGIN = 2
+DARK_WIDTH = COLOUR_WIDTH + 2 * DARK_MARGIN
 DARK = (0, 0, 0, 153)
 LEGEND_FILL = (0, 0, 0, 217)
 BADGE_FILL = (0, 0, 0, 230)
@@ -44,8 +46,16 @@ def corners(rect: Rect) -> tuple[float, float, float, float]:
 
 
 def outline(draw: ImageDraw.ImageDraw, rect: Rect, colour: str) -> None:
-    draw.rectangle(corners(rect), outline=DARK, width=DARK_WIDTH)
+    draw.rectangle(corners(rect.grown(DARK_MARGIN)), outline=DARK, width=DARK_WIDTH)
     draw.rectangle(corners(rect), outline=colour, width=COLOUR_WIDTH)
+
+
+def tag_badge(draw: ImageDraw.ImageDraw, rect: Rect, tag: str, colour: str, font: ImageFont.ImageFont) -> None:
+    """A small tag badge on the top left corner of a box, inside the inset (rule 7: the same tags)."""
+    left, top, right, bottom = draw.textbbox((0, 0), tag, font=font)
+    badge = Rect(x=rect.x, y=rect.y, width=right - left + 2 * TEXT_PAD, height=bottom - top + 2 * TEXT_PAD)
+    draw.rectangle(corners(badge), fill=BADGE_FILL, outline=colour, width=1)
+    draw.text((badge.x + TEXT_PAD - left, badge.y + TEXT_PAD - top), tag, fill=colour, font=font)
 
 
 def paint(image: PilImage.Image, result: Layout) -> None:
@@ -75,28 +85,30 @@ def paint(image: PilImage.Image, result: Layout) -> None:
             draw.text(position, f"{row.tag}: {row.label}", fill=row.colour, font=legend_font)
 
 
-def paint_inset(image: PilImage.Image, source: PilImage.Image, result: Layout) -> None:
-    """The area around the small boxes, enlarged, with the same outlines (rule 7)."""
+def paint_inset(image: PilImage.Image, source: PilImage.Image, result: Layout, boxes: list[LayoutBox]) -> None:
+    """The area around the small boxes, enlarged, with the same outlines and tags (rule 7). The inset shows the real
+    box areas (`boxes`, the layout input), not the drawn rectangles of at least MIN_BOX_IMAGE: those are larger than
+    the inset (B-S4 of QA round 4). Anything outside the inset is cut."""
     inset = result.inset
     if inset is None:
         return
     crop = source.crop(
         (round(inset.source.x), round(inset.source.y), round(inset.source.right), round(inset.source.bottom))
     )
-    enlarged = crop.resize((round(inset.dest.width), round(inset.dest.height)))
-    image.paste(enlarged, (round(inset.dest.x), round(inset.dest.y)))
-    draw = ImageDraw.Draw(image, "RGBA")
-    draw.rectangle(corners(inset.dest), outline=INSET_BORDER, width=1)
-    for box in result.boxes:
+    enlarged = crop.resize((round(inset.dest.width), round(inset.dest.height))).convert("RGBA")
+    draw = ImageDraw.Draw(enlarged, "RGBA")
+    font = ImageFont.load_default(size=BADGE_FONT_SIZE)
+    for drawn, box in zip(result.boxes, boxes, strict=True):
         rect = Rect(
-            x=inset.dest.x + (box.rect.x - inset.source.x) * inset.scale,
-            y=inset.dest.y + (box.rect.y - inset.source.y) * inset.scale,
-            width=box.rect.width * inset.scale,
-            height=box.rect.height * inset.scale,
+            x=(box.x - inset.source.x) * inset.scale,
+            y=(box.y - inset.source.y) * inset.scale,
+            width=box.width * inset.scale,
+            height=box.height * inset.scale,
         )
-        inside = rect.x >= inset.dest.x and rect.y >= inset.dest.y
-        if inside and rect.right <= inset.dest.right and rect.bottom <= inset.dest.bottom:
-            outline(draw, rect, box.colour)
+        outline(draw, rect, drawn.colour)
+        tag_badge(draw, rect, drawn.tag, drawn.colour, font)
+    image.paste(enlarged, (round(inset.dest.x), round(inset.dest.y)))
+    ImageDraw.Draw(image, "RGBA").rectangle(corners(inset.dest), outline=INSET_BORDER, width=1)
 
 
 def draw_layout(jpeg: bytes, boxes: list[LayoutBox], arrows: list[LayoutArrow] | None = None) -> tuple[bytes, Layout]:
@@ -109,7 +121,7 @@ def draw_layout(jpeg: bytes, boxes: list[LayoutBox], arrows: list[LayoutArrow] |
     result = layout(data)
     image = PilImage.new("RGBA", (source.width, source.height + round(result.extra_height)), STRIP_FILL)
     image.paste(source, (0, 0))
-    paint_inset(image, source, result)
+    paint_inset(image, source, result, data.boxes)
     paint(image, result)
     output = io.BytesIO()
     image.convert(images.JPEG_MODE).save(output, format=images.PIL_JPEG_FORMAT, quality=ANNOTATED_QUALITY)

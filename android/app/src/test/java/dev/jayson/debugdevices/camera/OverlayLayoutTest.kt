@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -150,6 +151,86 @@ class OverlayLayoutTest {
         assertEquals(listOf("A", "B", "C"), OverlayLayout.tags(listOf(null, null, null)))
         assertEquals(listOf("U1", "B", "A", "C"), OverlayLayout.tags(listOf("U1", null, "A", null)))
         assertEquals(listOf("U73"), OverlayLayout.tags(listOf("U7301")))
+    }
+
+    @Test
+    fun `a hidden box keeps its tag, colour, and legend row (B-S2)`() {
+        // Two boxes, the first outside the phone view: the second stays "B" in cyan, like on the page.
+        val hidden = LayoutBoxInput(0f, 0f, 10f, 10f, null, "off screen", visible = false)
+        val shown = LayoutBoxInput(200f, 400f, 30f, 30f, null, "on screen")
+        val result = OverlayLayout.layout(
+            LayoutInput(411f, 914f, 24f, listOf(hidden, shown), emptyList(), inset = false)
+        )
+        assertEquals(listOf("B"), result.boxes.map { it.tag })
+        assertEquals(listOf("#00E5FF"), result.boxes.map { it.colour })
+        assertEquals(listOf("B"), result.badges.map { it.tag })
+        assertEquals(listOf("A" to "off screen", "B" to "on screen"), result.legend?.rows?.map { it.tag to it.label })
+        // The placement ignores the hidden box: the same as a layout of the visible box alone (apart from tag and rows).
+        val alone = OverlayLayout.layout(LayoutInput(411f, 914f, 24f, listOf(shown), emptyList(), inset = false))
+        assertEquals(alone.boxes.single().rect, result.boxes.single().rect)
+        assertEquals(alone.badges.single().rect.left, result.badges.single().rect.left)
+    }
+
+    @Test
+    fun `an outside legend knows the first corner of the sorted list (B-S1)`() {
+        val rows = listOf(LegendRow("A", "x", OverlayLayout.colour(0)))
+        // Legend 44 x 30. Boxes on three corners, and one 2 units from the bottom-right legend: it overlaps only when
+        // grown by 4, so every corner overlaps, and bottom-right has the largest distance.
+        val boxes = listOf(
+            PixelRect(10f, 10f, 20f, 20f),
+            PixelRect(350f, 10f, 360f, 20f),
+            PixelRect(10f, 370f, 20f, 380f),
+            PixelRect(394f, 370f, 399f, 380f)
+        )
+        val legend = OverlayLayout.placeLegend(400f, 400f, boxes, rows)
+        assertTrue(legend.outside)
+        assertEquals(PixelRect(348f, 362f, 392f, 392f), legend.firstCorner)
+        // Not outside: the first corner is the sorted first, the rect is the chosen free one.
+        val free = OverlayLayout.placeLegend(400f, 400f, listOf(PixelRect(10f, 10f, 20f, 20f)), rows)
+        assertEquals(free.rect, free.firstCorner)
+    }
+
+    @Test
+    fun `an arrow keeps its given tag, others get free letters (C3)`() {
+        val box = LayoutBoxInput(100f, 100f, 30f, 30f, null, "U1")
+        val arrows = listOf(LayoutArrowInput(0f, "J4", "connector"), LayoutArrowInput(90f, null, "fuse"))
+        val result = OverlayLayout.layout(LayoutInput(411f, 914f, 24f, listOf(box), arrows, inset = false))
+        assertEquals(listOf("J4", "B"), result.arrows.map { it.tag })
+        assertEquals(listOf("A", "J4", "B"), result.legend?.rows?.map { it.tag })
+    }
+
+    @Test
+    fun `the phone view is the safe area without the status label`() {
+        // Portrait 1080 x 2340: status bar 100, navigation bar 50, label band 60 (at the viewer's top).
+        val insets = PixelRect(0f, 100f, 0f, 50f)
+        assertEquals(PixelRect(0f, 160f, 1080f, 2290f), OverlayLayout.phoneFrame(1080f, 2340f, insets, 0, 60f))
+        // Viewer turned 90: the safe screen rect (0, 100)-(1080, 2290) becomes (100, 0)-(2290, 1080) for the viewer,
+        // and the label band is at the viewer's top.
+        assertEquals(PixelRect(100f, 60f, 2290f, 1080f), OverlayLayout.phoneFrame(1080f, 2340f, insets, 90, 60f))
+        assertEquals(PixelRect(0f, 110f, 1080f, 2240f), OverlayLayout.phoneFrame(1080f, 2340f, insets, 180, 60f))
+        assertEquals(PixelRect(50f, 60f, 2240f, 1080f), OverlayLayout.phoneFrame(1080f, 2340f, insets, 270, 60f))
+        // A band taller than the area leaves an empty frame, never an inverted one.
+        val tiny = OverlayLayout.phoneFrame(100f, 100f, PixelRect(0f, 0f, 0f, 0f), 0, 500f)
+        assertEquals(tiny.bottom, tiny.top)
+    }
+
+    @Test
+    fun `from viewer is the inverse of to viewer`() {
+        val r = PixelRect(100f, 200f, 150f, 260f)
+        for (degrees in listOf(0, 90, 180, 270)) {
+            val viewer = OverlayLayout.toViewer(r, degrees, 1080f, 2340f)
+            assertEquals("$degrees", r, OverlayLayout.fromViewer(viewer, degrees, 1080f, 2340f))
+        }
+    }
+
+    @Test
+    fun `a box under the status bar is outside the phone view`() {
+        val frame = PixelRect(0f, 160f, 1080f, 2290f)
+        assertFalse(OverlayLayout.inFrame(PixelRect(100f, 20f, 200f, 90f), frame))
+        assertFalse(OverlayLayout.inFrame(PixelRect(100f, 2295f, 200f, 2330f), frame))
+        assertTrue(OverlayLayout.inFrame(PixelRect(100f, 150f, 200f, 200f), frame))
+        // Touching the edge does not count.
+        assertFalse(OverlayLayout.inFrame(PixelRect(100f, 100f, 200f, 160f), frame))
     }
 
     @Test

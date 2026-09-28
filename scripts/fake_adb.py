@@ -10,6 +10,10 @@ several devices (USB and Wi-Fi serials, any state) and also `tcpip`, `connect`, 
      "pairing": {"192.0.2.23:37000": "123456"}, "wireless": {"192.0.2.23:41000": "R5CT1234567"}}
 
 `wireless` maps a "connect" address of wireless debugging to the device that it reaches (after `pair`).
+The file records the forwards (`forwards`: serial, local, remote). `forward --list` (no -s) prints them, and
+`forward --remove` of a local spec that is not there fails like the real adb ("listener ... not found"). Like the
+real adb, `forward --remove` removes the local spec whatever device it goes to. The single-device mode does not
+record forwards: its `forward --list` prints nothing.
 Start the fake phone on the local forward port of the MCP, then point the MCP at this file:
 
     python3 scripts/fake_phone.py --port 18765 &
@@ -58,6 +62,7 @@ class Command(StrEnum):
 
 STATE_DEVICE = "device"
 TCPIP_PORT_KEY = "tcpip"
+FORWARDS_KEY = "forwards"
 PM_PATH = ("pm", "path")
 IP_ADDR = ("ip", "-f", "inet", "addr", "show", "wlan0")
 APP_APK = "/data/app/~~fake==/dev.jayson.debugdevices.camera-1/base.apk"
@@ -68,7 +73,9 @@ LONG_FLAG = "-l"
 AM_START = ("am", "start")
 TCP_PREFIX = "tcp:"
 REMOVE_FLAG = "--remove"
+LIST_FLAG = "--list"
 FORWARD_SPEC_COUNT = 2  # tcp:<local> tcp:<remote>
+FORWARD_REMOVE_ARG_COUNT = 3  # forward --remove tcp:<local>
 
 # endregion: constants
 
@@ -174,10 +181,28 @@ def do_tcpip(path: Path, state: dict, device: dict | None, rest: list[str]) -> i
 
 
 def do_forward(path: Path, state: dict, device: dict | None, rest: list[str]) -> int:
+    assert device is not None
     specs = [spec for spec in rest if spec != REMOVE_FLAG]
     if not all(spec.startswith(TCP_PREFIX) for spec in specs):
         return fail(f"forward needs tcp: specs, got {specs}")
-    print(specs[0].removeprefix(TCP_PREFIX))
+    forwards = state.setdefault(FORWARDS_KEY, [])
+    local = specs[0]
+    kept = [item for item in forwards if item["local"] != local]
+    if REMOVE_FLAG in rest:
+        if len(kept) == len(forwards):
+            return fail(f"listener '{local}' not found")
+    else:
+        # A forward on a local spec that exists goes to the new device (the real adb rebinds it).
+        kept.append({"serial": device["serial"], "local": local, "remote": specs[1]})
+    state[FORWARDS_KEY] = kept
+    save_state(path, state)
+    print(local.removeprefix(TCP_PREFIX))
+    return EXIT_OK
+
+
+def do_forward_list(path: Path, state: dict, device: dict | None, rest: list[str]) -> int:
+    for item in state.get(FORWARDS_KEY, []):
+        print(f"{item['serial']} {item['local']} {item['remote']}")
     return EXIT_OK
 
 
@@ -220,8 +245,10 @@ def run_state(path: Path, args: list[str]) -> int:
     if not args:
         return fail("no command")
     command, rest = args[0], args[1:]
-    if command in HOST_COMMANDS:
-        return fail(f"{command} does not take -s") if serial else HOST_COMMANDS[command](path, state, None, rest)
+    # `forward --list` is a question to the adb server (no -s); the other forwards need a device.
+    host = do_forward_list if command == Command.FORWARD and rest == [LIST_FLAG] else HOST_COMMANDS.get(command)
+    if host is not None:
+        return fail(f"{command} does not take -s") if serial else host(path, state, None, rest)
     handler = DEVICE_COMMANDS.get(command)
     device = next((item for item in state["devices"] if item["serial"] == serial), None)
     if handler is None:
@@ -239,6 +266,22 @@ def run_state(path: Path, args: list[str]) -> int:
 def run(argv: list[str]) -> int:
     state_path = os.environ.get(Env.STATE)
     return run_state(Path(state_path), list(argv)) if state_path else run_one(argv)
+
+
+def forward_one(args: list[str]) -> int:
+    """`forward tcp:<local> tcp:<remote>`, `forward --remove tcp:<local>` (stop_phone), or `forward --list` (no
+    forwards are recorded in this mode)."""
+    if args[1:] == [LIST_FLAG]:
+        return EXIT_OK
+    if args[1:2] == [REMOVE_FLAG]:
+        if len(args) != FORWARD_REMOVE_ARG_COUNT or not args[2].startswith(TCP_PREFIX):
+            return fail(f"forward --remove needs tcp:<local>, got {args[1:]}")
+        return EXIT_OK
+    specs = args[1:]
+    if len(specs) != FORWARD_SPEC_COUNT or not all(spec.startswith(TCP_PREFIX) for spec in specs):
+        return fail(f"forward needs tcp:<local> tcp:<remote>, got {specs}")
+    print(specs[0].removeprefix(TCP_PREFIX))
+    return EXIT_OK
 
 
 def run_one(argv: list[str]) -> int:
@@ -262,10 +305,7 @@ def run_one(argv: list[str]) -> int:
             print(DEVICE_LINE.replace(FAKE_SERIAL, serial) if LONG_FLAG in args else f"{serial}\tdevice")
             print()
         case Command.FORWARD:
-            specs = args[1:]
-            if len(specs) != FORWARD_SPEC_COUNT or not all(spec.startswith(TCP_PREFIX) for spec in specs):
-                return fail(f"forward needs tcp:<local> tcp:<remote>, got {specs}")
-            print(specs[0].removeprefix(TCP_PREFIX))
+            return forward_one(args)
         case Command.SHELL if tuple(args[1:3]) == AM_START:
             component = args[-1]
             print(f"Starting: Intent {{ cmp={component} }}")

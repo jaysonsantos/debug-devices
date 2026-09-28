@@ -267,11 +267,11 @@ class PhoneScreen:
             self._cache.clear()
             await asyncio.sleep(self._options.restart_delay.total_seconds())
 
-    async def _adb(self, *args: str) -> str:
+    async def _adb(self, serial: str, *args: str) -> str:
+        """An adb command for `serial`: the session's own serial, also in its cleanup after a switch (not the new
+        phone's serial in `self._serial`)."""
         options = self._options
-        result = await self._runner.run(
-            [options.adb_path, adb.SERIAL_FLAG, self._serial or "", *args], options.adb_timeout
-        )
+        result = await self._runner.run([options.adb_path, adb.SERIAL_FLAG, serial, *args], options.adb_timeout)
         if not result.ok:
             stderr = result.stderr.decode(errors="replace").strip()
             raise ScreenError(f"adb {' '.join(args)} failed (exit {result.returncode}): {stderr}")
@@ -284,9 +284,11 @@ class PhoneScreen:
         version = options.version or await detect_version(self._runner, options.scrcpy_path, options.adb_timeout)
         if not version:
             raise ScreenError(f"cannot read the version of {options.scrcpy_path}; set --scrcpy-server-version")
-        await self._adb(ADB_PUSH, str(options.server_path), screen.DEVICE_PATH)
+        await self._adb(serial, ADB_PUSH, str(options.server_path), screen.DEVICE_PATH)
         scid = secrets.randbits(screen.SCID_BITS)
-        local = await self._adb(adb.FORWARD, screen.ANY_LOCAL_PORT, screen.LOCALABSTRACT_PREFIX + socket_name(scid))
+        local = await self._adb(
+            serial, adb.FORWARD, screen.ANY_LOCAL_PORT, screen.LOCALABSTRACT_PREFIX + socket_name(scid)
+        )
         if not local.isdigit():
             raise ScreenError(f"adb forward returned no port: {local!r}")
         port = int(local)
@@ -314,7 +316,7 @@ class PhoneScreen:
             if log is not None:
                 log.close()
             with contextlib.suppress(ScreenError, CommandError):
-                await self._adb(adb.FORWARD, ADB_REMOVE, f"{adb.TCP_PREFIX}{port}")
+                await self._adb(serial, adb.FORWARD, ADB_REMOVE, f"{adb.TCP_PREFIX}{port}")
 
     async def _connect(self, port: int, process: ChildProcess) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Connect to the ADB forward. Before the server listens, ADB accepts and closes at once: try again."""

@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     max_current: float = Field(
         default=defaults.MAX_CURRENT, gt=0, description="A meter value above this many amperes is disputed."
     )
+    max_diode_voltage: float = Field(
+        default=defaults.MAX_DIODE_VOLTAGE,
+        gt=0,
+        description="The diode test voltage of the meter: a diode-mode reading above it is uncertain (the dial is "
+        "probably on DC V).",
+    )
     meter_frame_interval: Seconds = Field(
         default=defaults.METER_FRAME_INTERVAL, description="Seconds between the frames of one multimeter_read."
     )
@@ -111,9 +117,16 @@ class Settings(BaseSettings):
         description="Crop x,y,w,h in pixels. Only this part of the webcam frame leaves the PC (tools and OpenRouter).",
     )
     webcam_warmup_frames: int = Field(default=defaults.WEBCAM_WARMUP_FRAMES, ge=0)
-    adb_serial: str = Field(default="", description="ADB serial of the phone. Empty means the only device.")
+    adb_serial: str = Field(
+        default="",
+        description="ADB serial of the phone. Empty: the user selects it in the monitor page (no automatic pick).",
+    )
     local_forward_port: int = Field(default=defaults.LOCAL_FORWARD_PORT, gt=0, le=defaults.MAX_PORT)
     adb_path: str = defaults.ADB
+    avahi_browse_path: str = Field(
+        default=defaults.AVAHI_BROWSE,
+        description="avahi-browse, the fallback that finds wireless-debugging phones on the network (Devices).",
+    )
     ffmpeg_path: str = defaults.FFMPEG
     v4l2_ctl_path: str = Field(
         default=DEFAULT_V4L2_CTL, description="v4l2-ctl, for the webcam image controls (webcam_controls)."

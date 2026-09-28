@@ -50,7 +50,7 @@ class OverlayLogicTest {
     @Test
     fun `a landscape snapshot on the portrait preview`() {
         // Phone sideways: the snapshot is the surface turned 0, the preview the surface turned 90.
-        val sideways = portrait.copy(snapshotRotation = 0)
+        val sideways = portrait.copy(snapshotRotation = 0, snapshotWidth = 4080f, snapshotHeight = 3060f)
         // Snapshot top-left corner = surface top-left = preview top-right.
         val corner = OverlayLogic.snapshotToView(0f, 0f, sideways)
         assertEquals(300f, corner.first, delta)
@@ -186,7 +186,13 @@ class OverlayLogicTest {
     @Test
     fun `preview region of a landscape snapshot`() {
         // Phone sideways: the snapshot is the surface (landscape), the preview the surface turned 90.
-        val sideways = portrait.copy(viewWidth = 900f, viewHeight = 2000f, snapshotRotation = 0)
+        val sideways = portrait.copy(
+            viewWidth = 900f,
+            viewHeight = 2000f,
+            snapshotRotation = 0,
+            snapshotWidth = 4080f,
+            snapshotHeight = 3060f
+        )
         val region = OverlayLogic.previewRegion(sideways)
         assertEquals(0f, region.snapshotX, delta)
         assertEquals(1f, region.width, delta)
@@ -207,6 +213,92 @@ class OverlayLogicTest {
         assertEquals(PreviewRegion(0f, 0f, 1f, 1f), OverlayLogic.previewRegion(tall.copy(fill = false)))
         // A view with the image's own aspect shows everything.
         assertEquals(PreviewRegion(0f, 0f, 1f, 1f), OverlayLogic.previewRegion(portrait))
+    }
+
+    /** B-F11: a 16:9 preview stream on a 4:3 still (portrait: the stream is 9 x 16 upright). */
+    private val widePreview = portrait.copy(imageWidth = 9f, imageHeight = 16f, viewWidth = 900f, viewHeight = 1600f)
+
+    @Test
+    fun `preview region uses the preview aspect, a centred crop of the still`() {
+        // The stream covers the full surface width and 75% of its height; in portrait that is 75% of the snapshot width.
+        val fit = OverlayLogic.previewRegion(widePreview.copy(fill = false))
+        assertEquals(0.125f, fit.snapshotX, delta)
+        assertEquals(0.75f, fit.width, delta)
+        assertEquals(0f, fit.snapshotY, delta)
+        assertEquals(1f, fit.height, delta)
+        // A taller view (FILL) cuts the sides of the stream too.
+        val fill = OverlayLogic.previewRegion(widePreview.copy(viewWidth = 900f, viewHeight = 2000f))
+        val streamShown = 900f / (2000f * 9f / 16f)
+        assertEquals(0.75f * streamShown, fill.width, delta)
+        assertEquals(0.5f - 0.75f * streamShown / 2f, fill.snapshotX, delta)
+    }
+
+    @Test
+    fun `snapshot points map through the preview crop and back`() {
+        // The edge of the stream (snapshot x 0.125) is the left edge of the view; the centre stays the centre.
+        val left = OverlayLogic.snapshotToView(0.125f, 0.5f, widePreview)
+        assertEquals(0f, left.first, 0.01f)
+        assertEquals(800f, left.second, 0.01f)
+        val centre = OverlayLogic.snapshotToView(0.5f, 0.5f, widePreview)
+        assertEquals(450f, centre.first, 0.01f)
+        for ((x, y) in listOf(0.2f to 0.3f, 0.7f to 0.9f)) {
+            val (cx, cy) = FocusTapLogic.snapshotToSurface(x, y, 90)
+            val (px, py) = OverlayLogic.captureToPreview(cx, cy, widePreview)
+            val (bx, by) = OverlayLogic.previewToCapture(px, py, widePreview)
+            assertEquals(cx, bx, delta)
+            assertEquals(cy, by, delta)
+        }
+    }
+
+    @Test
+    fun `same aspect means no crop`() {
+        assertEquals(0.3f to 0.6f, OverlayLogic.captureToPreview(0.3f, 0.6f, portrait))
+    }
+
+    /** A 900 x 2000 portrait view; FILL shows x 0.2-0.8 of the snapshot (see the preview region tests). */
+    private val tall = portrait.copy(viewWidth = 900f, viewHeight = 2000f)
+
+    @Test
+    fun `view to snapshot is the inverse of snapshot to view`() {
+        for (g in listOf(tall, tall.copy(mirroredX = true, mirroredY = true), widePreview, tall.copy(fill = false))) {
+            for ((x, y) in listOf(0.3f to 0.4f, 0.5f to 0.5f, 0.75f to 0.1f)) {
+                val (vx, vy) = OverlayLogic.snapshotToView(x, y, g)
+                val (bx, by) = OverlayLogic.viewToSnapshot(vx, vy, g)
+                assertEquals("$g", x, bx, delta)
+                assertEquals("$g", y, by, delta)
+            }
+        }
+    }
+
+    @Test
+    fun `overlay region is the preview region without the bars and the label`() {
+        // Status bar and label band: 200 px at the top; navigation bar: 100 px at the bottom (2000 px high view).
+        val safe = PixelRect(0f, 200f, 900f, 1900f)
+        val region = requireNotNull(OverlayLogic.overlayRegion(safe, tall))
+        assertEquals(0.2f, region.snapshotX, delta)
+        assertEquals(0.6f, region.width, delta)
+        assertEquals(0.1f, region.snapshotY, delta)
+        assertEquals(0.85f, region.height, delta)
+        // Flipped upside down, the snapshot top is at the screen bottom: the band moves.
+        val flipped = requireNotNull(OverlayLogic.overlayRegion(safe, tall.copy(mirroredY = true)))
+        assertEquals(0.05f, flipped.snapshotY, delta)
+        assertEquals(0.85f, flipped.height, delta)
+        // The whole view is the preview region.
+        assertEquals(OverlayLogic.previewRegion(tall), OverlayLogic.overlayRegion(PixelRect(0f, 0f, 900f, 2000f), tall))
+        // Nothing left: null.
+        assertEquals(null, OverlayLogic.overlayRegion(PixelRect(0f, 500f, 900f, 500f), tall))
+    }
+
+    @Test
+    fun `overlay region with a landscape still`() {
+        // Phone sideways: the still is the surface (landscape); the preview is the surface turned 90.
+        val sideways = tall.copy(snapshotRotation = 0, snapshotWidth = 4080f, snapshotHeight = 3060f)
+        val region = requireNotNull(OverlayLogic.overlayRegion(PixelRect(0f, 200f, 900f, 1900f), sideways))
+        // The view's vertical axis is the still's horizontal axis: x 0.1-0.95, y the preview band 0.2-0.8.
+        assertEquals(0.1f, region.snapshotX, delta)
+        assertEquals(0.85f, region.width, delta)
+        assertEquals(0.2f, region.snapshotY, delta)
+        assertEquals(0.6f, region.height, delta)
     }
 
     private fun assertPoint(expected: PixelPoint, actual: PixelPoint) {

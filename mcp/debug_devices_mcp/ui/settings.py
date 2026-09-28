@@ -1,8 +1,13 @@
 """Settings that the user changes in the monitor window. They persist in a JSON file in the XDG state directory."""
 
+import errno
+import fcntl
 import logging
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -16,6 +21,11 @@ from debug_devices_mcp.webcam import Crop
 logger = logging.getLogger(__name__)
 
 TEMP_SUFFIX = ".tmp"
+# The lock file next to the settings file: every read-change-save of any MCP server holds it (B-W9 of QA round 4).
+LOCK_SUFFIX = ".lock"
+# A writer holds the lock only for one read and one write. After this time, the save fails (an OSError).
+LOCK_TIMEOUT = timedelta(seconds=2)
+LOCK_RETRY = timedelta(milliseconds=10)
 
 
 class ScreenRotation(StrEnum):
@@ -112,8 +122,36 @@ class SettingsStore:
             logger.warning("ignoring the monitor settings in %s: %s", self.path, exc)
             return UiSettings()
 
+    def update(self, change: Callable[[UiSettings], UiSettings]) -> UiSettings:
+        """Read the file, change it, and save it under the lock file: two MCP servers (or a server and its page)
+        never lose each other's change. Raises OSError when the file cannot be locked or written."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._locked():
+            updated = change(self.load())
+            self.save(updated)
+        return updated
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        lock_path = self.path.with_name(f"{self.path.name}{LOCK_SUFFIX}")
+        with lock_path.open("a") as handle:
+            deadline = time.monotonic() + LOCK_TIMEOUT.total_seconds()
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise OSError(errno.EWOULDBLOCK, f"the settings file is locked: {lock_path}") from None
+                    time.sleep(LOCK_RETRY.total_seconds())
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     def save(self, settings: UiSettings) -> None:
-        """Write a temporary file, then rename it, so a crash never leaves half a file."""
+        """Write a temporary file, then rename it, so a crash never leaves half a file. A change of one value goes
+        through `update` (it holds the lock)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # One temporary name per process: two MCP servers can save at the same time.
         temp = self.path.with_name(f"{self.path.name}.{os.getpid()}{TEMP_SUFFIX}")

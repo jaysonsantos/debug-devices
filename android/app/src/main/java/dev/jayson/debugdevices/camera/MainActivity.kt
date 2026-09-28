@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.OrientationEventListener
 import android.view.View
@@ -76,7 +77,10 @@ class MainActivity : ComponentActivity() {
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
-        safeArea.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> layoutOverlay() }
+        safeArea.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            layoutOverlay()
+            overlayView.invalidate()
+        }
         renderStatus()
 
         camera = CameraController(
@@ -91,6 +95,28 @@ class MainActivity : ComponentActivity() {
             }
         )
         overlayView.scene = { width, height, inset, length -> camera.overlayScene(width, height, inset, length) }
+        // The phone view of the overlay layout: the safe-area padding (system bars and cutouts) and the status label.
+        val safeInsets = {
+            PixelRect(
+                safeArea.paddingLeft.toFloat(),
+                safeArea.paddingTop.toFloat(),
+                safeArea.paddingRight.toFloat(),
+                safeArea.paddingBottom.toFloat()
+            )
+        }
+        val labelBand = {
+            statusView.bottom + TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP,
+                Constants.Overlay.LABEL_GAP_DP,
+                resources.displayMetrics
+            )
+        }
+        overlayView.insets = safeInsets
+        overlayView.labelBand = labelBand
+        // The same safe area gives CameraStatus.overlay_region.
+        camera.safeInsets = safeInsets
+        camera.labelBand = labelBand
+        statusView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> overlayView.invalidate() }
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.
         orientationListener = object : OrientationEventListener(this) {

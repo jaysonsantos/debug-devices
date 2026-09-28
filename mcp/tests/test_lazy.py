@@ -81,8 +81,11 @@ def make_bench(settings: Settings, tmp_path: Path, start: UiStart, open_browser:
         bench.feeders.append(asyncio.create_task(feed(process)))
         return process
 
-    async def remove_forward(serial: str) -> None:
-        bench.removed.append(serial)
+    async def remove_forward() -> str:
+        # The monitor releases the forward that this server made (like Services.release_forward).
+        bench.removed.append(services.forwarded_serial or "")
+        services.forwarded_serial = None
+        return "stopped"
 
     stream = WebcamStream(
         StreamOptions(ffmpeg_path="ffmpeg", device=Path("/dev/video0"), warmup_frames=0, timeout=timedelta(seconds=2)),

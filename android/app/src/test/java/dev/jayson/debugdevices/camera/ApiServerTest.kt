@@ -105,10 +105,10 @@ class ApiServerTest {
                 .also { status = it }
         }
 
-        override suspend fun capture(): ByteArray {
+        override suspend fun capture(): Snapshot {
             captureError?.let { throw it }
-            status()
-            return jpeg
+            val current = status()
+            return Snapshot(jpeg, current.rotationDegrees, current.appStartId)
         }
     }
 
@@ -135,6 +135,7 @@ class ApiServerTest {
         afMode = AfMode.CONTINUOUS,
         appStartId = "0192f3a4-5b6c-7d8e-9f00-112233445566",
         previewRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0f, width = 0.6f, height = 1f),
+        overlayRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0.04f, width = 0.6f, height = 0.9f),
         overlayVisible = true
     )
 
@@ -167,7 +168,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0,"overlay_arrows":0,"af_mode":"continuous","app_start_id":"0192f3a4-5b6c-7d8e-9f00-112233445566","preview_region":{"snapshot_x":0.2,"snapshot_y":0.0,"width":0.6,"height":1.0},"overlay_visible":true}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0,"overlay_arrows":0,"af_mode":"continuous","app_start_id":"0192f3a4-5b6c-7d8e-9f00-112233445566","preview_region":{"snapshot_x":0.2,"snapshot_y":0.0,"width":0.6,"height":1.0},"overlay_region":{"snapshot_x":0.2,"snapshot_y":0.04,"width":0.6,"height":0.9},"overlay_visible":true}""",
             body
         )
     }
@@ -401,8 +402,9 @@ class ApiServerTest {
     }
 
     @Test
-    fun `preview region can be null`() = api(ready(ready.copy(previewRegion = null))) {
+    fun `preview region can be null`() = api(ready(ready.copy(previewRegion = null, overlayRegion = null))) {
         assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""preview_region":null"""))
+        assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""overlay_region":null"""))
     }
 
     @Test
@@ -590,6 +592,84 @@ class ApiServerTest {
             val response = postJson(Constants.Paths.OVERLAY, body)
             assertEquals(body, HttpStatusCode.BadRequest, response.status)
             assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+    }
+
+    @Test
+    fun `snapshot has the rotation and app start id headers (C12)`() = api(ready(ready.copy(rotationDegrees = 90))) {
+        val response = client.get(Constants.Paths.SNAPSHOT)
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("90", response.headers[Constants.Snapshot.HEADER_ROTATION_DEGREES])
+        assertEquals("0192f3a4-5b6c-7d8e-9f00-112233445566", response.headers[Constants.Snapshot.HEADER_APP_START_ID])
+    }
+
+    @Test
+    fun `tags match the contract pattern, for boxes and arrows (C3, C7)`() {
+        val camera = ready(ready)
+        api(camera) {
+            fun box(tag: String) =
+                """{"boxes":[{"snapshot_x":0.1,"snapshot_y":0.1,"width":0.2,"height":0.2,"label":"R1","tag":$tag}]}"""
+            fun arrow(tag: String) = """{"boxes":[],"arrows":[{"angle_deg":0,"label":"J4","tag":$tag}]}"""
+            for (good in listOf("a", "U7", "R12", "9")) {
+                assertEquals(good, HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, box("\"$good\"")).status)
+                assertEquals(good, camera.overlay.single().tag)
+                assertEquals(good, HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, arrow("\"$good\"")).status)
+                assertEquals(good, camera.arrows.single().tag)
+            }
+            for (bad in listOf("\"\"", "\"ABCD\"", "\"Ü1\"", "\"A-1\"", "\"A \"", "7")) {
+                assertEquals(bad, HttpStatusCode.BadRequest, postJson(Constants.Paths.OVERLAY, box(bad)).status)
+                assertEquals(bad, HttpStatusCode.BadRequest, postJson(Constants.Paths.OVERLAY, arrow(bad)).status)
+            }
+        }
+    }
+
+    @Test
+    fun `inside the image is strict at the top left, with a small tolerance at the right and bottom (C10)`() =
+        api(ready(ready)) {
+            fun box(x: String, y: String, w: String, h: String) =
+                """{"boxes":[{"snapshot_x":$x,"snapshot_y":$y,"width":$w,"height":$h,"label":"R1"}]}"""
+            assertEquals(
+                HttpStatusCode.OK,
+                postJson(Constants.Paths.OVERLAY, box("0.5", "0.5", "0.50009", "0.50009")).status
+            )
+            assertEquals(HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, box("0", "0", "1", "1")).status)
+            assertEquals(
+                HttpStatusCode.BadRequest,
+                postJson(Constants.Paths.OVERLAY, box("0.5", "0.5", "0.5002", "0.1")).status
+            )
+            assertEquals(
+                HttpStatusCode.BadRequest,
+                postJson(Constants.Paths.OVERLAY, box("0.5", "0.5", "0.1", "0.5002")).status
+            )
+            assertEquals(
+                HttpStatusCode.BadRequest,
+                postJson(Constants.Paths.OVERLAY, box("-0.00001", "0.5", "0.1", "0.1")).status
+            )
+            assertEquals(
+                HttpStatusCode.BadRequest,
+                postJson(Constants.Paths.OVERLAY, box("0.5", "-0.00001", "0.1", "0.1")).status
+            )
+        }
+
+    @Test
+    fun `overlay body rules pinned by the contract (C1, C2, C4)`() {
+        val camera = ready(ready)
+        api(camera) {
+            // C1: visible together with shapes is 400. C2: shapes need boxes.
+            for (body in listOf(
+                """{"visible":false,"boxes":[]}""",
+                """{"visible":true,"arrows":[]}""",
+                """{"arrows":[]}"""
+            )) {
+                assertEquals(body, HttpStatusCode.BadRequest, postJson(Constants.Paths.OVERLAY, body).status)
+            }
+            // C4: the counts are the kept boxes and arrows, also while hidden.
+            val shapes = """{"boxes":[{"snapshot_x":0.1,"snapshot_y":0.1,"width":0.2,"height":0.2,"label":"R1"}],""" +
+                """"arrows":[{"angle_deg":90,"label":"J4"}]}"""
+            postJson(Constants.Paths.OVERLAY, shapes)
+            val hidden = postJson(Constants.Paths.OVERLAY, """{"visible":false}""").status()
+            assertEquals(1, hidden.overlayBoxes)
+            assertEquals(1, hidden.overlayArrows)
         }
     }
 

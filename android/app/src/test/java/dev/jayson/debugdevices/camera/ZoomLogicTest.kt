@@ -28,6 +28,7 @@ class ZoomLogicTest {
         afMode = AfMode.CONTINUOUS,
         appStartId = "0192f3a4-5b6c-7d8e-9f00-112233445566",
         previewRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0f, width = 0.6f, height = 1f),
+        overlayRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0.04f, width = 0.6f, height = 0.9f),
         overlayVisible = true
     )
 

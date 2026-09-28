@@ -26,6 +26,9 @@ META_CAPTURE_ID = "capture_id"
 META_CAPTURED_AT = "captured_at"
 # Zoom ratios equal to this many decimals are the same view.
 ZOOM_DECIMALS = 3
+# Two photo sizes have the same shape (one is the other scaled) when their width/height ratios differ at most this much.
+SAME_SHAPE_TOLERANCE = 0.02
+MOVED_REASON = "the board or the phone moved after this photo: take a fresh phone_snapshot"
 
 
 class CaptureKind(StrEnum):
@@ -46,9 +49,16 @@ class CameraView(BaseModel):
     turn_degrees: int
     flip_horizontal: bool
     flip_vertical: bool
+    # The size of the image that the agent got (after max_side). Not part of the view: another size of the same view
+    # is the same photo scaled, and the pixel tools scale the positions (photo_scale).
+    width_px: int | None = None
+    height_px: int | None = None
 
     def differences(self, other: CameraView) -> list[str]:
-        return [name for name in CameraView.model_fields if getattr(self, name) != getattr(other, name)]
+        return [name for name in GEOMETRY_FIELDS if getattr(self, name) != getattr(other, name)]
+
+    def with_size(self, width_px: int, height_px: int) -> CameraView:
+        return self.model_copy(update={"width_px": width_px, "height_px": height_px})
 
     @classmethod
     def of(cls, status: CameraStatus, transform: ImageTransform) -> CameraView:
@@ -60,6 +70,34 @@ class CameraView(BaseModel):
             flip_horizontal=transform.flip_horizontal,
             flip_vertical=transform.flip_vertical,
         )
+
+
+# The fields that decide the pixel geometry; the image size only scales it.
+GEOMETRY_FIELDS = (
+    "zoom_ratio",
+    "in_sensor_zoom",
+    "focal_length_mm",
+    "turn_degrees",
+    "flip_horizontal",
+    "flip_vertical",
+)
+
+
+class PhotoScaleError(ToolError):
+    """The pixels come from a photo with another shape than the registered photo: they cannot be scaled."""
+
+
+def photo_scale(photo_size: tuple[int, int] | None, registered_size: tuple[int, int]) -> tuple[float, float]:
+    """Factors from pixels of a photo of `photo_size` to pixels of the registered photo (1, 1 when unknown)."""
+    if photo_size is None:
+        return 1.0, 1.0
+    scale_x, scale_y = registered_size[0] / photo_size[0], registered_size[1] / photo_size[1]
+    if abs(scale_x - scale_y) > SAME_SHAPE_TOLERANCE * max(scale_x, scale_y):
+        raise PhotoScaleError(
+            f"the photo ({photo_size[0]}x{photo_size[1]} px) has another shape than the registered photo "
+            f"({registered_size[0]}x{registered_size[1]} px): register this photo"
+        )
+    return scale_x, scale_y
 
 
 class Capture(BaseModel):
@@ -90,6 +128,9 @@ class CaptureLog:
         self._scene = scene
         self._captures: OrderedDict[str, Capture] = OrderedDict()
         self.epoch = 0
+        # Why each epoch started (the scene change reason): a photo of an older epoch is stale for the reason of the
+        # first change after it.
+        self._epoch_reasons: dict[int, str] = {}
         # The checked result of each multimeter_read, by the capture id of its image (bench_state uses it).
         self.meter_results: dict[str, MeterResult] = {}
 
@@ -99,10 +140,19 @@ class CaptureLog:
         scene.add_listener(self._on_scene_change)
 
     async def _on_scene_change(self, _: datetime) -> None:
-        self.scene_changed()
+        self.scene_changed(self._scene.change_reason if self._scene is not None else None)
 
-    def scene_changed(self) -> None:
+    def scene_changed(self, reason: str | None = None) -> None:
+        """A new epoch. `reason`: why (for example no scene watcher and a zoom change); None: the board moved."""
         self.epoch += 1
+        self._epoch_reasons[self.epoch] = reason or MOVED_REASON
+
+    def stale_reason(self, capture: Capture) -> str:
+        if capture.scene_epoch != self.epoch:
+            return self._epoch_reasons.get(capture.scene_epoch + 1, MOVED_REASON)
+        if self._scene is not None and self._scene.change_reason is not None:
+            return self._scene.change_reason
+        return MOVED_REASON
 
     def record(self, kind: CaptureKind, source: str, view: CameraView | None = None) -> Capture:
         capture = Capture(
@@ -122,6 +172,14 @@ class CaptureLog:
     def get(self, capture_id: str) -> Capture | None:
         return self._captures.get(capture_id)
 
+    def photo_size(self, capture_id: str | None) -> tuple[int, int] | None:
+        """The size of the image that the agent got for this phone_snapshot (None: the latest), when known."""
+        capture = self._captures.get(capture_id) if capture_id is not None else self.latest_photo
+        view = capture.view if capture is not None else None
+        if view is None or view.width_px is None or view.height_px is None:
+            return None
+        return view.width_px, view.height_px
+
     @property
     def latest_photo(self) -> Capture | None:
         photos = [item for item in self._captures.values() if item.kind is CaptureKind.PHONE_SNAPSHOT]
@@ -135,7 +193,7 @@ class CaptureLog:
         if capture.kind is not CaptureKind.PHONE_SNAPSHOT:
             reason = f"a {capture.kind} is not a phone_snapshot: it cannot support a position claim"
         elif capture.scene_epoch != self.epoch or (self._scene is not None and self._scene.changed):
-            reason = "the board or the phone moved after this photo: take a fresh phone_snapshot"
+            reason = self.stale_reason(capture)
         else:
             latest = self.latest_photo
             newer = latest is not None and latest.capture_id != capture.capture_id
@@ -143,25 +201,27 @@ class CaptureLog:
             return CaptureStatus(capture_id=capture_id, capture=capture, valid_for_position_claims=True, reason=reason)
         return CaptureStatus(capture_id=capture_id, capture=capture, valid_for_position_claims=False, reason=reason)
 
-    def reuse_problem(self, registered_photo_id: str | None) -> str | None:
-        """Can pixel positions of the latest phone_snapshot use a registration of an older photo?
+    def reuse_problem(self, registered_photo_id: str | None, photo_id: str | None = None) -> str | None:
+        """Can pixel positions of a phone_snapshot (`photo_id`; None: the latest) use a registration of another photo?
 
         Yes (None) when it is the same photo, or when both are phone snapshots of the current scene with the same
-        camera view. Otherwise the reason.
+        camera view (another image size is fine: the tools scale the pixels). Otherwise the reason.
         """
-        latest = self.latest_photo
+        photo = self._captures.get(photo_id) if photo_id is not None else self.latest_photo
+        if photo_id is not None and photo is None:
+            return "the photo is not known (not from this server session, or too old): take a fresh phone_snapshot"
         # A registration of a photo that is not a phone_snapshot of this session cannot be checked here.
-        if registered_photo_id is None or latest is None or registered_photo_id == latest.capture_id:
+        if registered_photo_id is None or photo is None or registered_photo_id == photo.capture_id:
             return None
         registered = self._captures.get(registered_photo_id)
         problem = None
         if registered is None:
             problem = "the registered photo is not known any more: register your last phone_snapshot"
-        elif registered.scene_epoch != self.epoch or latest.scene_epoch != self.epoch:
+        elif registered.scene_epoch != self.epoch or photo.scene_epoch != self.epoch:
             problem = "the board or the phone moved after the registered photo: register your last phone_snapshot"
-        elif registered.view is None or latest.view is None:
+        elif registered.view is None or photo.view is None:
             problem = "the camera view of a photo is not known: register your last phone_snapshot"
-        elif changed := registered.view.differences(latest.view):
+        elif changed := registered.view.differences(photo.view):
             problem = (
                 f"the camera view changed after the registered photo ({', '.join(changed)}): register your last "
                 "phone_snapshot again"

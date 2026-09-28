@@ -32,6 +32,7 @@ from typing import Any
 # region: constants
 
 ZOOM_STEP_FACTOR = 1.5
+MAIN_CAMERA_ZOOM = 1.0
 ZOOM_TOLERANCE = 1e-3
 MAX_STEPS_TO_REACH_MAX_ZOOM = 64
 START_TIMEOUT_SECONDS = 30.0
@@ -117,10 +118,22 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
 }
 PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
 # Objects in CameraStatus, checked by expect_focus and expect_optics.
-CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom", "af_mode", "app_start_id", "preview_region")
+CAMERA_STATUS_OBJECTS = (
+    "focus",
+    "optics",
+    "in_sensor_zoom",
+    "af_mode",
+    "app_start_id",
+    "preview_region",
+    "overlay_region",
+)
 REGION_FIELDS = ("snapshot_x", "snapshot_y", "width", "height")
 # Float rounding of a region that ends on the image edge.
 REGION_TOLERANCE = 1e-6
+# A real phone computes the preview region from pixel sizes: allow 2 % when two regions are compared.
+REGION_COMPARE_TOLERANCE = 0.02
+# A vertical flip must move overlay_region by more than rounding (the bars differ by a few % of the screen).
+REGION_MOVE_MIN = 1e-3
 APP_START_ID_VERSION = 7
 AF_MODES = ("continuous", "macro")
 IN_SENSOR_ZOOM_STATES = ("off", "on", "unsupported", "fallback")
@@ -167,6 +180,7 @@ class Response:
     status: int
     content_type: str
     body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -209,7 +223,8 @@ class Client:
         req = urllib.request.Request(self.base_url + path, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                return Response(resp.status, resp.headers.get("Content-Type", ""), resp.read())
+                headers = {name.lower(): value for name, value in resp.headers.items()}
+                return Response(resp.status, resp.headers.get("Content-Type", ""), resp.read(), headers)
         except urllib.error.HTTPError as err:
             return Response(err.code, err.headers.get("Content-Type", ""), err.read())
 
@@ -286,6 +301,11 @@ def expect_status(resp: Response) -> CameraStatus:
     expect(data["af_mode"] in AF_MODES, f"af_mode {data['af_mode']!r} is not in {AF_MODES}")
     expect_app_start_id(data["app_start_id"])
     expect_preview_region(data["preview_region"])
+    expect_preview_region(data["overlay_region"])
+    expect(
+        (data["overlay_region"] is None) == (data["preview_region"] is None),
+        f"overlay_region {data['overlay_region']!r}, preview_region {data['preview_region']!r}: other null rule",
+    )
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -334,6 +354,13 @@ def jpeg_size(data: bytes) -> tuple[int, int]:
     raise ContractError("JPEG has no SOF segment")
 
 
+class SnapshotHeader(StrEnum):
+    ROTATION_DEGREES = "X-Rotation-Degrees"
+    APP_START_ID = "X-App-Start-Id"
+
+
+# The app turns the pixels: EXIF Orientation 1 (normal) or no tag.
+EXIF_NO_TURN = frozenset({None, 1})
 # EXIF orientation values that turn the image by a quarter turn (width and height swap).
 EXIF_QUARTER_TURN_ORIENTATIONS = frozenset({5, 6, 7, 8})
 EXIF_ORIENTATION_TO_DEGREES = {1: 0, 3: 180, 6: 90, 8: 270}
@@ -548,14 +575,44 @@ def check_torch_bad_request(ctx: Context) -> None:
             raise ContractError(f"torch {name}: {err}") from err
 
 
+def snapshot_headers(resp: Response) -> tuple[int, str]:
+    """The rotation and the app start id of the still, from the response headers (docs/phone-api.md)."""
+    rotation = resp.headers.get(SnapshotHeader.ROTATION_DEGREES.lower())
+    start_id = resp.headers.get(SnapshotHeader.APP_START_ID.lower())
+    expect(rotation is not None, f"no {SnapshotHeader.ROTATION_DEGREES} header")
+    expect(start_id is not None, f"no {SnapshotHeader.APP_START_ID} header")
+    assert rotation is not None
+    assert start_id is not None
+    expect(rotation.isdigit() and int(rotation) in ROTATIONS, f"{SnapshotHeader.ROTATION_DEGREES} is {rotation!r}")
+    return int(rotation), start_id
+
+
+def expect_no_exif_turn(data: bytes, what: str) -> None:
+    """The app turns the pixels: the EXIF Orientation is 1 or absent."""
+    orientation = jpeg_exif_orientation(data)
+    expect(orientation in EXIF_NO_TURN, f"{what}: EXIF Orientation is {orientation}, expected 1 or absent")
+
+
 def check_snapshot(ctx: Context) -> None:
+    before = expect_json(ctx.client.get(Route.STATUS))
     resp = ctx.client.get(Route.SNAPSHOT, timeout=ctx.snapshot_timeout)
     expect(resp.status == HTTP_OK, f"HTTP {resp.status}: {resp.body[:200]!r}")
     expect(resp.content_type.startswith(ContentType.JPEG), f"content type is {resp.content_type!r}")
     expect(resp.body.startswith(JPEG_SOI), "body does not start with the JPEG SOI marker")
     expect(resp.body.rstrip(b"\x00").endswith(JPEG_EOI), "body does not end with the JPEG EOI marker")
+    expect_no_exif_turn(resp.body, "snapshot")
+    rotation, start_id = snapshot_headers(resp)
+    expect(
+        start_id == before["app_start_id"],
+        f"{SnapshotHeader.APP_START_ID} {start_id} != status {before['app_start_id']}",
+    )
+    after = expect_json(ctx.client.get(Route.STATUS))
+    if before["rotation_degrees"] == after["rotation_degrees"]:
+        expect(
+            rotation == after["rotation_degrees"], f"header rotation {rotation} != status {after['rotation_degrees']}"
+        )
     width, height = jpeg_size(resp.body)
-    ctx.notes.append(f"snapshot {width}x{height} {len(resp.body)} bytes")
+    ctx.notes.append(f"snapshot {width}x{height} {len(resp.body)} bytes, rotation header {rotation}")
 
 
 def check_snapshot_keeps_torch(ctx: Context) -> None:
@@ -599,9 +656,15 @@ def check_method_not_allowed(ctx: Context) -> None:
             raise ContractError(f"{method} {route}: {err}") from err
 
 
+def start_zoom(status: CameraStatus) -> float:
+    """The contract start zoom: 1.0 (the main camera) when it is inside [min, max], else min."""
+    inside = status.min_zoom_ratio <= MAIN_CAMERA_ZOOM <= status.max_zoom_ratio
+    return MAIN_CAMERA_ZOOM if inside else status.min_zoom_ratio
+
+
 def expect_start_state(status: CameraStatus, what: str) -> None:
     expect(status.torch_enabled is False, f"{what}: torch is on")
-    expect_zoom(status.zoom_ratio, status.min_zoom_ratio, what)
+    expect_zoom(status.zoom_ratio, start_zoom(status), what)
     expect(status.rotation_locked is False, f"{what}: rotation is locked, expected auto")
     expect(not status.preview_flip_horizontal and not status.preview_flip_vertical, f"{what}: the preview is flipped")
 
@@ -739,12 +802,19 @@ def check_snapshot_rotation(ctx: Context) -> None:
     """A locked rotation turns the next snapshot. 90 and 270 swap width and height compared with 0 and 180."""
     sizes: dict[int, tuple[int, int]] = {}
     orientations: dict[int, int | None] = {}
-    for degrees in ROTATIONS:
-        expect_status(ctx.client.post_json(Route.ROTATION, {"degrees": degrees}))
-        data = snapshot_bytes(ctx)
-        sizes[degrees] = displayed_size(data)
-        orientations[degrees] = jpeg_exif_orientation(data)
-    expect_status(ctx.client.post_json(Route.ROTATION, {"auto": True}))
+    try:
+        for degrees in ROTATIONS:
+            expect_status(ctx.client.post_json(Route.ROTATION, {"degrees": degrees}))
+            resp = ctx.client.get(Route.SNAPSHOT, timeout=ctx.snapshot_timeout)
+            expect(resp.status == HTTP_OK, f"snapshot at {degrees}: HTTP {resp.status}")
+            # Clients do not read EXIF: the pixel size must follow the rotation.
+            sizes[degrees] = jpeg_size(resp.body)
+            orientations[degrees] = jpeg_exif_orientation(resp.body)
+            expect_no_exif_turn(resp.body, f"rotation {degrees}")
+            header, _ = snapshot_headers(resp)
+            expect(header == degrees, f"lock {degrees}: {SnapshotHeader.ROTATION_DEGREES} is {header}")
+    finally:
+        ctx.client.post_json(Route.ROTATION, {"auto": True})
     upright, turned = sizes[0], sizes[QUARTER_TURN]
     expect(turned == (upright[1], upright[0]), f"rotation 90 shows {turned}, rotation 0 shows {upright}: not swapped")
     expect(sizes[HALF_TURN] == upright, f"rotation 180 shows {sizes[HALF_TURN]}, rotation 0 shows {upright}")
@@ -790,6 +860,10 @@ def check_post_needs_json_content_type(ctx: Context) -> None:
         (Route.ZOOM, b'{"step": "in"}'),
         (Route.TORCH, b'{"enabled": false}'),
         (Route.ROTATION, b'{"degrees": 90}'),
+        (Route.PREVIEW, b'{"flip_horizontal": true, "flip_vertical": false}'),
+        (Route.CAMERA, b'{"af_mode": "macro"}'),
+        (Route.FOCUS, b'{"snapshot_x": 0.5, "snapshot_y": 0.5}'),
+        (Route.OVERLAY, b'{"boxes": [], "arrows": []}'),
     ]
     for route, body in cases:
         for content_type in (None, ContentType.TEXT):
@@ -891,16 +965,31 @@ def check_not_found(ctx: Context) -> None:
     expect_error(ctx.client.post_json(Route.UNKNOWN, {}), ErrorCode.NOT_FOUND)
 
 
+# Valid bodies for the newer camera endpoints. A camera that is not ready returns 503 for each of them.
+NOT_READY_BODIES: list[tuple[Route, dict[str, Any]]] = [
+    (Route.PREVIEW, {"flip_horizontal": False, "flip_vertical": False}),
+    (Route.CAMERA, {"af_mode": "continuous"}),
+    (Route.FOCUS, {"snapshot_x": 0.5, "snapshot_y": 0.5}),
+    (Route.OVERLAY, {"boxes": []}),
+]
+
+
 def check_not_ready(ctx: Context) -> None:
     check_health(ctx)
     expect_error(ctx.client.get(Route.STATUS), ErrorCode.CAMERA_NOT_READY)
     expect_error(ctx.client.post_json(Route.ZOOM, {"step": "in"}), ErrorCode.CAMERA_NOT_READY)
     expect_error(ctx.client.post_json(Route.TORCH, {"enabled": False}), ErrorCode.CAMERA_NOT_READY)
     expect_error(ctx.client.post_json(Route.ROTATION, {"auto": True}), ErrorCode.CAMERA_NOT_READY)
+    for route, body in NOT_READY_BODIES:
+        try:
+            expect_error(ctx.client.post_json(route, body), ErrorCode.CAMERA_NOT_READY)
+        except ContractError as err:
+            raise ContractError(f"{route}: {err}") from err
     expect_error(ctx.client.get(Route.SNAPSHOT, timeout=ctx.snapshot_timeout), ErrorCode.CAMERA_NOT_READY)
 
 
-FOCUS_STATES = frozenset({"scanning", "focused", "unfocused"})
+# After POST /v1/focus the autofocus runs: scanning, then focused or unfocused. (FOCUS_STATES also has "unknown".)
+FOCUS_STATES_AFTER_FOCUS = frozenset({"scanning", "focused", "unfocused"})
 OUTSIDE_PREVIEW = "outside the preview"
 # The screen edges: usually the status bar and the controls, not the preview. A full-screen preview can cover them.
 SCREEN_EDGES: list[dict[str, float]] = [{"screen_x": 0.5, "screen_y": 0.0}, {"screen_x": 0.5, "screen_y": 1.0}]
@@ -922,7 +1011,7 @@ def expect_focus_state(raw: Response, what: str) -> None:
     expect_status(raw)
     focus = expect_json(raw).get("focus")
     expect(isinstance(focus, dict), f"{what}: no focus object")
-    expect(focus["state"] in FOCUS_STATES, f"{what}: focus.state {focus['state']!r}")
+    expect(focus["state"] in FOCUS_STATES_AFTER_FOCUS, f"{what}: focus.state {focus['state']!r}")
 
 
 def check_focus(ctx: Context) -> None:
@@ -952,6 +1041,12 @@ def check_focus(ctx: Context) -> None:
 OVERLAY_BOX = {"snapshot_x": 0.42, "snapshot_y": 0.31, "width": 0.05, "height": 0.04, "label": "U730"}
 EDGE_BOX = {"snapshot_x": 0.9, "snapshot_y": 0.8, "width": 0.1, "height": 0.2, "label": ""}
 LONGEST_LABEL = "L" * 32
+EMOJI_TAG = "\U0001f600\U0001f600"
+# "Inside the image": x >= 0 and y >= 0 (strict), x + width <= 1.0001 and y + height <= 1.0001. So 0.95 + 0.05005 =
+# 1.00005 is inside at the right and bottom edges, and a tiny negative x or y (inside 0.0001) is outside.
+EDGE_TOLERANCE_BOX = {"snapshot_x": 0.95, "snapshot_y": 0.5, "width": 0.05005, "height": 0.1, "label": "edge"}
+BOTTOM_TOLERANCE_BOX = {"snapshot_x": 0.5, "snapshot_y": 0.95, "width": 0.1, "height": 0.05005, "label": "bottom"}
+TINY_NEGATIVE = -0.00005
 OVERLAY_MAX_BOXES = 8
 BAD_OVERLAY_BODIES: list[tuple[str, bytes]] = [
     ("empty body", b"{}"),
@@ -965,6 +1060,15 @@ BAD_OVERLAY_BODIES: list[tuple[str, bytes]] = [
     ("a string coordinate", json.dumps({"boxes": [{**OVERLAY_BOX, "width": "0.1"}]}).encode()),
     ("tag of 4 characters", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": "ABCD"}]}).encode()),
     ("empty tag", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": ""}]}).encode()),
+    ("tag with a hyphen", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": "A-B"}]}).encode()),
+    ("tag with a space", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": "A B"}]}).encode()),
+    ("non-ASCII tag", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": "\u00c9"}]}).encode()),
+    ("emoji tag (2 code points, 4 UTF-16 units)", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": EMOJI_TAG}]}).encode()),
+    ("tag is a number", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": 12}]}).encode()),
+    ("far edge beyond the tolerance", json.dumps({"boxes": [{**EDGE_TOLERANCE_BOX, "width": 0.0502}]}).encode()),
+    ("bottom edge beyond the tolerance", json.dumps({"boxes": [{**BOTTOM_TOLERANCE_BOX, "height": 0.0502}]}).encode()),
+    ("x just below 0 (0 is strict)", json.dumps({"boxes": [{**OVERLAY_BOX, "snapshot_x": TINY_NEGATIVE}]}).encode()),
+    ("y just below 0 (0 is strict)", json.dumps({"boxes": [{**OVERLAY_BOX, "snapshot_y": TINY_NEGATIVE}]}).encode()),
 ]
 
 
@@ -976,6 +1080,9 @@ BAD_ARROW_BODIES: list[tuple[str, bytes]] = [
     ("a string angle", json.dumps({"boxes": [], "arrows": [{**ARROW, "angle_deg": "45"}]}).encode()),
     ("label of 33 characters", json.dumps({"boxes": [], "arrows": [{**ARROW, "label": "L" * 33}]}).encode()),
     ("an unknown arrow field", json.dumps({"boxes": [], "arrows": [{**ARROW, "color": "red"}]}).encode()),
+    ("arrows without boxes", json.dumps({"arrows": [ARROW]}).encode()),
+    ("arrow tag of 4 characters", json.dumps({"boxes": [], "arrows": [{**ARROW, "tag": "ABCD"}]}).encode()),
+    ("non-ASCII arrow tag", json.dumps({"boxes": [], "arrows": [{**ARROW, "tag": "\u00e9"}]}).encode()),
 ]
 
 
@@ -988,7 +1095,7 @@ def arrow_count(raw: Response, what: str) -> int:
 
 def check_overlay_arrows(ctx: Context) -> None:
     """Arrows appear in overlay_arrows, any angle is taken modulo 360, a body without arrows removes them."""
-    arrows = [ARROW, {"angle_deg": 450.0, "label": ""}, {"angle_deg": -90, "label": "U7 ~12 cm"}]
+    arrows = [ARROW, {"angle_deg": 450.0, "label": ""}, {"angle_deg": -90, "label": "U7 ~12 cm", "tag": "A1"}]
     shown = arrow_count(ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX], "arrows": arrows}), "3 arrows")
     expect(shown == len(arrows), f"3 arrows: overlay_arrows is {shown}")
     expect(arrow_count(ctx.client.get(Route.STATUS), "GET status") == len(arrows), "GET status: another overlay_arrows")
@@ -1007,15 +1114,20 @@ BAD_VISIBLE_BODIES: list[tuple[str, bytes]] = [
     ("visible is a string", b'{"visible": "no"}'),
     ("visible is a number", b'{"visible": 0}'),
     ("visible is null", b'{"visible": null}'),
+    ("visible with boxes", b'{"visible": false, "boxes": []}'),
+    ("visible with arrows", b'{"visible": true, "boxes": [], "arrows": []}'),
 ]
 
 
 def check_overlay_visible(ctx: Context) -> None:
     """Hide and show the overlay: the boxes stay, and a body with boxes does not change the visibility."""
-    ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX]})
+    ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX], "arrows": [ARROW]})
     hidden = expect_json(ctx.client.post_json(Route.OVERLAY, {"visible": False}))
     expect(hidden["overlay_visible"] is False, f"visible false: overlay_visible {hidden['overlay_visible']!r}")
     expect(hidden["overlay_boxes"] == 1, f"visible false removed the boxes: overlay_boxes {hidden['overlay_boxes']}")
+    expect(
+        hidden["overlay_arrows"] == 1, f"visible false removed the arrows: overlay_arrows {hidden['overlay_arrows']}"
+    )
     new_boxes = [OVERLAY_BOX, EDGE_BOX]
     replaced = expect_json(ctx.client.post_json(Route.OVERLAY, {"boxes": new_boxes}))
     expect(replaced["overlay_visible"] is False, "a body with boxes changed the visibility")
@@ -1040,9 +1152,15 @@ def overlay_count(raw: Response, what: str) -> int:
 
 def check_overlay(ctx: Context) -> None:
     """Boxes appear in overlay_boxes, the limits hold, and an empty list removes them."""
-    boxes = [OVERLAY_BOX, EDGE_BOX, {**OVERLAY_BOX, "label": LONGEST_LABEL, "tag": "U1"}]
-    shown = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": boxes}), "3 boxes")
-    expect(shown == len(boxes), f"3 boxes: overlay_boxes is {shown}")
+    boxes = [
+        OVERLAY_BOX,
+        EDGE_BOX,
+        {**OVERLAY_BOX, "label": LONGEST_LABEL, "tag": "U1"},
+        {**EDGE_TOLERANCE_BOX, "tag": "9Z9"},
+        BOTTOM_TOLERANCE_BOX,
+    ]
+    shown = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": boxes}), "5 boxes")
+    expect(shown == len(boxes), f"5 boxes (two at the edge tolerance): overlay_boxes is {shown}")
     expect(overlay_count(ctx.client.get(Route.STATUS), "GET status") == len(boxes), "GET status: another overlay_boxes")
     full = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX] * OVERLAY_MAX_BOXES}), "8 boxes")
     expect(full == OVERLAY_MAX_BOXES, f"8 boxes: overlay_boxes is {full}")
@@ -1056,6 +1174,102 @@ def check_overlay(ctx: Context) -> None:
     expect(kept == OVERLAY_MAX_BOXES, f"a refused body changed the boxes: overlay_boxes is {kept}")
     cleared = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": []}), "no boxes")
     expect(cleared == 0, f"no boxes: overlay_boxes is {cleared}")
+
+
+def check_preview_region_rotation(ctx: Context) -> None:
+    """--strict: the still turns with the rotation, so preview_region at 90 is the region at 0 turned (w and h swap)."""
+    if not ctx.strict:
+        return
+    regions: dict[int, dict[str, float]] = {}
+    for degrees in (0, QUARTER_TURN):
+        raw = ctx.client.post_json(Route.ROTATION, {"degrees": degrees})
+        expect_status(raw)
+        region = expect_json(raw)["preview_region"]
+        expect(region is not None, f"rotation {degrees}: preview_region is null while the camera runs")
+        regions[degrees] = region
+    expect_status(ctx.client.post_json(Route.ROTATION, {"auto": True}))
+    upright, turned = regions[0], regions[QUARTER_TURN]
+    swapped = math.isclose(turned["width"], upright["height"], abs_tol=REGION_COMPARE_TOLERANCE) and math.isclose(
+        turned["height"], upright["width"], abs_tol=REGION_COMPARE_TOLERANCE
+    )
+    expect(swapped, f"preview_region at 90 {turned} is not the region at 0 {upright} turned")
+    # Zoom and the preview flips do not change the region (zoom crops the still and the preview alike).
+    status = ctx.status()
+    changes = [
+        (Route.ZOOM, {"ratio": status.max_zoom_ratio}, "zoom at max"),
+        (Route.PREVIEW, {"flip_horizontal": True, "flip_vertical": True}, "both preview flips"),
+    ]
+    base = expect_json(ctx.client.get(Route.STATUS))["preview_region"]
+    try:
+        for route, body, what in changes:
+            region = expect_json(ctx.client.post_json(route, body))["preview_region"]
+            same = all(math.isclose(region[k], base[k], abs_tol=REGION_COMPARE_TOLERANCE) for k in REGION_FIELDS)
+            expect(same, f"{what} changed preview_region: {base} -> {region}")
+    finally:
+        ctx.client.post_json(Route.ZOOM, {"ratio": status.zoom_ratio})
+        ctx.client.post_json(Route.PREVIEW, {"flip_horizontal": False, "flip_vertical": False})
+    ctx.notes.append(f"0: {upright}, 90: {turned}; zoom and flips keep it")
+
+
+def expect_inside(inner: dict[str, float], outer: dict[str, float], what: str) -> None:
+    tol = REGION_COMPARE_TOLERANCE
+    inside = (
+        inner["snapshot_x"] >= outer["snapshot_x"] - tol
+        and inner["snapshot_y"] >= outer["snapshot_y"] - tol
+        and inner["snapshot_x"] + inner["width"] <= outer["snapshot_x"] + outer["width"] + tol
+        and inner["snapshot_y"] + inner["height"] <= outer["snapshot_y"] + outer["height"] + tol
+    )
+    expect(inside, f"{what}: overlay_region {inner} is not inside preview_region {outer}")
+
+
+def check_overlay_region(ctx: Context) -> None:
+    """--strict: overlay_region is inside preview_region, and a vertical preview flip moves it (bars not symmetric)."""
+    if not ctx.strict:
+        return
+    regions: dict[bool, dict[str, float]] = {}
+    try:
+        for flip_vertical in (False, True):
+            body = {"flip_horizontal": False, "flip_vertical": flip_vertical}
+            data = expect_json(ctx.client.post_json(Route.PREVIEW, body))
+            overlay, preview = data["overlay_region"], data["preview_region"]
+            expect(overlay is not None and preview is not None, f"flip_vertical {flip_vertical}: a region is null")
+            expect_inside(overlay, preview, f"flip_vertical {flip_vertical}")
+            regions[flip_vertical] = overlay
+    finally:
+        ctx.client.post_json(Route.PREVIEW, {"flip_horizontal": False, "flip_vertical": False})
+    moved = any(abs(regions[True][k] - regions[False][k]) > REGION_MOVE_MIN for k in REGION_FIELDS)
+    expect(moved, f"a vertical preview flip did not move overlay_region: {regions[False]}")
+    ctx.notes.append(f"no flip: {regions[False]}, vertical flip: {regions[True]}")
+
+
+def check_camera_both_fields(ctx: Context) -> None:
+    """--strict: one /v1/camera body can set in_sensor_zoom and af_mode together."""
+    if not ctx.strict:
+        return
+    raw = ctx.client.post_json(Route.CAMERA, {"in_sensor_zoom": True, "af_mode": "macro"})
+    expect_status(raw)
+    both = expect_json(raw)
+    expect(both["in_sensor_zoom"] in IN_SENSOR_ZOOM_AFTER_ON, f"in_sensor_zoom {both['in_sensor_zoom']!r}")
+    expect(both["af_mode"] in AF_MODES, f"af_mode {both['af_mode']!r}")
+    expect_status(ctx.client.post_json(Route.CAMERA, {"in_sensor_zoom": False, "af_mode": "continuous"}))
+    ctx.notes.append(f"gives in_sensor_zoom={both['in_sensor_zoom']!r} af_mode={both['af_mode']!r}")
+
+
+def check_preview_keeps_snapshot(ctx: Context) -> None:
+    """--strict: the preview flips mirror only the screen. The snapshot keeps its size and EXIF orientation."""
+    if not ctx.strict:
+        return
+    before = snapshot_bytes(ctx)
+    expect_status(ctx.client.post_json(Route.PREVIEW, {"flip_horizontal": True, "flip_vertical": True}))
+    try:
+        after = snapshot_bytes(ctx)
+    finally:
+        expect_status(ctx.client.post_json(Route.PREVIEW, {"flip_horizontal": False, "flip_vertical": False}))
+    expect(displayed_size(after) == displayed_size(before), f"flips changed the snapshot size {displayed_size(after)}")
+    expect(
+        jpeg_exif_orientation(after) == jpeg_exif_orientation(before),
+        f"flips changed the EXIF orientation: {jpeg_exif_orientation(before)} -> {jpeg_exif_orientation(after)}",
+    )
 
 
 def check_capture_failed(ctx: Context) -> None:
@@ -1088,6 +1302,10 @@ READY_CHECKS: list[Check] = [
     check_snapshot,
     check_snapshot_keeps_torch,
     check_snapshot_rotation,
+    check_preview_region_rotation,
+    check_overlay_region,
+    check_camera_both_fields,
+    check_preview_keeps_snapshot,
     check_method_not_allowed,
     check_not_found,
 ]

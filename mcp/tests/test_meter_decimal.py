@@ -342,3 +342,95 @@ async def test_12_3_mv_with_6000_counts_is_confirmed_through_the_tool(settings: 
 
 
 # endregion
+
+
+# region: the bench misreads (bench-feedback-2 and meter-decimal), through multimeter_read with recorded answers
+
+BENCH_51_0 = answer("51.0", 51.0, "510", 2)  # the LCD showed 5.10 V
+BENCH_93_2 = answer("93.2", 93.2, "932", 2)  # the same USB-C point (about 5.1 V)
+BENCH_443_VOLTS = answer("443.0", 443.0, "4430", 3)  # the dial was on resistance (about 443 kOhm)
+BENCH_DIODE = {**answer("5.10", 5.10, "510", 1), "mode": "diode"}  # the dial was on DC V
+
+
+async def test_bench_51_0_volts_is_not_confirmed(settings: Settings) -> None:
+    alone = await read(settings, BENCH_51_0, frames=3)
+    assert alone["status"] == "disputed"
+    assert alone["value"] is None
+    assert any("above the bench limit of 30 V" in problem for problem in alone["problems"])
+    with_expected = await read(settings, BENCH_51_0, frames=3, expected_value=5.0)
+    assert "5.1 V, with the point one place to the left, is near the expected 5 V" in with_expected["problems"]
+
+
+async def test_bench_93_2_volts_at_usb_c_is_not_confirmed(settings: Settings) -> None:
+    alone = await read(settings, BENCH_93_2, frames=3)
+    assert alone["status"] == "disputed"
+    assert any("above the bench limit of 30 V" in problem for problem in alone["problems"])
+    settings.meter_counts = COUNTS
+    result = await read(settings, BENCH_93_2, frames=3, expected_value=5.0)
+    assert result["status"] == "disputed"
+    assert result["value"] is None
+    problems = " | ".join(result["problems"])
+    assert "the meter shows 4 digits; the model read 3" in problems
+    # The digit check lowers every frame, and the bench limit still applies to the LCD number (QA B-F4).
+    assert problems.count("above the bench limit of 30 V") == 1
+    assert "93.2 V is 19 \u00d7 the expected 5 V" in problems
+
+
+async def test_bench_443_kohm_read_as_volts_is_disputed(settings: Settings) -> None:
+    by_test = await read(settings, BENCH_443_VOLTS, frames=2, expected_mode="resistance")
+    assert by_test["status"] == "disputed"
+    assert by_test["value"] is None
+    assert any("expects resistance" in problem for problem in by_test["problems"])
+    services = make_services(settings, FakePhone(), fake_vision(BENCH_443_VOLTS))
+    async with Client(build_server(services)) as client:
+        confirmed = await client.call_tool("bench_state_update", {"meter_mode_confirmed_by_user": "resistance"})
+        assert not confirmed.is_error, confirmed.content
+        by_user = await client.call_tool("multimeter_read", {"frames": 2})
+    assert by_user.structured_content is not None
+    assert by_user.structured_content["status"] == "disputed"
+    assert any("the user confirmed" in problem for problem in by_user.structured_content["problems"])
+
+
+async def test_bench_dc_volts_read_as_diode_is_uncertain_in_a_dc_voltage_test(settings: Settings) -> None:
+    result = await read(settings, BENCH_DIODE, frames=2, expected_mode="dc_voltage")
+    assert result["status"] == "uncertain"
+    assert result["value"] is None
+    assert "the current test expects dc_voltage; the mode is diode" in result["problems"]
+
+
+# endregion
+
+
+# region: the bench limit on the LCD number, once per result (QA B-F4)
+
+
+@pytest.mark.parametrize(
+    ("counts", "changes"),
+    [(0, {"confidence": 0.3}), (COUNTS, {})],  # a low confidence alone; the digit count alone
+)
+def test_the_bench_limit_applies_to_a_frame_that_another_check_lowered(counts: int, changes: dict[str, Any]) -> None:
+    lowered = frames("51.0", 51.0, counts=counts, **changes)
+    assert all(frame.status is MeterStatus.UNCERTAIN and frame.value is None for frame in lowered)
+    result = combine(lowered, LIMITS, counts=counts)
+    assert result.status is MeterStatus.DISPUTED
+    assert result.value is None
+    assert [problem for problem in result.problems if "above the bench limit" in problem] == [
+        "51.0 V is above the bench limit of 30 V: a misread (for example a wrong decimal point) is more likely"
+    ]
+
+
+def test_the_bench_limit_uses_the_prefix_and_skips_an_overload() -> None:
+    assert combine(frames("45.00", 45.0, unit="mV", counts=COUNTS), LIMITS, counts=COUNTS).status is (
+        MeterStatus.CONFIRMED
+    )
+    overload = combine(frames("O.L", None, unit="V"), LIMITS)
+    assert not any("above the bench limit" in problem for problem in overload.problems)
+
+
+def test_two_frames_above_the_limit_keep_both_texts() -> None:
+    result = combine(frames("51.0", 51.0, count=1) + frames("93.2", 93.2, count=1), LIMITS)
+    limit = [problem for problem in result.problems if "above the bench limit" in problem]
+    assert [problem.split(" is above")[0] for problem in limit] == ["51.0 V", "93.2 V"]
+
+
+# endregion

@@ -115,12 +115,15 @@ async def test_a_box_outside_the_view_becomes_an_arrow(settings: Settings) -> No
     services, phone = tracked_services(settings)
     async with Client(build_server(services)) as client:
         await highlight(client, MIDDLE, LEFT)
+        left_tag = phone.sent[-1][1]["tag"]
         for step in FAR_STEPS:
             await services.scene.frame(frame_of(step))
     assert moved_center(LEFT, FAR_STEPS[-1])[0] < 0
     assert [box["label"] for box in phone.sent[-1]] == [MIDDLE["label"]]
     [arrow] = phone.arrows_sent[-1]
     assert arrow["label"] == LEFT["label"]
+    # The arrow keeps the tag of its box (C3): the same tag and colour on the phone and the page.
+    assert arrow["tag"] == left_tag
     # Left in the image: about 180 degrees on the still (no turn, no flips in the fake).
     assert abs(arrow["angle_deg"] - 180) < 5
     assert [arrow.label for arrow in services.arrows] == [LEFT["label"]]

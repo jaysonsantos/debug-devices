@@ -160,8 +160,7 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
             return "stopped"
 
         async def stop_phone() -> str:
-            await monitor.stop_phone()
-            return "stopped"
+            return await monitor.stop_phone()
 
         steps = [
             await run_step(StepName.WEBCAM, True, stop_webcam),

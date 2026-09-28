@@ -72,6 +72,10 @@ CARRY_MAX_ERROR_PX = 6.0
 KEPT_PHOTOS = 8
 NOT_KEPT = "the registered photo is not kept (a registration from before a server restart): register again"
 NO_MATCH = "the board or the phone moved, and the new snapshot does not match the registered photo well enough"
+TRACKING_LOST_REASON = (
+    "registration {id!r}: the live tracking lost the board (it moved or left the view): take a fresh phone_snapshot "
+    "(a good image match carries the registration over) or call board_register_photo again"
+)
 
 
 class CarryResult(BaseModel):
@@ -110,8 +114,8 @@ class PointingHost(Protocol):
     scene: SceneState
     last_snapshot: SnapshotGeometry | None
     last_snapshot_image: bytes | None
-    # The part of the still that the phone screen shows (from the last status), or None.
-    preview_region: PreviewRegion | None
+    # The part of the still where the phone shows boxes (overlay_region, else preview_region), or None.
+    overlay_region: PreviewRegion | None
     # The boxes on the phone now (the last overlay).
     highlights: list[OverlayBox]
 
@@ -119,6 +123,9 @@ class PointingHost(Protocol):
 
     def overlay_note(self, note: str) -> None:
         """Tell the agent in its next phone tool result (the boxes and arrows changed without a tool call)."""
+
+    def guard_snapshot_registration(self, registration_id: str | None) -> None:
+        """Refuse when the last phone_snapshot has another scene or camera view than the registered photo."""
 
 
 @dataclass
@@ -275,6 +282,8 @@ class Pointing:
                 "photo_height_px": geometry.height,
                 "fit": old.fit.model_copy(update={"matrix": matrix.tolist(), "pairs": pairs}),
                 "stale": False,
+                # The old reason (for example an app restart) belongs to the old registration.
+                "stale_reason": None,
                 "tracking": None,
                 "photo_id": session.current_photo_id() if session.current_photo_id is not None else None,
                 "carried_from": old.registration_id,
@@ -335,7 +344,7 @@ class Pointing:
             logger.info("live tracking lost for registration %s", tracker.registration_id)
             registration = self._host.board.registrations.get(tracker.registration_id)
             if registration is not None:
-                registration.stale = True
+                registration.mark_stale(TRACKING_LOST_REASON)
             if self.target is not None and self.target.registration_id == tracker.registration_id:
                 await self.stop()
                 await self._clear_lost()
@@ -419,13 +428,18 @@ class Pointing:
         registration_id = registration_id or session.last_registration_id
         if registration_id is None:
             raise ToolError(NO_REGISTRATION)
+        registration = session.registration(registration_id)
+        # A tracked registration maps the live frames. Otherwise the boxes come from the pixels of the last
+        # phone_snapshot: it must show the registered scene with the same camera view (any size: they are scaled).
         if not self.tracked(registration_id):
             self._host.scene.guard()
-        return session.registration(registration_id)
+            self._host.guard_snapshot_registration(registration_id)
+        return registration
 
     def _view(self, geometry: SnapshotGeometry) -> tuple[float, float, float, float] | None:
-        """The preview region in pixels of the agent's image (through its turn and flips), or None."""
-        region = self._host.preview_region
+        """The region where the phone shows boxes, in pixels of the agent's image (through its turn and flips), or
+        None. A part outside it gets an arrow: the app would not draw its box."""
+        region = self._host.overlay_region
         if region is None:
             return None
         x, y, width, height = geometry.orientation.box_from_true(
@@ -482,7 +496,7 @@ class Pointing:
         geometry = self._host.last_snapshot
         assert geometry is not None
         boxes = [overlay_box(box, geometry) for box in point_plan.boxes]
-        region = status.preview_region if status is not None and status.preview_region else self._host.preview_region
+        region = (status.visible_region() if status is not None else None) or self._host.overlay_region
         seen, warning = visibility(boxes, region)
         return PointResult(
             visibility=seen,

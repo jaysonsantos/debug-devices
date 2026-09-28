@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from debug_devices_mcp.adb import Adb
 from debug_devices_mcp.config import Settings
+from debug_devices_mcp.devices import PhoneSelection
 from debug_devices_mcp.multimeter import VisionClient
 from debug_devices_mcp.phone_api import PhoneClient
 from debug_devices_mcp.process import CommandResult
@@ -23,6 +24,7 @@ from .conftest import JPEG, FakeRunner, make_jpeg, ok
 from .test_multimeter import READING, completion
 from .test_phone_api import STATUS
 
+PHONE_SERIAL = "R5CT1234567"
 ONE_DEVICE = b"List of devices attached\nR5CT1234567  device usb:1-2 model:SM_A556B transport_id:3\n"
 
 
@@ -90,7 +92,15 @@ def make_services(settings: Settings, fake_phone: FakePhone, vision_handler: htt
         vision=VisionClient(
             SecretStr("sk-test"), "m", "https://openrouter.test/api/v1", timedelta(seconds=1), transport=vision_handler
         ),
+        # The user selected the fake phone in the page: the server never picks a device by itself.
+        selection=selected(PHONE_SERIAL),
     )
+
+
+def selected(serial: str) -> PhoneSelection:
+    selection = PhoneSelection()
+    selection.set(serial)
+    return selection
 
 
 class CountingWebcam:

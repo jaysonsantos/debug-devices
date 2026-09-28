@@ -13,6 +13,7 @@ import io.ktor.server.plugins.ContentTransformationException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.get
@@ -99,7 +100,12 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             }
             call.respond(status)
         }
-        get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
+        get(Constants.Paths.SNAPSHOT) {
+            val snapshot = camera.capture()
+            call.response.header(Constants.Snapshot.HEADER_ROTATION_DEGREES, snapshot.rotationDegrees.toString())
+            call.response.header(Constants.Snapshot.HEADER_APP_START_ID, snapshot.appStartId)
+            call.respondBytes(snapshot.jpeg, ContentType.Image.JPEG)
+        }
     }
 }
 

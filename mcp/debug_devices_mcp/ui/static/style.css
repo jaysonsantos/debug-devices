@@ -458,8 +458,8 @@ form label { display: block; margin-bottom: 8px; }
 
 /* The table stays inside the phone column: long serials wrap, and a narrow column scrolls it. */
 #phone-devices { min-width: 0; overflow-x: auto; }
-#devices-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-#devices-table th, #devices-table td {
+#devices-table, #devices-network-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#devices-table th, #devices-table td, #devices-network-table th, #devices-network-table td {
   padding: 2px 6px;
   border-bottom: 1px solid var(--border);
   text-align: left;
@@ -467,8 +467,9 @@ form label { display: block; margin-bottom: 8px; }
 }
 #devices-table td:first-child { white-space: nowrap; }
 #devices-table tr.selected td { font-weight: 600; }
-#devices-table td.actions { white-space: nowrap; }
-#devices-table td.actions button { margin: 0 4px 2px 0; font-size: 12px; }
+#devices-table tr.gone td { color: var(--error, #c0392b); }
+#devices-table td.actions, #devices-network-table td.actions { white-space: nowrap; }
+#devices-table td.actions button, #devices-network-table td.actions button { margin: 0 4px 2px 0; font-size: 12px; }
 #phone-devices form { flex-wrap: wrap; }
 #devices-steps { margin: 4px 0; padding-left: 20px; font-size: 12px; }
 #devices-steps li.failed { color: var(--error, #c0392b); }
@@ -476,7 +477,7 @@ form label { display: block; margin-bottom: 8px; }
 
 /* endregion: devices */
 
-/* The part of the snapshot that the phone screen shows (preview_region). */
+/* The part of the snapshot where the phone shows boxes (overlay_region, else preview_region). */
 .preview-frame { position: absolute; border: 1px dashed rgba(255, 255, 255, 0.85); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
 
 /* Boxes of another MCP server, and the agent's annotated snapshot. */

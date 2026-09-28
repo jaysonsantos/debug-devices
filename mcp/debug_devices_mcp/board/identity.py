@@ -3,7 +3,8 @@
 States:
 - visible_marking: the photo shows a marking; the boardview names that fit it are only candidates.
 - candidate: boardview estimates (a position from a registration, or look-alike parts). Never a visual fact.
-- confirmed: a current phone_snapshot, a valid checked registration, and a visible marking or a unique landmark.
+- confirmed: a current phone_snapshot, a valid checked registration, and a visual input: a visible marking read in that
+  photo, or a unique landmark (one part at the point, no look-alike near) that the user confirmed.
 
 A confirmation holds only for its scene: a move of the board or the phone (the photo id becomes stale, the
 registration becomes stale) turns it back into a candidate. A part on the other side cannot be confirmed.
@@ -39,6 +40,10 @@ CLOSER_PHOTO = (
     "Ask the user for a closer photo (phone closer to the board, then phone_zoom and a fresh phone_snapshot) so that "
     "a marking or a unique feature is readable, then call board_identify again."
 )
+CONFIRM_LANDMARK = (
+    "Read a marking of this part in the photo and call board_identify with `marking`, or ask the user to confirm that "
+    "this is the part and call board_identify again with `user_confirmed: true`."
+)
 REGISTER_FIRST = (
     "Register this photo with board_register_photo (5 or more pairs, so the fit is checked), then call "
     "board_identify with the registration_id and the pixel position of the part."
@@ -53,6 +58,7 @@ class IdentityState(StrEnum):
 
 class IdentityBasis(StrEnum):
     MARKING = "marking"
+    # A unique landmark that the user confirmed (a landmark alone is only a candidate: no visual input).
     LANDMARK = "landmark"
     NONE = "none"
 
@@ -68,6 +74,8 @@ class IdentityClaim(BaseModel):
     y_px: float | None
     # The marking as seen in the photo, quoted exactly. Null when the part shows no readable marking.
     visible_marking: str | None
+    # The user confirmed the part at this place (the visual input of a landmark confirmation).
+    user_confirmed: bool = False
     state: IdentityState
     # The confirmed part. Null unless `state` is "confirmed".
     refdes: str | None
@@ -77,6 +85,13 @@ class IdentityClaim(BaseModel):
     reason: str
     # What to do to confirm; null when confirmed.
     request: str | None
+
+
+class VisualInput(BaseModel):
+    """What the agent saw at the place: a marking read in the photo, and whether the user confirmed the part."""
+
+    marking: str | None = None
+    user_confirmed: bool = False
 
 
 class IdentityReport(BaseModel):
@@ -90,6 +105,10 @@ class PhotoChecker(Protocol):
     def require_current_photo(self, capture_id: str) -> object: ...
 
     def status(self, capture_id: str) -> object: ...
+
+    def photo_size(self, capture_id: str | None) -> tuple[int, int] | None: ...
+
+    def reuse_problem(self, registered_photo_id: str | None, photo_id: str | None = None) -> str | None: ...
 
 
 class RegistrationLike(Protocol):
@@ -193,9 +212,12 @@ def identify(
     photo_id: str,
     registration: RegistrationLike | None,
     point: tuple[float, float] | None,
-    marking: str | None,
+    seen: VisualInput,
 ) -> IdentityClaim:
-    """Decide the state of one claim. The caller checked that the photo is current and the registration valid."""
+    """Decide the state of one claim. The caller checked that the photo is current and the registration valid.
+
+    `point` is in pixels of the registered photo (the caller scales a point of another photo size)."""
+    marking = seen.marking
     base: dict[str, object] = {
         "photo_id": photo_id,
         "registration_id": registration.registration_id if registration else None,
@@ -203,6 +225,7 @@ def identify(
         "x_px": point[0] if point else None,
         "y_px": point[1] if point else None,
         "visible_marking": marking,
+        "user_confirmed": seen.user_confirmed,
     }
     at: list[Part] = []
     board_point: Point | None = None
@@ -212,7 +235,7 @@ def identify(
         at = parts_at(board, board_point, registration.side)
     if marking:
         return _by_marking(board, base, registration, board_point, marking)
-    return _by_landmark(board, base, registration, at)
+    return _by_landmark(board, base, registration, at, seen.user_confirmed)
 
 
 def _by_marking(
@@ -279,7 +302,7 @@ def _by_marking(
 
 
 def _by_landmark(
-    board: Board, base: dict[str, object], registration: RegistrationLike | None, at: list[Part]
+    board: Board, base: dict[str, object], registration: RegistrationLike | None, at: list[Part], user_confirmed: bool
 ) -> IdentityClaim:
     if registration is None:
         raise ToolError("give a `marking`, or a `registration_id` with `x_px` and `y_px`")
@@ -297,13 +320,25 @@ def _by_landmark(
     similar = lookalikes(board, nearest, registration.side)
     candidates = list(dict.fromkeys([part.name for part in at] + [part.name for part in similar]))[:MAX_CANDIDATES]
     if len(at) == 1 and not similar and registration.checked:
+        unique = f"{nearest.name} is the only part at this position, and no look-alike part is near"
+        if not user_confirmed:
+            # Only the agent's pixel and the boardview data: no visual input yet.
+            return new_claim(
+                **base,
+                state=IdentityState.CANDIDATE,
+                refdes=None,
+                candidates=[nearest.name],
+                basis=IdentityBasis.NONE,
+                reason=f"boardview estimate only: {unique}, but no visual input (no marking, no user confirmation)",
+                request=CONFIRM_LANDMARK,
+            )
         return new_claim(
             **base,
             state=IdentityState.CONFIRMED,
             refdes=nearest.name,
             candidates=[],
             basis=IdentityBasis.LANDMARK,
-            reason=f"{nearest.name} is the only part at this position, and no look-alike part is near",
+            reason=f"{unique}, and the user confirmed it",
             request=None,
         )
     if similar:

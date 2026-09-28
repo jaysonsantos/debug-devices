@@ -76,12 +76,16 @@ class RemoteScreen:
     async def feed(self) -> AsyncIterator[bytes]:
         """The newest phone screen frames of the primary, each one time (the scene watcher's frame feed)."""
         seq = 0
+        source: tuple[str, str | None] | None = None
         while True:
             target = await self._target()
             if target is None:
                 await asyncio.sleep(ingest.REMOTE_RETRY.total_seconds())
                 continue
             url, headers = target
+            # Another primary (a restart has a new token, or another port): its frames count from 0 again.
+            if (url, headers.get(ingest.TOKEN_HEADER)) != source:
+                source, seq = (url, headers.get(ingest.TOKEN_HEADER)), 0
             try:
                 response = await self._http.get(
                     f"{url}{ingest.FRAME_PATH}", params={ingest.AFTER_PARAM: str(seq)}, headers=headers

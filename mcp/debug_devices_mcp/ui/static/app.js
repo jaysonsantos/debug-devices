@@ -31,7 +31,7 @@ const API = {
   board: "/api/board",
   devices: "/api/devices",
   devicesSelect: "/api/devices/select",
-  devicesClear: "/api/devices/clear",
+  devicesDisconnect: "/api/devices/disconnect",
   devicesWifi: "/api/devices/wifi",
   devicesPair: "/api/devices/pair",
   devicesConnect: "/api/devices/connect",
@@ -1193,7 +1193,10 @@ function drawHighlights() {
   const boxes = state.phone?.highlights ?? [];
   layer.replaceChildren();
   const arrows = state.phone?.arrows ?? [];
-  const region = state.phone?.status?.preview_region;
+  // Where the phone draws boxes: overlay_region (without the system bars and the status label), else preview_region
+  // (an older app). The status poll brings a new one after a flip or a rotation change.
+  const status = state.phone?.status;
+  const region = status?.overlay_region ?? status?.preview_region;
   if ((!boxes.length && !arrows.length && !register.points.length && !region) || !img.naturalWidth) return;
   if ($("snapshot-view").hidden) return;
   const view = $("snapshot-view").getBoundingClientRect();
@@ -1203,12 +1206,12 @@ function drawHighlights() {
   const top = picture.top - view.top;
   // The boxes and arrows are on the phone still: the snapshot turn, then the flips (orientation.ImageTransform).
   const transform = snapshotTransform();
-  // The part of the snapshot that the phone screen shows (CameraStatus.preview_region): a thin frame.
+  // The part of the snapshot where the phone shows boxes: a thin frame.
   if (region) {
     const shown = boxFromTrue(region, transform);
     const frame = document.createElement("div");
     frame.className = "preview-frame";
-    frame.title = "The part that the phone screen shows";
+    frame.title = "The part where the phone screen shows boxes";
     frame.style.left = `${left + shown.x * width}px`;
     frame.style.top = `${top + shown.y * height}px`;
     frame.style.width = `${shown.width * width}px`;
@@ -1389,7 +1392,8 @@ function setupMarkings() {
 
 // The layout for the boxes and arrows in the shown picture (pixels of the picture as it is drawn now). The server
 // has the one implementation (overlay_layout.py); the page asks it and keeps the last answer.
-const layoutCache = { key: null, layout: null, pending: null };
+// `shape`: the boxes, arrows, and transform without the picture size; `width`, `height`: the size of `layout`.
+const layoutCache = { key: null, layout: null, pending: null, shape: null, width: 0, height: 0 };
 // Rule 4 of docs/overlay-layout.md: the page uses picture pixels, like the annotated image.
 const LAYOUT_MIN_BOX = 32;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -1423,13 +1427,13 @@ function drawLayout(layer, picture, boxes, arrows, transform) {
   if (!boxes.length && !arrows.length) return;
   const request = layoutRequest(picture, boxes, arrows, transform);
   const key = JSON.stringify(request);
+  const shape = JSON.stringify({ boxes, arrows, transform });
   if (layoutCache.key !== key) {
     if (layoutCache.pending !== key) {
       layoutCache.pending = key;
       api("POST", API.overlayLayout, request)
         .then((layout) => {
-          layoutCache.key = key;
-          layoutCache.layout = layout;
+          Object.assign(layoutCache, { key, layout, shape, width: request.width, height: request.height });
           drawHighlights();
         })
         .catch((error) => console.warn("highlight layout:", error.message))
@@ -1437,9 +1441,37 @@ function drawLayout(layer, picture, boxes, arrows, transform) {
           if (layoutCache.pending === key) layoutCache.pending = null;
         });
     }
+    // Only the size changed (a wheel zoom or a resize): draw the last layout scaled until the new one comes, so the
+    // boxes do not flicker (B-S9 of QA round 4).
+    if (layoutCache.layout && layoutCache.shape === shape && layoutCache.width && layoutCache.height) {
+      const scaled = scaledLayout(layoutCache.layout, request.width / layoutCache.width, request.height / layoutCache.height);
+      paintLayout(layer, picture, scaled, request.boxes);
+    }
     return;
   }
-  paintLayout(layer, picture, layoutCache.layout);
+  paintLayout(layer, picture, layoutCache.layout, request.boxes);
+}
+
+function scaledRect(rect, sx, sy) {
+  return { x: rect.x * sx, y: rect.y * sy, width: rect.width * sx, height: rect.height * sy };
+}
+
+function scaledLayout(layout, sx, sy) {
+  const point = ([x, y]) => [x * sx, y * sy];
+  return {
+    ...layout,
+    boxes: layout.boxes.map((box) => ({ ...box, rect: scaledRect(box.rect, sx, sy) })),
+    badges: layout.badges.map((badge) => ({
+      ...badge,
+      rect: scaledRect(badge.rect, sx, sy),
+      leader: badge.leader ? [...point(badge.leader.slice(0, 2)), ...point(badge.leader.slice(2))] : null,
+    })),
+    arrows: layout.arrows.map((arrow) => ({ ...arrow, anchor: point(arrow.anchor) })),
+    legend: layout.legend ? { ...layout.legend, rect: scaledRect(layout.legend.rect, sx, sy) } : null,
+    inset: layout.inset
+      ? { ...layout.inset, source: scaledRect(layout.inset.source, sx, sy), dest: scaledRect(layout.inset.dest, sx, sy) }
+      : null,
+  };
 }
 
 function placed(element, picture, rect) {
@@ -1450,8 +1482,8 @@ function placed(element, picture, rect) {
   return element;
 }
 
-function paintLayout(layer, picture, layout) {
-  if (layout.inset) paintInset(layer, picture, layout);
+function paintLayout(layer, picture, layout, boxes) {
+  if (layout.inset) paintInset(layer, picture, layout, boxes);
   for (const box of layout.boxes) {
     const element = placed(document.createElement("div"), picture, box.rect);
     element.className = "highlight-box";
@@ -1522,8 +1554,9 @@ function paintLegend(layer, picture, legend) {
   layer.append(element);
 }
 
-// Rule 7: the area around small boxes, enlarged, with the same outlines.
-function paintInset(layer, picture, layout) {
+// Rule 7: the area around small boxes, enlarged, with the same outlines and tags. The inset shows the real box
+// areas (`boxes`, the layout request), not the drawn rectangles of at least LAYOUT_MIN_BOX (B-S4 of QA round 4).
+function paintInset(layer, picture, layout, boxes) {
   const inset = layout.inset;
   const img = $("snapshot");
   const canvas = document.createElement("canvas");
@@ -1548,16 +1581,28 @@ function paintInset(layer, picture, layout) {
   } catch {
     return; // no image yet
   }
-  context.lineWidth = 3;
-  for (const box of layout.boxes) {
-    context.strokeStyle = box.colour;
-    context.strokeRect(
-      (box.rect.x - inset.source.x) * inset.scale,
-      (box.rect.y - inset.source.y) * inset.scale,
-      box.rect.width * inset.scale,
-      box.rect.height * inset.scale,
-    );
-  }
+  context.font = "bold 12px sans-serif";
+  context.textBaseline = "top";
+  layout.boxes.forEach((drawn, index) => {
+    const box = boxes[index];
+    if (!box) return;
+    const x = (box.x - inset.source.x) * inset.scale;
+    const y = (box.y - inset.source.y) * inset.scale;
+    const width = box.width * inset.scale;
+    const height = box.height * inset.scale;
+    // Rule 5: the dark outline 2 px wider on each side, then the colour outline.
+    context.lineWidth = 7;
+    context.strokeStyle = "rgba(0, 0, 0, 0.6)";
+    context.strokeRect(x, y, width, height);
+    context.lineWidth = 3;
+    context.strokeStyle = drawn.colour;
+    context.strokeRect(x, y, width, height);
+    const textWidth = context.measureText(drawn.tag).width;
+    context.fillStyle = "rgba(0, 0, 0, 0.9)";
+    context.fillRect(x, y, textWidth + 6, 16);
+    context.fillStyle = drawn.colour;
+    context.fillText(drawn.tag, x + 3, y + 2);
+  });
   layer.append(canvas);
 }
 
@@ -1806,7 +1851,7 @@ function deviceButton(label, onClick, disabled = false, title = "") {
 function showDevices(list) {
   const selected = list.selected_serial;
   $("devices-selected").textContent = selected
-    ? `${selected} (${SELECTED_FROM_TEXT[list.selected_from]})`
+    ? `${selected} (${SELECTED_FROM_TEXT[list.selected_from]}${list.selected_gone ? ", gone" : ""})`
     : SELECTED_FROM_TEXT.none;
   const rows = list.devices.map((device) => {
     const row = document.createElement("tr");
@@ -1833,11 +1878,76 @@ function showDevices(list) {
     row.append(actions);
     return row;
   });
+  if (list.selected_gone) rows.unshift(goneRow(list));
   $("devices-table").tBodies[0].replaceChildren(...rows);
+  showNetwork(list);
+}
+
+// The selected phone is not in adb devices: it stays selected until the user decides, but it is not connected.
+function goneRow(list) {
+  const row = document.createElement("tr");
+  row.classList.add("selected", "gone");
+  const link = /^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(list.selected_serial) ? "wifi" : "usb";
+  const note = "not in adb devices: connect it again (Found on the network, Pair, or Connect), or Disconnect";
+  for (const text of [list.selected_serial, link, "gone", "–", note]) {
+    const cell = document.createElement("td");
+    cell.textContent = text;
+    row.append(cell);
+  }
+  const actions = document.createElement("td");
+  actions.className = "actions";
+  actions.append(deviceButton("Disconnect", () => deviceAction(API.devicesDisconnect), false,
+    "Stop the phone and clear the selection (the phone is gone)"));
+  row.append(actions);
+  return row;
+}
+
+// Wireless-debugging phones that the server found on the network (zeroconf or avahi-browse). The user chooses:
+// Connect runs adb connect; Pair only fills the pair form (the user types the code from the phone).
+function showNetwork(list) {
+  const network = list.network ?? [];
+  $("devices-network").hidden = network.length === 0;
+  const rows = network.map((candidate) => {
+    const row = document.createElement("tr");
+    const inAdb = candidate.adb_serial ?? "–";
+    for (const text of [candidate.name, candidate.model || "–", candidate.address, candidate.kind, inAdb]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.append(cell);
+    }
+    const actions = document.createElement("td");
+    actions.className = "actions";
+    if (candidate.kind === "connect") {
+      actions.append(
+        deviceButton(candidate.adb_serial ? "Connected" : "Connect", () => deviceAction(API.devicesConnect, { address: candidate.address }),
+          Boolean(candidate.adb_serial), `adb connect ${candidate.address}`),
+      );
+    } else {
+      actions.append(
+        deviceButton("Pair", () => fillPairForm(candidate, network), false,
+          "Fill the pair form with this address; then type the 6-digit code that the phone shows"),
+      );
+    }
+    row.append(actions);
+    return row;
+  });
+  $("devices-network-table").tBodies[0].replaceChildren(...rows);
+  // adb's own mDNS note only when the server's discovery did not help either.
   const mdns = list.mdns.map((service) => `${service.name} ${service.address}`).join(", ");
-  $("devices-mdns").textContent = list.mdns_note
-    ? `Wireless debugging discovery: ${list.mdns_note}`
-    : mdns ? `On the network (not connected): ${mdns}` : "";
+  const notes = [];
+  if (network.length === 0 && list.network_note) notes.push(`Network discovery: ${list.network_note}`);
+  if (network.length === 0 && list.mdns_note) notes.push(`adb mDNS: ${list.mdns_note}`);
+  if (!list.mdns_note && mdns) notes.push(`adb mDNS (not connected): ${mdns}`);
+  $("devices-mdns").textContent = notes.join(" · ");
+}
+
+function fillPairForm(candidate, network) {
+  $("pair-address").value = candidate.address;
+  // The connect address of the same phone, when the network list has it.
+  const connect = network.find((other) => other.kind === "connect" && other.host === candidate.host);
+  if (connect) $("pair-connect").value = connect.address;
+  $("pair-code").value = "";
+  $("pair-code").focus();
 }
 
 function showSteps(steps) {
@@ -1880,7 +1990,7 @@ function setupDevices() {
     if (event.currentTarget.open) loadDevices();
   });
   $("devices-refresh").addEventListener("click", loadDevices);
-  $("devices-clear").addEventListener("click", () => deviceAction(API.devicesClear));
+  $("devices-clear").addEventListener("click", () => deviceAction(API.devicesDisconnect));
   $("devices-connect").addEventListener("submit", (event) => {
     event.preventDefault();
     deviceAction(API.devicesConnect, { address: $("connect-address").value.trim() });

@@ -1537,3 +1537,219 @@ The user asked: "is it possible to move the markings if the camera moves?" Befor
 - With two trackers, each frame costs one feature pass and two matches. Before, it was one feature pass and one match.
 - The tracked box is the bounding box of the moved corners. After a large turn, the box is larger than the part.
 - No test with the real phone or webcam (bench rule). The running MCP server loads these files only at its next start.
+
+## Round 36: find wireless-debugging phones without adb mDNS (adb-mdns brief)
+
+The problem from the bench session: `phone_devices` said "mdns not supported by this adb". The Nix android-tools 37.0.0 adb and `/usr/bin/adb` have no mDNS. So the Devices list did not find the phone after Samsung changed the wireless-debugging port.
+
+### What I did
+
+1. **Own discovery** (`discovery.py`):
+   - The server browses `_adb-tls-connect._tcp` (kind `connect`) and `_adb-tls-pairing._tcp` (kind `pairing`) itself.
+   - First with python-zeroconf (new dependency `zeroconf>=0.151.5,<0.152`; it adds `ifaddr`): it browses for 1.5 s, then resolves each service (1 s) to IPv4 addresses.
+   - When zeroconf finds nothing or fails, it uses `avahi-browse -rtp <service>` for both types (3 s timeout each, `--avahi-browse-path` / `DEBUG_DEVICES_AVAHI_BROWSE_PATH`, default `avahi-browse`).
+   - The result is cached for 5 s.
+   - Each candidate has the service name, kind, host, port, `address`, the model (TXT `name=`), the source, and `adb_serial`. `adb_serial` is the adb device with the same address or mDNS name (connect kind), or on the same host (pairing kind).
+   - Plain `_adb._tcp` services are not listed (on this network they are two Fire TV devices).
+   - avahi can report an IPv4 address on an "IPv6" line (seen on this PC), so the address format decides, and duplicates are removed.
+   - `Services.discovery` has no sources by default (tests stay offline). `from_settings` gives zeroconf and avahi-browse.
+2. **Devices page**: a "Found on the network" table under the connected devices (name, model, address, kind, in adb).
+   - Connect (connect kind) runs `adb connect <address>` through the existing Connect action. It shows "Connected" when adb already has that address.
+   - Pair (pairing kind) only fills the pair form with the address, and with the connect address of the same host when the list has it. It then puts the cursor in the code field. Nothing connects by itself.
+   - The adb mDNS note shows only when the server's own discovery found nothing.
+3. **phone_devices**: `DeviceList.network` and `network_note` (read-only). The browse runs in parallel with the app checks. The tool text and `LIST_NOTE` tell the agent to give the user the exact address. The tool still cannot connect, pair, or select.
+4. **Check of the Google platform-tools adb** (only on a separate server port):
+   - `$ANDROID_HOME/platform-tools/adb` is version 37.0.1-15733141.
+   - `adb -P 5099 mdns check` gave "mdns daemon version [adb discovery 0.0.0]", so it supports mDNS. `adb -P 5099 mdns services` listed the phone (`_adb-tls-connect._tcp`) and two `_adb._tcp` Fire TV devices.
+   - `adb -P 5099 kill-server` stopped only that server. The server on 5037 (pid 60619, android-tools 37.0.0) was the same before and after.
+   - **Proposal (not switched)**: after the bench, use the platform-tools adb for the MCP server (`DEBUG_DEVICES_ADB_PATH` or the dev shell PATH), and for every adb client on this PC.
+     - Gain: `adb mdns services` works, and adb connects a paired phone again by itself when the port changes (mDNS auto-connect of `_adb-tls-connect`).
+     - What changes: one adb version for the whole system. The running server (android-tools 37.0.0) must be replaced one time, and that drops the phone connection one time. Do this only with the user's OK. After it, `/usr/bin/adb` and the android-tools adb are a different version: each use of them restarts the server again, so they must not be used (or they must point to the same binary).
+     - The server's own discovery stays as the fallback.
+5. **Tests** (`mcp/tests/test_discovery.py`, 12 tests):
+   - zeroconf with a fake service browser and fake service info: both kinds, the name without the type, the model, IPv4 only, and the browser and zeroconf closed. A zeroconf that cannot start is a discovery error.
+   - avahi-browse output from a recorded sample (invented names, 192.0.2.x): `=` lines only, the IPv6 line with an IPv4 address, no fe80 address, and a `\032` name. The command (`-r -t -p`, both types), and a missing program.
+   - The order (zeroconf, then avahi when zeroconf finds nothing or fails), the notes, the 5 s cache, and the adb serial match (same address, mDNS name, a changed port, pairing by host).
+   - `phone_devices` returns `network`, and the list sends no `connect` or `pair` and no command to the TV.
+   - The page route: the list, then Connect on the user's request (fake adb), then "in adb".
+   - Playwright with the fake adb (scratchpad `networkcheck.py`): the two rows, Pair fills the form (no command), Connect runs one `adb connect` and the row shows "Connected".
+- A live, read-only browse on this PC (both sources, output masked) found the phone in 1.5 s (zeroconf) and 1.0 s (avahi-browse). No connect, pair, or command went to any phone.
+- `mcp/README.md` ("Found on the network", the `phone_devices` row) and `.env.example`.
+- `uv run pytest`: 746 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- zeroconf opens the mDNS port 5353 next to the avahi daemon (shared with SO_REUSEPORT). This worked on this PC.
+- Only IPv4 addresses: the Connect and Pair forms take `host:port` only.
+
+## Round 37: stop or switch a phone that is already gone (phone-stop-bug brief)
+
+The problem from the bench session: stop or switch away from the old phone failed with `adb -s <old Wi-Fi serial> forward --remove tcp:18765 exited with 1: adb: error: device <serial> not found`. The page had no way to disconnect the old phone, and the old Wi-Fi serial stayed selected after the device vanished.
+
+### What I did
+
+1. **Stop and switch**:
+   - `adb.py`: `DeviceGoneError` (an `AdbError`). `_run` raises it when stderr says "device ... not found" (with or without quotes), "device offline", "listener ... not found", or "no devices/emulators found". `select_device` raises `DeviceNotListedError` for a serial that is not in `adb devices`.
+   - `Monitor.stop_phone()`: it clears the page phone state (`serial`, `status`, scrcpy) first. A `DeviceGoneError` from the forward removal is not an error: it returns "the old phone was already gone: its adb forward and screen stream are cleared". The screen stream stop already ignored adb errors.
+   - `DevicePanel._stop_old_phone()`: the step never blocks. It is a "gone" note, or, for another adb error, "the adb forward of the old phone was not removed: ...". The activity log row now shows the step details (for example the gone note), not only "ok". `bench_stop` shows the same note in its phone step.
+2. **Disconnect** (`DevicePanel.disconnect()`, `POST /api/devices/disconnect`, log row `adb_disconnect`): it stops the phone and clears the selection (back to the config, or none), also when the device is gone or adb fails. The page button "Clear selection" is now "Disconnect". The old route `/api/devices/clear` does the same (a page opened before the update still works). Disconnect sends no `adb disconnect`: the phone stays paired.
+3. **Gone state**:
+   - `DeviceList.selected_gone` and `selected_note`: the selected serial (page or config) is not in `adb devices`. The saved selection stays; the user decides.
+   - The page shows a red "gone" row at the top with Disconnect, "(selected here, gone)" in the header, and the network candidates of round 36 below.
+   - `phone_connect` gives "the selected phone <serial> is gone: it is not in adb devices. The user connects it again in the monitor page (Devices: Found on the network, or Pair), or presses Disconnect there". For a Wi-Fi serial, the one `adb connect` try stays, and its reason is added. A Wi-Fi serial in another state (for example offline) keeps the old message.
+4. **Tests** (`mcp/tests/test_phone_stop.py`, 8 tests, fake adb):
+   - A switch after the old phone is gone: "device not found", "device offline", and "listener not found". The switch works, the step and the log row have the note, and the TV gets no command.
+   - Disconnect with a vanished phone, with an adb failure that is not "gone", and without a phone (no forward command).
+   - The gone state keeps the selection and goes away when the phone is back.
+   - The `phone_connect` message for a gone USB phone (no `adb connect`).
+   - `scripts/fake_adb.py`: with a `forwards` list in the state file, `forward --remove` of an unknown spec fails with "listener '...' not found".
+   - `test_devices.py::test_a_lost_wifi_phone_gets_one_connect` now checks the new message.
+   - Playwright with the fake adb (scratchpad `gonecheck.py`): the gone row and header, then Disconnect clears the row, the selection, and the "Serial" (not connected).
+- `mcp/README.md` (Devices).
+- `uv run pytest`: 754 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- No real device test: the phone is not connected now (orchestrator note), and no adb server restart.
+- The page state is also cleared at `bench_stop`: after it, the page shows the phone as not connected until the next `phone_connect`.
+
+## Round 38: device selection safety (QA round 4, batch 1: S1 to S6, B-W1, B-W3)
+
+### What I did
+
+- **S1, no automatic device pick**: `Adb.select_device("")` raises `NoSelectionError`: "no phone is selected: select the phone in the monitor page (Devices), or set --adb-serial / DEBUG_DEVICES_ADB_SERIAL. No command went to any device. adb sees: ...". Only `adb devices -l` runs, also with one device. The "only device" fallback is gone from `adb.py`, `config.py`, `.env.example`, `mcp/README.md`, the `phone_connect` docstring, and `PhoneSelection.effective`.
+- **S2, `pm path` only on the selected device**: every other device in the list (USB or Wi-Fi) shows `app_installed: null` and "app: unknown (not selected; no command goes to a device that is not selected)". This applies to the page and to `phone_devices`.
+- **S3/B-W4, serial classes**: `transport_of` gives Wi-Fi for any serial with a port (IPv4, IPv6 `[...]:port`, a host name) or an mDNS name (`._adb-tls-connect._tcp`, `._adb._tcp`). USB serials have no colon. So a host-name or IPv6 device gets no "Switch to Wi-Fi" and no `pm path`, and `select_phone` sends the one `adb connect` try for it too.
+- **S4, page-only device routes**: `POST /api/devices/{select,disconnect,clear,wifi,pair,connect}` need an `Origin` header equal to the page's own origin (`Host`); otherwise 403 "only the monitor page can change the phone". Browsers send `Origin` on every POST, so the page works (checked with Playwright). curl, a script, or an agent without `Origin`, another site, and another local port all get 403, and nothing reaches adb. `GET /api/devices` stays open (read-only).
+- **S5/S6/B-W1, stop and switch**:
+  - `connect_phone` records the device of its own forward (`Services.forwarded_serial`).
+  - `Services.release_forward()` (the monitor's `forward_remover`) removes only that forward, and only while `adb forward --list` shows that the port still goes to that device. (adb removes a local port whatever device it goes to, so another server's forward for another phone on the same port is kept.) A second stop does nothing ("stopped (no adb forward of this server)").
+  - "listener ... not found" is not an error (`ListenerMissingError`, `remove_forward` returns False). "device not found" and "device offline" stay "the old phone was already gone" (round 37).
+  - `PhoneScreen._adb(serial, ...)`: a session uses its own serial, also in its cleanup, so after a switch the old port is removed on the old serial.
+- **B-W3, secrets**: `Adb._run(..., secrets=...)` redacts the pairing code (`******`) in the "exited with" text and in the runner's timeout text, and drops the exception chain that still held it. The log row, its error, and the step details have no code.
+- `scripts/fake_adb.py`: the state mode records forwards (serial, local, remote): `forward --list` (no -s) prints them, `forward` on a used local port rebinds it to the new device, and `forward --remove` of an unknown port fails with "listener ... not found" (like the real adb). The single-device mode records nothing (`--list` prints nothing).
+
+### Tests
+
+- New `mcp/tests/test_device_safety.py` (20 tests):
+  - S3: 8 serial forms, and a host-name device gets no app check and no switch.
+  - S4: 6 routes × no Origin, another site, and another local port; the page origin works.
+  - S6: a switch of the screen stream removes the old port on the old serial.
+  - B-W1: "listener not found" is not an error.
+  - B-W3: the code is not in the pair error, the timeout error, the log row, or the steps.
+- `test_adb.py`: no selection refuses, also with one device (it replaces the test that locked in the pick) and with several (the list is in the message).
+- `test_devices.py`: no `pm path` without a selection, and `pm path` only for the selected phone. `phone_connect` without a selection sends no device command.
+- `test_phone_stop.py`: a second stop does nothing, and "Use this phone" after a stop works. A forward that goes to another phone now is kept (no `--remove`). "listener not found" gives "already removed".
+- The test helper `make_services` now selects the fake phone (the user's choice), because nothing is picked by itself.
+- `scripts/qa_mcp_stdio.py --skip-webcam` (fakes only): 15/15, with `fire-tv` "no_selection_fire_tv_only" passed.
+- Playwright (fake adb): the network list with Connect and Pair (round 36), and the gone row with Disconnect (round 37), still work with the Origin rule.
+- `uv run pytest`: 817 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- **After the next server start**, a user with an empty `DEBUG_DEVICES_ADB_SERIAL` and no page choice must select the phone in the monitor page one time; `phone_connect` says so.
+- During the run, dd-research-2 edited `scene.py`, `board/identity.py`, and their tests (B-E6, B-E7): three of their tests failed during those edits and passed later, and `board/identity.py` (PLR0913) and `test_board_parts_at.py` (E501) had ruff errors in their unfinished work. They are not in my files.
+
+## Round 39: settings lock, save errors, offline reconnect (QA round 4, batch 2: B-W5, B-W8, B-W9)
+
+### What I did
+
+- **B-W9, one lock for all settings writers**:
+  - `SettingsStore.update(change)` reads the file, changes it, and saves it under a lock file next to it (`ui-settings.json.lock`, `fcntl.flock`). The lock waits at most 2 s (`LOCK_TIMEOUT`); after that the save fails with an `OSError`, and the callers report it as before.
+  - Every writer uses it: `PhoneSelection.set` (devices.py), the in-sensor zoom, autofocus, and Markings choices (camera_choice.py), `OrientationState` (orientation.py), and the page settings save (`Monitor.update_settings`).
+  - The page settings save now takes the values that other parts own (the flips, the camera choices, the Markings toggle, the selected phone) from the file under the lock, not from the memory of this server (also the fix for the suspect B-S8). The owner's value is the fallback when the file has none.
+- **B-W8, a failed selection save is a failed step**: `PhoneSelection.set` raises `SelectionNotSavedError` and keeps the old choice. The select action now saves the choice first, then stops the old phone, then runs `phone_connect`. So a choice that cannot be saved fails at "select" and leaves the old phone running. Disconnect still stops the phone, and its "clear the selection" step fails honestly when the save fails.
+- **B-W5, an offline Wi-Fi serial**: `select_device` raises `DeviceStateError` (with the state). For a Wi-Fi serial in state `offline`, `select_phone` first runs `adb disconnect <serial>` (a host command for the selected phone only), then the one `adb connect`. Before, adb answered "already connected", and the phone stayed offline.
+
+### Tests
+
+- `mcp/tests/test_device_safety.py`, batch 2 (4 tests):
+  - An offline Wi-Fi phone: `disconnect`, then `connect`, then `phone_connect` works.
+  - A failed save: the select action has one failed "select" step, no forward command, and an error in the log row. Disconnect: the stop is ok, and "clear the selection" fails.
+  - Two writers (two stores, the first one slow inside its change) keep both changes. Without the lock (checked in a scratch run), the second change is lost.
+  - A held lock: the save fails after the timeout, and `PhoneSelection.set` raises `SelectionNotSavedError`.
+- `test_devices.py`: the new step order ("select" first).
+- `uv run pytest`: 828 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+## Round 40: overlay and sync fixes (QA round 4, batch 3)
+
+### What I did
+
+- **B-S3, the dark outline outside**: PIL draws an outline inward from the rectangle. The dark outline now goes on the rectangle grown by 2 px, so it is 2 px wider than the colour outline on both sides (rule 5).
+- **B-S4, the inset**: the annotated image and the page draw the real box areas in the inset (the layout input), not the drawn rectangles of at least 32 px (these are larger than the inset, so they were skipped). Each box has the dark and colour outlines and its tag badge. The PIL inset is drawn on the enlarged crop, so nothing goes outside it.
+- **B-S5, a read-only flips call**: `phone_snapshot_orientation()` without arguments returns the flips and does not save or push them. A set still saves, pushes, and calls `scene.unwatched_view_change("flips")` (the call of dd-research-2, kept in the set path).
+- **B-S6, a resend after an app restart**: `AppStartWatch.failed()`: a send that `may_send` allowed and that failed (for example the camera was not ready) may try again on the next status reads, at most 3 sends per app run (`MAX_RESEND_TRIES`). All four syncs use it (preview flips, in-sensor zoom, autofocus mode, markings). `AfModeSync` now stops only when the app cannot do it (`AfModeUnknownToAppError` for the 400, or an old app); a passing error is retried.
+- **B-S7**: `board_locate_in_photo(highlight)` has the same markings note as `phone_point_to` (`Services.highlight_parts`).
+- **B-S8**: fixed in round 39 (the page settings save takes the owned values from the file under the lock).
+- **B-S9, no flicker during a wheel zoom**: while the page waits for the layout of a new size, it draws the last layout of the same boxes, scaled to the new size. Before, it drew nothing until the answer came.
+- **B-S10 and C7, tags**: box tags follow the contract rule `^[A-Za-z0-9]{1,3}$` (`phone.OVERLAY_TAG_PATTERN`) in `OverlayBox` and `PixelBox`. Emoji, accents, and other characters are refused before anything goes to the phone.
+- **B-S11, the page snapshot without the raw still**: the monitor keeps the flips of the kept image. After a flip change, it flips the image by the difference, so it matches the boxes that the page draws with the flips of now.
+- **B-E9**: a `bench_measure` photo (and its turn and flips) is the page snapshot, like a `phone_snapshot`.
+- **B-E10, the rotation of a push**: `PreviewSync.push()` without a status reads a fresh status first, so the preview flips never use an old rotation. `ensure()` passes its status.
+- **B-F6, frames after a primary restart**: the frame route also sends the newest frame when the requested number is higher than its own counter (the counter of an older primary run). The secondary starts from 0 again when the primary's URL or token changes.
+- **B-F9, overlay order**: a secondary numbers its overlay changes when they happen (`IngestOverlay.seq`), and the primary drops a change older than the last one that it drew from that origin. A sender without a number (an older secondary) is always taken.
+- **B-F10, webcam controls**: with auto exposure on, a saved fixed exposure time is left out, and the exposure mode goes first in its own `v4l2-ctl` call.
+
+### Tests
+
+- New `mcp/tests/test_overlay_sync_round4.py` (18 tests), one or more for each item above. B-F10 is in `test_webcam_controls.py` (the split call, and no fixed time in auto).
+- Playwright (fake phone, scratchpad `zoomcheck.py`): the layout route was slowed by 300 ms. During four wheel zoom steps in full screen, no frame (of 128) had 0 boxes. The page inset shows both small boxes with the tags A and B.
+- `uv run pytest`: 846 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- I did not run the flicker check against the old `app.js`. Before the fix, `drawLayout` drew nothing while a new layout was pending, so the boxes were gone for the time of each request.
+
+## Round 41: contract gaps, dd-ui part (QA round 4: C3, C7, C11, C12, C16, C17, C18)
+
+I read `docs/phone-api.md` again first (the overlay body rules, `app_start_id`, `preview_region`, `overlay_region`, the snapshot headers, and the EXIF rule).
+
+### What I did
+
+- **C3, arrow tags**: `OverlayArrow.tag` (optional, the box tag rule). An arrow of a tracked plain box (round 35) keeps the box's tag, so the phone and the page give it the same tag and colour. An older app that answers 400 to a box or arrow tag gets the overlay again without the tags (before: only box tags); our record and the page keep them.
+- **C7, the tag rule**: `^[A-Za-z0-9]{1,3}$` in `OverlayBox`, `OverlayArrow`, and `PixelBox` (round 40). The page gets its tags from the server.
+- **C11, the overlay lifetime**: each overlay call with boxes or arrows starts a timer of `OVERLAY_TTL` (10 minutes, `phone.OVERLAY_TTL`), and a clear or a new call replaces it. At the end, the server forgets the boxes and arrows (the page gets them through the overlay listeners), the pointing and the plain box tracker stop, and the next `phone_*` result says "the boxes and arrows were older than 10 minutes: the phone app removed them". No request goes to the phone (the app removed them itself). A tracked box that moves makes a new call, so it stays, like on the app. The app restart part was already in round 34.
+- **C12, the snapshot headers**: `PhoneClient.snapshot()` returns a `Still` (the JPEG, `X-Rotation-Degrees`, `X-App-Start-Id`). `Services.phone_snapshot` turns the still by its own rotation, and a different app start id is an app restart (round 34 notice). An app without the headers: the status read before, as before. The monitor recorder keeps only the JPEG, as before.
+- **C16, C17**: done in round 38 (no "only device" fallback, no `pm path` to a device that is not selected; the README, `.env.example`, and the tool texts agree).
+- **C18, `.env.example`**: 20 missing variables with comments (`DEBUG_DEVICES_ADB_PATH`, `_ADB_TIMEOUT`, `_LOCAL_FORWARD_PORT`, the phone and webcam timeouts, `_OPENROUTER_BASE_URL`, `_METER_MODEL`, `_WEBCAM_CROP`, the phone screen and scrcpy server settings, `_BOARDVIEW_DUMP_TIMEOUT`, and others). The stale `DEBUG_DEVICES_SCRCPY` (the setting is now `scrcpy_window`, default false) is replaced.
+- `mcp/README.md`: "Overlay lifetime" and "Snapshot headers".
+
+### Tests
+
+- New `mcp/tests/test_contract_round4.py` (7 tests): the still rotation from its header (a fixed Screen view of 0°, so the turn is the rotation), an old app without headers, an app restart between the status and the still, arrow tags, an app without arrow tags, the TTL (the server and the page forget, the note, no phone request), and a new call restarts the TTL.
+- New `mcp/tests/test_env_example.py` (3 tests): every setting is in `.env.example`, no unknown `DEBUG_DEVICES_` variable, and the file parses as a `.env` with the defaults.
+- `test_box_tracking.py`: the arrow of a box that left the view has the box's tag.
+- `uv run pytest`: 856 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- For dd-qa: `scripts/fake_phone.py` does not send the snapshot headers yet; the server then uses the status (the old-app path). The tests use their own fake with headers.
+
+## Round 42: overlay_region for the "visible on the phone" flag
+
+The contract now has `CameraStatus.overlay_region`: `preview_region` without the system bars, the display cutouts, and the app's status label (the part where the app draws boxes). It changes with the preview flips and the rotation.
+
+### What I did
+
+- `CameraStatus.overlay_region` and `CameraStatus.visible_region()`: `overlay_region`, else `preview_region` (an app from before it).
+- `Services.overlay_region` (it replaces `Services.preview_region`): the visible region of the last status. `seen_status` updates it from every status that the server reads.
+- It is read again after a flip or a rotation change: the flips set of `phone_snapshot_orientation` and `phone_rotation` pass their new status to `seen_status`. The page status poll, `phone_status`, and each `phone_snapshot` also update it.
+- It decides:
+  - the per-box `visibility` and the warnings of `phone_highlight`, `phone_point_to`, and `board_locate_in_photo(highlight)`;
+  - the pointing view: a part outside it gets an arrow, because the app would not draw its box;
+  - the dashed frame on the page snapshot (`status.overlay_region ?? status.preview_region`).
+
+### Tests
+
+- New `mcp/tests/test_overlay_region.py` (3 tests, a fake phone whose region follows the flips and the rotation):
+  - A box under the status bar (inside `preview_region`) is "not" visible, with a warning.
+  - An older app without `overlay_region`: the same box is "fully" visible (the `preview_region`).
+  - The region is read again after a vertical flip (the bar goes to the bottom) and after rotation 90.
+- Playwright (scratchpad `regioncheck.py`): the page frame starts at 8 % (`overlay_region`), and at 0 % for an older app.
+- `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15. It uses `scripts/fake_phone.py`, which now sends `X-Rotation-Degrees` and `X-App-Start-Id` (dd-qa round 5), so the header path of round 41 runs there too.
+- `uv run pytest`: 859 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- A correction to round 41: `scripts/fake_phone.py` in the working tree already sends the snapshot headers (dd-qa round 5). dd-qa adds `overlay_region` to it now.
+- No real phone check: the phone is not connected. On the S22, check that the frame and the warnings follow the bars in portrait and at rotation 90.

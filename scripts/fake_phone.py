@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.util
 import json
 import math
 import os
-import struct
+import re
 import sys
 import threading
 import time
@@ -47,6 +48,8 @@ DEFAULT_MIN_ZOOM = 1.0
 DEFAULT_MAX_ZOOM = 8.0
 EPHEMERAL_PORT = 0
 SELF_CHECK_START_DELAY = 0.5
+# A phone with an ultrawide lens: the zoom range starts below the main camera (1.0).
+ULTRAWIDE_MIN_ZOOM = 0.6
 MAX_BODY_BYTES = 64 * 1024
 
 
@@ -127,20 +130,102 @@ TEST_JPEG = base64.b64decode(
     "IjAAtp5fazX4jjNgZcOHDAYGCr8dTMu47FaUv//Z"
 )
 
+# TEST_JPEG turned 90 degrees clockwise (ffmpeg transpose=clock), 48x64, no EXIF.
+TEST_JPEG_TURN_90 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD/2wBDAAgQEBMQExYWFhYWFhoYGhsbGxoaGhobGxsdHR0iIiIdHR0bGx0dICAiIiUmJSMj"
+    "IiMmJigoKDAwLi44ODpFRVP/xACWAAACAwEBAQAAAAAAAAAAAAAGBwAEBQgBAwEBAQEAAwEAAAAAAAAAAAAABQYEAgEDCBAA"
+    "AQMCAwYEBAQHAQAAAAAAAQIREgADEwQhUUEiYRRSMQUyotEVYqFj4UIzNTSys4PwgnERAAIABQIEBAMJAQAAAAAAAAECEQMh"
+    "AAQSUUExIjIFE5FhQoFSocGycQYz0VMUFf/AABEIAEAAMAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AAuh+/fuIuKAUwDbhsHK"
+    "mL8u/E9v50v87Yw8wtMnaO76QdtS2PMluxHPp29xdpkePYOQgXHySXBiYJNWkCDUoOJFLz+pu932HwqdTd7vsPhXyw+dTD50"
+    "vBNh6WR/0T/fN9XsqFqIViZuKkNiBNk3E2yfAFaeF93/AK4rIBuov4a1A80sQQUukgjcQxFGSU5SC+o/c4eow8WEn4Z4fBLb"
+    "9b0P27K7ueCVqSCewCEQjhix9MWbl41xwc5sV3bq0iDMKKG0wNICq1PONCL05GQgCNNnkKpqYu+lfi1CpBgOW4It0dHf7Pcn"
+    "40oPNLS0Zy6CGIhvHYK6YpAed/xC/wD4/wC2moPw6czzmBA7D+JbhZfhknHOpWckiFSv58FG1g0FbKkFbKvVKtNRvZ5K7m9g"
+    "XZaLyilLuAFUVrQLjahUBodr7XNe+Xi5mM/bMQ6pMAwAAQQAOQAYVYFkJ1XmVJXbABilasPcEyBYbG2uKv8AlCDb8zspLaT1"
+    "BcEG0ogjkRrRLsBLmleYRvq24RpDlyvfPkGamhyYNEGHlxqCKwEdVW7uMfe1pWev1H/d1G3y78T2/nQzmLGHdUmTs27kDtr6"
+    "F8Smo0lYH4xwP0m+2wMmT1PLgDTuU1+R9ryalWsPnUw+dRGoX5eU+32i2Ono4L6r93h6nDx8OT8M8Lgk/jum7UDZifUqnB9G"
+    "w2hGAjBv0xZt7eOtESbyV8NzKKXcugKVFdy2LzOQuCdD4O40dzWIlKs1mHUQkq7UsEhKWAAfwAAAovw1DLylZtUNS9zBgOof"
+    "tgEkLQ8+AXa1pyNNVVUAkmAhQmMe8mAJqPmTbW6O/wBnuT8aXOftLRmbgIYiO8dgp+0mvNf527/x/QKosmczoAQO77jcVJ/U"
+    "WXnsZcyXIAA19CuDEU4zDStiEFbKkFbKu1KD1G0v9kzZfQ/ze4nKxZS82pC7YCTFC14TuAmYLDxZho7iqmVy1xOcTbYE6sxB"
+    "BECQQdhGoorT00V4/r0x4YkJPpLD4JbfqeqWSl8yROL8XoaMcMxi36Ys3KicKe5nVjQjuUAGBB6IAErU8+BXe1cvKfElecgl"
+    "Fki6jqMCsTCYI0NAIDiGv//Z"
+)
+# TEST_JPEG turned 180 degrees (ffmpeg hflip,vflip), 64x48, no EXIF.
+TEST_JPEG_TURN_180 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD/2wBDAAgQEBMQExYWFhYWFhoYGhsbGxoaGhobGxsdHR0iIiIdHR0bGx0dICAiIiUmJSMj"
+    "IiMmJigoKDAwLi44ODpFRVP/xACRAAADAQEBAQAAAAAAAAAAAAAEBQYDAAcIAQEBAQEBAAAAAAAAAAAAAAAGBQQIBxAAAQMC"
+    "AggDBgcBAQAAAAAAAQISEQMABCFRExRBYTIxBTOCQkMisYHBUyNy0lIVsnGjohEAAgAFAgQEBAcBAAAAAAAAAQIDESEABDES"
+    "IgUyQVFhcmJxsRPRBjPSgbJzQlL/wAARCAAwAEADASIAAhEAAxEA/9oADAMBAAIRAxEAPwCzuIxnjr8v9Rcj/K437v8A4p/p"
+    "tPVx+JWsk1JJj0o0fltVByURiSG08vvcP8OwWwMuJEiEMDBZOCpmXQ9wtKWb3H2fm+lzN9XxFWo1ypidw4aBa96tPwtTC5lB"
+    "VANsTv2Xx9VpM9vrZMR1oDt11ooHnf2rcNjPHX5f6i/Of5vuH3/+dL9FpqvdMYtZJqyTHop6Py3y5B5dGRiS0PTxb9Nw+Zwz"
+    "kQVVZAhwa+lh2n43T9x9n5vpc1aSvjcRUa5cxPpTw0C8qFeouokFUgzuGg8LTw8dkh1K0n4/a/SOQ5CY+DjY7Bi4LiYlt4or"
+    "EVJB71pfWEvmNm2EvmNt11sDh/mH0n5iwam6xbKqbrFvcul7YvWf2+V2Ngr5jZ1gr5jYddbyRukfGwam69cN4qfn8DeVTdeu"
+    "G8VPz+BvUeg/A2l5drA/sH879HanZte/3+TXwXM1jHR+5m/m43P4pLtkWkCqtalplQjWsWAhwJHUZGc46m2exdyc9mbWc1Jr"
+    "YhrZa3hEWhxOFxiqh1icwAIlEAAZAAGAOAvVAwowedTVm0JkCCNlFHCCZ6ge0XNxcuFluUg8bCHVUO4mTCcQyZqnQzBPuvSi"
+    "licXUVFGohSEuSJ1IqVGrYAT0GQjOOhtu1Gx7U/8Xw9paXavXat7ermb+eMpuNUnEYVQUPdKgpPpUFAxIIMgjgReG0Yl73Zs"
+    "1cQhrIhjIY3hETn1ug/LcqIdyq8tyt0tUKADD6TwkiepHtN7njLCYqykECUjSRNQ+oqAfAHzu6rBwwyxFRalKTJHiNWAlwOk"
+    "dZz0mxqQbtazFJaVIS4CdWFrhbQNA6RnoNuF9o7nUMqozkAPfogADcAFwB/lqD2/H4eoqKbTEEOpkEEdCCogjgbCq8MjaIsM"
+    "n1D/AKnL4Sppc2PHSEQ78InKZIFfpkTqRxT4uqfn3tgpKNk2h/4nh7Q0uZrWPb+5m/n42kqgK2So56la5JqRBqJplqCRpbpz"
+    "0m8q1PHUlpWoQSko9mUsgBrOVvCI32tArrqpXU3Bo5QAAIACU5AcALvYOC+U3C813VZRu2hgRKgHCNdQKaXfx8gFIEVULKSJ"
+    "H/LbHq26omSK6nxN/wD/2Q=="
+)
+# TEST_JPEG turned 270 degrees clockwise (ffmpeg transpose=cclock), 48x64, no EXIF.
+TEST_JPEG_TURN_270 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD/2wBDAAgQEBMQExYWFhYWFhoYGhsbGxoaGhobGxsdHR0iIiIdHR0bGx0dICAiIiUmJSMj"
+    "IiMmJigoKDAwLi44ODpFRVP/xACWAAACAwEBAQAAAAAAAAAAAAAGBwAEBQgBAwEBAQEAAwEAAAAAAAAAAAAABQYEAgEDCBAA"
+    "AQMCAwYEBAQHAQAAAAAAAQIREgADEwQhUUEiYRRSMQUyotEVYqFj4UIzNTSys4PwgnERAAIABQIEBAMJAQAAAAAAAAECEQMh"
+    "AAQSUUExIjIFE5FhQoFSocGycQYz0VMUFf/AABEIAEAAMAMBIgACEQADEQD/2gAMAwEAAhEDEQA/ABrOy+ZLhF+H1tGOGJSf"
+    "9MXflV1XTRRgevXAniQk+scTgls+pqFM1mbic4q44J0dwCCIAEEbCNDVtWai6UZRSF2wVCS1rwnYlUCGHi7nR2NZ82Q5nUjQ"
+    "ntYAGBI64kErUcuBbe9eJiviSvJcyiyQRj1GBWAjLMKGhMTxC3h1KpTVtqTVtpbSbK/xzN19T/Fl/lX87a/7/oNOWkFkLq0Z"
+    "m2QWIluHYaY3WX+/2p+FOY0lnQkEd33CzZ36dy89hMlzJAAGjrZwYivCWaVtUqUrNZhkgJKu5TBISlySW8AASa21WUr4rebU"
+    "u5dBSmSLlsXmYFE1aHwZjo7Ch3Lz6lMIPq+I0IwMpv8Api7728NaOVdHBHS/u8XTYmPhyfihi8En8N02ep3xJzLymVdUNTdq"
+    "hgOo/uEgkLQcuAba7WS7TVZmIJJiY0JjDsAgCan5kWuMTlUxOVValKaRZPmvv9gvWy9/DupVF2ffyI2UTfMfw/d+VBKPUP8A"
+    "d1aFW/hspGktEfGeJ+kX6rn5MnpSZAGvapr8x7Wy/N1m35neUG0hoQ4INpIIPIjSqBvBOiMspK7YJElLVh7yqJDDa+1jVfzA"
+    "3Mxn7gkHVFyWAACASTyADmvDalqjNqUu4CEyQtAuNoUzOh2NtYV89IoEuUG5hF+rbjCkOfO+pE8zU1oDBoER8uNQDSJjqqvb"
+    "xh7Xj1KozVtqTVtpbSbwecuxs58k/iFj/J/bVT/rmfyu6tGctEFiJ7h2Gm/1l/v9qfhUX4jJZ5ykEdg/E145nicnHOllckiN"
+    "Av5cWG1pe5eXdzxUhKQT3kQiEcUnHpi78vCiBSspBHT/ALnF0+Jiwk/FDE4JbPrag0i6i/iISDyUxBBSygQdxDg1rm7EJw8p"
+    "FSHwyq8bibZPiQhXC+//ANY1eZ2C2K6L1aRFVNFDaYisTVajlGhN3WPjoA6ypBCqaCDvpX4dJqQYDnuAbFcTlUxOVfXprvb9"
+    "x8anTXe37j41yim49bzf84/0TfR70Mlfw8whUXaW/wCkjZTA+Y/h+78qXVixcRcSSlgH3jYedEFEZEuW7A8+nf3Nr4/gODkI"
+    "WyMYlwYCLzVpAEUDjiTW/wD/2Q=="
+)
+
 ROTATIONS = (0, 90, 180, 270)
-DEGREES_TO_EXIF_ORIENTATION = {0: 1, 90: 6, 180: 3, 270: 8}
 # The back camera sensor of most phones: its image is turned 90 degrees against the natural portrait screen.
-# The configured snapshot is the raw sensor image (landscape); rotation 0 (portrait) gives EXIF 6.
+# The configured snapshot is the raw sensor image (landscape). Like the app, the fake turns the pixels (rotation 0,
+# portrait, gives a portrait JPEG) and writes no EXIF orientation (docs/phone-api.md).
 SENSOR_ORIENTATION = 90
 FULL_TURN = 360
-JPEG_SOI = b"\xff\xd8"
-JPEG_LENGTH_FIELD_BYTES = 2
-EXIF_APP1_MARKER = b"\xff\xe1"
-EXIF_HEADER = b"Exif\x00\x00"
-EXIF_ORIENTATION_TAG = 0x0112
-TIFF_SHORT = 3
-TIFF_BIG_ENDIAN_HEADER = b"MM\x00\x2a"
-TIFF_FIRST_IFD_OFFSET = 8
+# The built-in sensor image, turned clockwise by 0, 90, 180, and 270 degrees.
+TURNED_TEST_JPEGS = {0: TEST_JPEG, 90: TEST_JPEG_TURN_90, 180: TEST_JPEG_TURN_180, 270: TEST_JPEG_TURN_270}
+
+
+PILLOW_MODULE = "PIL"
+
+
+class Header(StrEnum):
+    """The /v1/snapshot response headers."""
+
+    ROTATION_DEGREES = "X-Rotation-Degrees"
+    APP_START_ID = "X-App-Start-Id"
+
+
+def turn_jpeg(jpeg: bytes, turn: int) -> bytes:
+    """The still turned clockwise by `turn`. The built-in image has fixed turns; another file needs Pillow."""
+    if jpeg == TEST_JPEG:
+        return TURNED_TEST_JPEGS[turn]
+    if turn == 0:
+        return jpeg
+    try:
+        import io  # noqa: PLC0415 (only for a --snapshot file)
+
+        from PIL import Image  # noqa: PLC0415 (optional: the fake stays stdlib-only)
+    except ImportError:
+        return jpeg  # main() warns: without Pillow, a --snapshot file is not turned
+    with Image.open(io.BytesIO(jpeg)) as image:
+        turned = image.rotate(-turn, expand=True)
+        output = io.BytesIO()
+        turned.convert("RGB").save(output, format="JPEG", quality=90)
+    return output.getvalue()
+
 
 # endregion: constants
 
@@ -151,6 +236,62 @@ TIFF_FIRST_IFD_OFFSET = 8
 AF_CONTINUOUS = "continuous"
 # The contract example: a 9:20 portrait screen shows the middle 60 % of a 3:4 still.
 PREVIEW_REGION = {"snapshot_x": 0.2, "snapshot_y": 0.0, "width": 0.6, "height": 1.0}
+# With rotation 90 or 270, the still is the same camera image turned by a quarter turn: the cut moves to the other axis.
+PREVIEW_REGION_SIDEWAYS = {"snapshot_x": 0.0, "snapshot_y": 0.2, "width": 1.0, "height": 0.6}
+SIDEWAYS_ROTATIONS = frozenset({90, 270})
+# The safe area of the fake screen (docs/overlay-layout.md) in the natural portrait frame of the preview: the status bar
+# and the app's status label on top, the navigation bar at the bottom. Not symmetric, so a vertical flip moves it.
+# At rotation 0 with no flip, this gives the contract example {0.2, 0.04, 0.6, 0.9}.
+SAFE_TOP = 0.04
+SAFE_BOTTOM = 0.06
+REGION_DIGITS = 6
+
+
+def still_point(
+    u: float, v: float, rotation_degrees: int, flip_horizontal: bool, flip_vertical: bool
+) -> tuple[float, float]:
+    """A point of the preview on the screen (natural portrait, 0..1) as a point of the still (0..1 in the region)."""
+    if flip_horizontal:
+        u = 1 - u
+    if flip_vertical:
+        v = 1 - v
+    # The still is the screen image turned clockwise by (360 - rotation_degrees) % 360 (docs/phone-api.md).
+    match (FULL_TURN - rotation_degrees) % FULL_TURN:
+        case 90:
+            return 1 - v, u
+        case 180:
+            return 1 - u, 1 - v
+        case 270:
+            return v, 1 - u
+        case _:
+            return u, v
+
+
+def overlay_region(
+    preview: dict[str, float] | None, rotation_degrees: int, flip_horizontal: bool, flip_vertical: bool
+) -> dict[str, float] | None:
+    """The safe area of the screen, mapped into preview_region on the still. Same null rule as preview_region."""
+    if preview is None:
+        return None
+    corners = [(0.0, SAFE_TOP), (1.0, 1.0 - SAFE_BOTTOM)]
+    points = [still_point(u, v, rotation_degrees, flip_horizontal, flip_vertical) for u, v in corners]
+    left, right = sorted(x for x, _ in points)
+    top, bottom = sorted(y for _, y in points)
+    region = {
+        "snapshot_x": preview["snapshot_x"] + left * preview["width"],
+        "snapshot_y": preview["snapshot_y"] + top * preview["height"],
+        "width": (right - left) * preview["width"],
+        "height": (bottom - top) * preview["height"],
+    }
+    return {name: round(value, REGION_DIGITS) for name, value in region.items()}
+
+
+# The main camera. The app starts at this zoom when it is inside [min, max], else at min (ultrawide phones).
+MAIN_CAMERA_ZOOM = 1.0
+
+
+def start_zoom(min_zoom: float, max_zoom: float) -> float:
+    return MAIN_CAMERA_ZOOM if min_zoom <= MAIN_CAMERA_ZOOM <= max_zoom else min_zoom
 
 
 @dataclass
@@ -174,6 +315,8 @@ class CameraStatus:
     app_start_id: str = ""
     # The part of the still that the fake preview shows: a 9:20 screen filled from a 3:4 image (the middle 60 %).
     preview_region: dict[str, float] | None = None
+    # Where the app draws boxes: preview_region without the bars and the status label. It moves with a vertical flip.
+    overlay_region: dict[str, float] | None = None
     # False while the boxes and arrows are hidden (kept); true after an app start.
     overlay_visible: bool = True
 
@@ -192,6 +335,7 @@ NEWER_STATUS_FIELDS = (
     "af_mode",
     "app_start_id",
     "preview_region",
+    "overlay_region",
     "overlay_visible",
 )
 # The body of POST /v1/camera: exactly this field, a boolean.
@@ -226,10 +370,12 @@ OVERLAY_MAX_BOXES = 8
 OVERLAY_MAX_LABEL = 32
 # An optional short tag per box (docs/overlay-layout.md).
 TAG_FIELD = "tag"
-OVERLAY_MAX_TAG = 3
+# The tag rule of docs/phone-api.md: 1 to 3 ASCII letters or digits (the same count on every side).
+TAG_PATTERN = re.compile(r"[A-Za-z0-9]{1,3}")
 OVERLAY_BOX_FIELDS = frozenset({"snapshot_x", "snapshot_y", "width", "height", "label"})
 # x + width and y + height may be this much above 1 (float rounding).
-OVERLAY_TOLERANCE = 1e-9
+# "Inside the image" (docs/phone-api.md): x >= 0 and y >= 0 strict; x + width and y + height up to 1 + this tolerance.
+OVERLAY_TOLERANCE = 1e-4
 # Optional arrows: at most this many, each with exactly these fields.
 OVERLAY_MAX_ARROWS = 4
 OVERLAY_ARROW_FIELDS = frozenset({"angle_deg", "label"})
@@ -279,7 +425,7 @@ class FakeCamera:
         self._ready_at = time.monotonic() + config.start_delay
         self._lock = threading.Lock()
         self._status = CameraStatus(
-            zoom_ratio=config.min_zoom,
+            zoom_ratio=start_zoom(config.min_zoom, config.max_zoom),
             min_zoom_ratio=config.min_zoom,
             max_zoom_ratio=config.max_zoom,
             torch_enabled=False,
@@ -317,6 +463,14 @@ class FakeCamera:
         self._require_ready()
         with self._lock:
             status = CameraStatus(**asdict(self._status))
+        if status.preview_region is not None and status.rotation_degrees in SIDEWAYS_ROTATIONS:
+            status.preview_region = dict(PREVIEW_REGION_SIDEWAYS)
+        status.overlay_region = overlay_region(
+            status.preview_region,
+            status.rotation_degrees,
+            status.preview_flip_horizontal,
+            status.preview_flip_vertical,
+        )
         if status.focus is not None and time.monotonic() < self._scan_until:
             status.focus = {**status.focus, "state": FOCUS_SCANNING}
         return status
@@ -406,23 +560,22 @@ class FakeCamera:
         return self.status()
 
     def snapshot(self) -> bytes:
+        return self.snapshot_with_headers()[0]
+
+    def snapshot_with_headers(self) -> tuple[bytes, dict[str, str]]:
+        """The still and the response headers: the rotation that it was taken with, and the app start id."""
         self._require_ready()
         if self.config.capture_fails:
             raise ApiError(ErrorCode.CAPTURE_FAILED, "Still capture failed (fake)")
         with self._lock:
             degrees = self._status.rotation_degrees
+            app_start_id = self._status.app_start_id
         # Like CameraX: the still is the sensor image turned clockwise by (sensor orientation - rotation).
         turn = (SENSOR_ORIENTATION - degrees) % FULL_TURN
-        return with_exif_orientation(self.config.snapshot, DEGREES_TO_EXIF_ORIENTATION[turn])
-
-
-def with_exif_orientation(jpeg: bytes, orientation: int) -> bytes:
-    """Insert an EXIF APP1 segment with one orientation tag right after the SOI marker."""
-    ifd_entry = struct.pack(">HHIHH", EXIF_ORIENTATION_TAG, TIFF_SHORT, 1, orientation, 0)
-    tiff = TIFF_BIG_ENDIAN_HEADER + struct.pack(">IH", TIFF_FIRST_IFD_OFFSET, 1) + ifd_entry + struct.pack(">I", 0)
-    payload = EXIF_HEADER + tiff
-    segment = EXIF_APP1_MARKER + struct.pack(">H", len(payload) + JPEG_LENGTH_FIELD_BYTES) + payload
-    return jpeg[: len(JPEG_SOI)] + segment + jpeg[len(JPEG_SOI) :]
+        headers = {Header.ROTATION_DEGREES: str(degrees)}
+        if app_start_id:
+            headers[Header.APP_START_ID] = app_start_id
+        return turn_jpeg(self.config.snapshot, turn), headers
 
 
 # endregion: state
@@ -444,12 +597,17 @@ def is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def check_tag(item: dict[str, Any]) -> None:
+    """A box or an arrow can have a tag of 1 to 3 ASCII letters or digits."""
+    tag = item.get(TAG_FIELD)
+    if TAG_FIELD in item and not (isinstance(tag, str) and TAG_PATTERN.fullmatch(tag)):
+        raise ApiError(ErrorCode.BAD_REQUEST, f'"{TAG_FIELD}" must match {TAG_PATTERN.pattern}')
+
+
 def check_overlay_box(box: Any) -> None:
     if not isinstance(box, dict) or set(box) - {TAG_FIELD} != OVERLAY_BOX_FIELDS:
         raise ApiError(ErrorCode.BAD_REQUEST, f"Each box needs exactly {sorted(OVERLAY_BOX_FIELDS)} (and a tag)")
-    tag = box.get(TAG_FIELD)
-    if TAG_FIELD in box and not (isinstance(tag, str) and 1 <= len(tag) <= OVERLAY_MAX_TAG):
-        raise ApiError(ErrorCode.BAD_REQUEST, f'"{TAG_FIELD}" must be a string of 1 to {OVERLAY_MAX_TAG} characters')
+    check_tag(box)
     numbers = [box[name] for name in ("snapshot_x", "snapshot_y", "width", "height")]
     if not all(is_number(value) for value in numbers):
         raise ApiError(ErrorCode.BAD_REQUEST, "Box coordinates must be numbers")
@@ -463,8 +621,9 @@ def check_overlay_box(box: Any) -> None:
 
 
 def check_overlay_arrow(arrow: Any) -> None:
-    if not isinstance(arrow, dict) or set(arrow) != OVERLAY_ARROW_FIELDS:
-        raise ApiError(ErrorCode.BAD_REQUEST, f"Each arrow needs exactly {sorted(OVERLAY_ARROW_FIELDS)}")
+    if not isinstance(arrow, dict) or set(arrow) - {TAG_FIELD} != OVERLAY_ARROW_FIELDS:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"Each arrow needs exactly {sorted(OVERLAY_ARROW_FIELDS)} (and a tag)")
+    check_tag(arrow)
     if not is_number(arrow["angle_deg"]):
         raise ApiError(ErrorCode.BAD_REQUEST, '"angle_deg" must be a number')
     label = arrow["label"]
@@ -480,9 +639,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.quiet:
             super().log_message(format, *args)
 
-    def _send(self, status: HTTPStatus, content_type: ContentType, body: bytes) -> None:
+    def _send(
+        self, status: HTTPStatus, content_type: ContentType, body: bytes, headers: dict[str, str] | None = None
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -645,7 +808,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_status(self.camera.preview(data["flip_horizontal"], data["flip_vertical"]))
 
     def snapshot(self) -> None:
-        self._send(HTTPStatus.OK, ContentType.JPEG, self.camera.snapshot())
+        jpeg, headers = self.camera.snapshot_with_headers()
+        self._send(HTTPStatus.OK, ContentType.JPEG, jpeg, headers)
 
 
 def make_server(host: str, port: int, config: FakeConfig, quiet: bool = False) -> ThreadingHTTPServer:
@@ -665,6 +829,7 @@ def self_check() -> int:
     scenarios: list[tuple[str, FakeConfig, qa_contract.Expect, list[qa_contract.Check]]] = [
         ("default", FakeConfig(), qa_contract.Expect.READY, []),
         ("fixed zoom", FakeConfig(min_zoom=1.0, max_zoom=1.0), qa_contract.Expect.READY, []),
+        ("ultrawide", FakeConfig(min_zoom=ULTRAWIDE_MIN_ZOOM), qa_contract.Expect.READY, []),
         ("no flash", FakeConfig(has_flash_unit=False), qa_contract.Expect.READY, []),
         ("not ready", FakeConfig(ready=False), qa_contract.Expect.NOT_READY, []),
         (
@@ -711,7 +876,9 @@ def self_check() -> int:
             if label == "capture fails":
                 # The normal snapshot check must fail in this mode; the extra check covers it.
                 results = [
-                    r for r in results if r.name not in {"snapshot", "snapshot_keeps_torch", "snapshot_rotation"}
+                    r
+                    for r in results
+                    if r.name not in {"snapshot", "snapshot_keeps_torch", "snapshot_rotation", "preview_keeps_snapshot"}
                 ]
             all_passed &= qa_contract.print_results(results, label)
         finally:
@@ -799,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
         start_delay=args.start_delay,
         snapshot=Path(args.snapshot).read_bytes() if args.snapshot else TEST_JPEG,
     )
+    if args.snapshot and importlib.util.find_spec(PILLOW_MODULE) is None:
+        print("note: Pillow is missing, so the --snapshot file is not turned with the rotation", file=sys.stderr)
     server = make_server(args.host, args.port, config, args.quiet)
     print(
         f"fake phone on http://{args.host}:{server.server_address[1]}"

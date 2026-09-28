@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +11,24 @@ from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 
-from debug_devices_mcp.bench_state import BenchState, BenchStateStore, StepKind, gate
+from debug_devices_mcp.bench_state import (
+    SAFE_RESIDUAL_VOLTS,
+    USER_MODE_MAX_AGE,
+    BenchState,
+    BenchStateStore,
+    Measurement,
+    StepKind,
+    gate,
+    is_safe,
+    recent_user_mode,
+    residual_volts,
+)
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import REPO_ROOT
-from debug_devices_mcp.multimeter import MeterMode, MeterResult, MultimeterReading, check_reading
+from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, MultimeterReading, check_reading
 from debug_devices_mcp.server import Services, build_server
 
+from .test_meter_frames import DIODE_VOLTS, answers, confirm_mode
 from .test_multimeter import READING
 from .test_server import FakePhone, make_services, no_vision
 
@@ -306,6 +318,157 @@ async def test_every_phone_snapshot_goes_into_the_record(bench: Bench) -> None:
 
     assert measured.structured_content is not None
     assert state["state"]["photo_ids"] == [*ids, measured.structured_content["photo"]["capture_id"]]
+
+
+# endregion
+
+
+# region: QA round 4, the safety gate (B-E3, B-E4, B-E8)
+
+
+async def isolate(client: Client) -> None:
+    await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
+
+
+async def measure(client: Client, bench: Bench, result: MeterResult, label: str, **arguments: object) -> dict[str, Any]:
+    return await call(client, "bench_record_measurement", capture_id=bench.add_meter(result), label=label, **arguments)
+
+
+async def test_a_safe_reading_at_another_point_does_not_hide_an_unsafe_one(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await call(client, "bench_probe_short")
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12 positive side")
+        other = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        again = await measure(client, bench, meter("dc_voltage", "mV", 8.0, "8.0"), "  c12 POSITIVE  side")
+
+    assert other["gate"]["unpowered_tests_allowed"] is False
+    assert any("5.10 V at 'C12 positive side' is not safe" in item for item in other["gate"]["missing"])
+    assert other["state"]["power"]["residual"]["label"] == "C12 positive side"
+    assert other["next_step"]["kind"] == "power_check"
+    # A new reading at the same point (the same label, any case and spaces) replaces the unsafe one.
+    assert again["gate"]["unpowered_tests_allowed"] is True
+    assert again["next_step"] is None
+    assert [point["label"] for point in again["state"]["power"]["residual_points"]] == [
+        "VBUS",
+        "  c12 POSITIVE  side",
+    ]
+
+
+async def test_the_highest_unsafe_point_decides_and_a_new_confirmation_clears_the_points(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "A")
+        both = await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "B")
+        one = await measure(client, bench, meter("dc_voltage", "V", 0.0, "0.00"), "B")
+        await isolate(client)
+        cleared = await call(client, "bench_state")
+
+    assert both["state"]["power"]["residual"]["label"] == "B"
+    assert len([item for item in both["gate"]["missing"] if "not safe" in item]) == 2
+    assert one["state"]["power"]["residual"]["label"] == "A"
+    assert cleared["state"]["power"]["residual_points"] == []
+    assert any("no residual-voltage measurement" in item for item in cleared["gate"]["missing"])
+
+
+async def test_a_power_check_step_needs_a_safe_residual_after_the_confirmation(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_probe_short")
+        check_id = state["next_step"]["step_id"]
+        before = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS", step_id=check_id)
+        await isolate(client)
+        unsafe = await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "VBUS", step_id=check_id)
+        safe = await measure(client, bench, meter("dc_voltage", "V", 0.02, "0.02"), "VBUS", step_id=check_id)
+
+    assert before["next_step"]["step_id"] == check_id
+    assert before["notice"].startswith(f"step {check_id} stays open: a power check needs a voltage reading after")
+    assert unsafe["next_step"]["step_id"] == check_id
+    assert "5.10 V at 'VBUS' is not safe" in unsafe["notice"]
+    # The unsafe reading is in the record and blocks the gate.
+    assert unsafe["state"]["measurements"][-1]["display_text"] == "5.10"
+    assert unsafe["gate"]["unpowered_tests_allowed"] is False
+    assert safe["notice"] is None
+    assert safe["next_step"] is None
+    assert safe["state"]["steps"][0]["evidence_id"] == safe["state"]["measurements"][-1]["source_id"]
+
+
+@pytest.mark.parametrize(
+    ("unit", "value", "volts"),
+    [
+        ("\u00b5V", 450.0, 450e-6),  # MICRO SIGN
+        ("\u03bcV", 450.0, 450e-6),  # GREEK SMALL LETTER MU
+        ("uV", 450.0, 450e-6),
+        ("mV", 12.0, 0.012),
+        ("V", 0.3, 0.3),
+        ("kV", 0.4, 400.0),
+        ("MV", 0.4, 400_000.0),
+        ("\u2126", 0.4, None),  # not volts
+        ("xV", 0.4, None),  # unknown prefix
+    ],
+)
+def test_residual_volts_use_the_unit_prefix(unit: str, value: float, volts: float | None) -> None:
+    measurement = Measurement(
+        source_id="id",
+        measured_at=datetime.now(UTC),
+        label="VBUS",
+        mode=MeterMode.DC_VOLTAGE,
+        value=value,
+        unit=unit,
+        display_text=str(value),
+        overload=False,
+        confidence_state=MeterStatus.CONFIRMED,
+    )
+    assert residual_volts(measurement) == (pytest.approx(volts) if volts is not None else None)
+    assert is_safe(measurement) is (volts is not None and abs(volts) <= SAFE_RESIDUAL_VOLTS)
+
+
+async def test_450_microvolts_opens_the_gate_and_0_4_kilovolts_blocks_it(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        micro = await measure(client, bench, meter("dc_voltage", "\u00b5V", 450.0, "450.0"), "VBUS")
+        kilo = await measure(client, bench, meter("dc_voltage", "kV", 0.4, "0.400"), "VBUS")
+
+    assert micro["gate"]["unpowered_tests_allowed"] is True
+    assert kilo["gate"]["unpowered_tests_allowed"] is False
+
+
+# endregion
+
+
+# region: QA round 4, a measurement keeps the user's meter mode (B-F3)
+
+
+async def test_recording_a_measurement_keeps_the_users_meter_mode(settings: Settings) -> None:
+    services = make_services(settings, FakePhone(), answers(DIODE_VOLTS))
+    async with Client(build_server(services)) as client:
+        await confirm_mode(client, "dc_voltage")
+        first = await call(client, "multimeter_read")
+        recorded = await call(client, "bench_record_measurement", capture_id=first["capture_id"], label="VBUS")
+        second = await call(client, "multimeter_read")
+
+    assert first["status"] == "confirmed"
+    assert recorded["state"]["meter_mode"]["source"] == "user"
+    assert recorded["state"]["meter_mode"]["mode"] == "dc_voltage"
+    assert recent_user_mode(services.bench) is MeterMode.DC_VOLTAGE
+    # The next read still uses the user's mode.
+    assert second["mode_source"] == "user"
+    assert second["status"] == "confirmed"
+
+
+async def test_a_reading_replaces_an_expired_user_mode(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await call(client, "bench_state_update", meter_mode_confirmed_by_user="dc_voltage")
+        state = bench.services.bench.load()
+        assert state.meter_mode is not None
+        state.meter_mode.recorded_at -= USER_MODE_MAX_AGE + timedelta(minutes=1)
+        bench.services.bench.save(state)
+        ohms = bench.add_meter(meter("resistance", "k\u03a9", 443.0, "443.0"))
+        recorded = await call(client, "bench_record_measurement", capture_id=ohms, label="R12")
+
+    assert (recorded["state"]["meter_mode"]["mode"], recorded["state"]["meter_mode"]["source"]) == (
+        "resistance",
+        "reading",
+    )
 
 
 # endregion

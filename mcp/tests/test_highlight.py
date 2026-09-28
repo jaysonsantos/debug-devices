@@ -234,6 +234,8 @@ async def test_own_commands_ask_for_a_new_reference(settings: Settings) -> None:
         await client.call_tool("phone_snapshot", {})
         services.scene.reference_wanted = False
         generation = services.scene.generation
+        # With a running scene watcher (without one, a zoom makes the photos stale: test_evidence_round4.py).
+        services.scene.watcher_alive()
         await client.call_tool("phone_zoom", {"step": "in"})
     assert services.scene.reference_wanted
     assert services.scene.generation > generation

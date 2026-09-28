@@ -11,7 +11,7 @@ from mcp import Client
 from mcp.types import ImageContent
 
 from debug_devices_mcp.config import Settings
-from debug_devices_mcp.meter_frames import MeterLimits, combine, signature
+from debug_devices_mcp.meter_frames import DIODE_REQUEST, MeterLimits, combine, signature
 from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, MultimeterReading, check_reading
 from debug_devices_mcp.server import Services, build_server
 
@@ -185,6 +185,113 @@ def test_user_mode_in_the_single_frame_check() -> None:
     assert checked.mode is MeterMode.DC_VOLTAGE
     assert checked.model_mode is MeterMode.DIODE
     assert checked.status is MeterStatus.CONFIRMED
+
+
+# endregion
+
+
+# region: QA round 4, the frames must agree on the unit, the mode, and the sign (B-E1, B-E2)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "name"),
+    [
+        (frame("4.98", 4.98, "V"), frame("4.98", 4.98, "mV"), "unit"),
+        (frame("5.10", 5.10, mode="dc_voltage"), frame("5.10", 5.10, mode="ac_voltage"), "mode"),
+        (frame("-0.12", -0.12), frame("0.12", 0.12), "sign"),
+    ],
+)
+def test_frames_that_disagree_are_disputed(first: MeterResult, second: MeterResult, name: str) -> None:
+    result = combine([first, second], LIMITS)
+    assert result.status is MeterStatus.DISPUTED
+    assert result.value is None
+    assert result.stable is False
+    assert any(problem.startswith(f"the {name} changed between the frames") for problem in result.problems)
+    assert result.request is not None
+    assert "Read the meter again" in result.request
+
+
+def test_the_unit_problem_names_both_units() -> None:
+    result = combine([frame("4.98", 4.98, "V"), frame("4.98", 4.98, "mV")], LIMITS)
+    assert "the unit changed between the frames (V, mV): one of the frames is a misread" in result.problems
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (frame("-0.00", 0.0), frame("0.00", 0.0)),  # a meter can show both at zero
+        (frame("\u22120.12", -0.12), frame("-0.12", -0.12)),  # MINUS SIGN and hyphen-minus
+        (frame("450.0", 450.0, "\u00b5V"), frame("450.0", 450.0, "uV")),  # MICRO SIGN and u
+    ],
+)
+def test_the_same_reading_in_other_characters_agrees(first: MeterResult, second: MeterResult) -> None:
+    result = combine([first, second], LIMITS)
+    assert result.status is MeterStatus.CONFIRMED
+    assert result.stable is True
+
+
+def test_an_unreadable_unit_is_not_another_unit() -> None:
+    result = combine([frame("5.10", 5.10), frame("5.10", 5.10, unit="unknown")], LIMITS)
+    assert result.status is MeterStatus.UNCERTAIN
+    assert not any("the unit changed" in problem for problem in result.problems)
+
+
+async def test_the_tool_disputes_volts_and_millivolts(settings: Settings) -> None:
+    volts = {**READING, "display_text": "4.98", "value": 4.98, "unit": "V"}
+    millivolts = {**volts, "unit": "mV"}
+    services = services_with(settings, answers(volts, millivolts))
+    async with Client(build_server(services)) as client:
+        result = await client.call_tool("multimeter_read", {})
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "disputed"
+    assert result.structured_content["value"] is None
+
+
+# endregion
+
+
+# region: a diode reading above the diode test voltage (the dial is probably on DC V)
+
+DIODE_NOTE = "5.10 V in diode mode is above the diode test voltage of 3 V: the dial is probably on DC V"
+
+
+def test_diode_reading_above_the_test_voltage_is_uncertain() -> None:
+    result = combine([frame("5.10", 5.10, mode="diode"), frame("5.10", 5.10, mode="diode")], LIMITS)
+    assert result.status is MeterStatus.UNCERTAIN
+    assert result.value is None
+    assert result.problems.count(DIODE_NOTE) == 1
+    assert result.request == DIODE_REQUEST
+
+
+@pytest.mark.parametrize(
+    ("display_text", "value", "unit"),
+    [("0.512", 0.512, "V"), ("512", 512.0, "mV"), ("O.L", None, "V"), ("2.950", 2.95, "V")],
+)
+def test_real_diode_readings_stay_confirmed(display_text: str, value: float | None, unit: str) -> None:
+    diode = frame(display_text, value, unit, mode="diode")
+    assert combine([diode, diode.model_copy()], LIMITS).status is MeterStatus.CONFIRMED
+
+
+def test_the_diode_test_voltage_is_a_setting() -> None:
+    higher = LIMITS.model_copy(update={"max_diode_volts": 6.0})
+    assert combine([frame("5.10", 5.10, mode="diode")] * 2, higher).status is MeterStatus.CONFIRMED
+    assert Settings.from_cli(["--max-diode-voltage", "2.5"]).max_diode_voltage == 2.5
+
+
+async def test_the_tool_flags_diode_volts_unless_the_user_confirmed_dc_volts(settings: Settings) -> None:
+    services = services_with(settings, answers(DIODE_VOLTS))
+    async with Client(build_server(services)) as client:
+        alone = await client.call_tool("multimeter_read", {})
+        await confirm_mode(client, "dc_voltage")
+        confirmed = await client.call_tool("multimeter_read", {})
+
+    assert alone.structured_content is not None
+    assert alone.structured_content["status"] == "uncertain"
+    assert DIODE_NOTE in alone.structured_content["problems"]
+    assert confirmed.structured_content is not None
+    assert confirmed.structured_content["status"] == "confirmed"
+    assert confirmed.structured_content["mode"] == "dc_voltage"
 
 
 # endregion

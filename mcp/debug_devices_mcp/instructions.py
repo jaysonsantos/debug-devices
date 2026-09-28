@@ -83,12 +83,14 @@ EVIDENCE_RULES = "\n".join(
         "fresh phone_snapshot. When a measurement needs the photo of the probe contact, use bench_measure: it reads "
         "the meter and takes the phone_snapshot at the same moment, so the value and the photo belong together.",
         "9. Part identity: a part name is visible_marking, candidate, or confirmed (board_identify, board_identity). "
-        "Say which. Only confirmed (a current photo, a checked registration, and a visible marking or a unique "
-        "landmark) is a physical fact; boardview positions and look-alike parts stay candidates.",
+        "Say which. Only confirmed (a current photo, a checked registration of that photo, and a visual input: a "
+        "visible marking read in that photo, or a unique landmark that the user confirmed) is a physical fact; "
+        "boardview positions, a landmark without a visual input, and look-alike parts stay candidates.",
         "10. Bench state: keep the local record current (bench_state, bench_state_update, bench_record_measurement). "
         "Only a confirmed meter result enters it. Before every resistance, continuity, or diode step, call "
-        "bench_begin_step: it needs the power isolated, the user's confirmation, and a safe residual voltage. After a "
-        "probe short, call bench_probe_short and go back to the power check.",
+        "bench_begin_step: it needs the power isolated, the user's confirmation, and a safe residual voltage at every "
+        "measured point (to measure a point again, use the same label). After a probe short, call bench_probe_short "
+        "and go back to the power check.",
     )
 )
 

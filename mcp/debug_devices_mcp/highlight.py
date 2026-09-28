@@ -40,7 +40,7 @@ class PixelBox(BaseModel):
     height: Annotated[float, Field(gt=0)]
     label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
     # A short tag (1-3 characters) at the box; without it, the next free letter (A, B, ...).
-    tag: Annotated[str, Field(min_length=1, max_length=phone.OVERLAY_MAX_TAG)] | None = None
+    tag: Annotated[str, Field(pattern=phone.OVERLAY_TAG_PATTERN)] | None = None
 
 
 class LayoutSummary(BaseModel):
@@ -81,7 +81,8 @@ class HighlightResult(BaseModel):
 
 
 class InPreview(StrEnum):
-    """Is a box on the phone screen? The preview can show only a part of the still (preview_region)."""
+    """Is a box on the phone screen? The app draws boxes only in a part of the still: `overlay_region` (the preview
+    without the system bars and the status label), else `preview_region` for an older app."""
 
     FULLY = "fully"
     PARTLY = "partly"

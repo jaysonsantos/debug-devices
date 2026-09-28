@@ -14,7 +14,15 @@ from pydantic import BaseModel, Field
 from debug_devices_mcp.adb import Adb, AdbError
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import adb
-from debug_devices_mcp.devices import DeviceList, PhoneSelection, Transport, list_devices, transport_of
+from debug_devices_mcp.devices import (
+    DeviceList,
+    PhoneSelection,
+    SelectionNotSavedError,
+    Transport,
+    list_devices,
+    transport_of,
+)
+from debug_devices_mcp.discovery import PhoneDiscovery
 from debug_devices_mcp.ui.constants import tools
 from debug_devices_mcp.ui.events import CallSource, CallStatus
 
@@ -26,6 +34,7 @@ TCPIP_SETTLE = timedelta(seconds=2)
 CONNECT_ATTEMPTS = 3
 CONNECT_RETRY = timedelta(seconds=1)
 PAIRING_CODE_PATTERN = r"^\d{6}$"
+FORWARD_NOT_REMOVED = "the adb forward of the old phone was not removed"
 ADDRESS_PATTERN = r"^[\w.\-]+:\d{1,5}$"
 
 
@@ -33,6 +42,7 @@ class DeviceAccess(Protocol):
     adb: Adb
     selection: PhoneSelection
     settings: Settings
+    discovery: PhoneDiscovery
 
 
 class Step(BaseModel):
@@ -71,7 +81,8 @@ class DevicePanel:
         self._lock = asyncio.Lock()
 
     async def devices(self) -> DeviceList:
-        return await list_devices(self._access.adb, self._access.selection, self._access.settings.adb_serial)
+        access = self._access
+        return await list_devices(access.adb, access.selection, access.settings.adb_serial, access.discovery)
 
     async def _action(self, name: str, arguments: dict, work) -> DeviceAction:
         """Run one page action as one log row. A failed step ends it; the steps so far are in the result."""
@@ -82,7 +93,7 @@ class DevicePanel:
             except StepFailed:
                 call.status = CallStatus.ERROR
                 call.error = steps[-1].detail if steps else name
-            call.summary = " · ".join(f"{step.step}: {'ok' if step.ok else step.detail}" for step in steps)
+            call.summary = " · ".join(f"{step.step}: {step.detail or 'ok'}" for step in steps)
         return DeviceAction(steps=steps, devices=await self.devices())
 
     @staticmethod
@@ -95,17 +106,34 @@ class DevicePanel:
         steps.append(Step(step=name, ok=True, detail=str(detail or "")))
         return str(detail or "")
 
+    async def _stop_old_phone(self, steps: list[Step]) -> None:
+        """Never blocks: an old phone that is gone, or a forward that adb cannot remove, is a note in the step."""
+        try:
+            note = await self._monitor.stop_phone()
+        except AdbError as exc:
+            note = f"{FORWARD_NOT_REMOVED}: {exc}"
+        steps.append(Step(step="stop the old phone", ok=True, detail=note))
+
+    def _save_selection(self, steps: list[Step], name: str, serial: str | None, detail: str) -> None:
+        """A failed save is a failed step (B-W8 of QA round 4): the choice did not change."""
+        try:
+            self._access.selection.set(serial)
+        except SelectionNotSavedError as exc:
+            steps.append(Step(step=name, ok=False, detail=str(exc)))
+            raise StepFailed from exc
+        steps.append(Step(step=name, ok=True, detail=detail))
+
     async def _use(self, steps: list[Step], serial: str, connect: bool) -> None:
-        """Stop the old phone (screen stream, adb forward), store the choice, then phone_connect on the new one."""
+        """Store the choice, stop the old phone (screen stream, adb forward), then phone_connect on the new one. A
+        choice that cannot be saved stops here, before the old phone stops."""
         listed = {device.serial: device for device in await self._access.adb.devices()}
         device = listed.get(serial)
         if device is None or device.state != adb.STATE_DEVICE:
             state = device.state if device is not None else "not connected"
             steps.append(Step(step="select", ok=False, detail=f"{serial} is {state}"))
             raise StepFailed
-        await self._step(steps, "stop the old phone", self._monitor.stop_phone())
-        self._access.selection.set(serial)
-        steps.append(Step(step="select", ok=True, detail=serial))
+        self._save_selection(steps, "select", serial, serial)
+        await self._stop_old_phone(steps)
         if connect:
             await self._step(steps, "phone_connect", self._connect())
 
@@ -119,14 +147,21 @@ class DevicePanel:
     async def select(self, serial: str) -> DeviceAction:
         return await self._action(tools.ADB_SELECT, {"serial": serial}, lambda steps: self._use(steps, serial, True))
 
-    async def clear(self) -> DeviceAction:
-        async def work(steps: list[Step]) -> None:
-            await self._step(steps, "stop the old phone", self._monitor.stop_phone())
-            self._access.selection.set(None)
-            config = self._access.settings.adb_serial or "none (the only device)"
-            steps.append(Step(step="clear", ok=True, detail=f"back to the config: {config}"))
+    async def disconnect(self) -> DeviceAction:
+        """Always works: stop the phone (screen stream, status poll, adb forward) and clear the selection (back to
+        the config, or none), also when the device is gone. No command goes to the device except the forward
+        removal; the phone stays paired and connected in adb."""
 
-        return await self._action(tools.ADB_CLEAR, {}, work)
+        async def work(steps: list[Step]) -> None:
+            await self._stop_old_phone(steps)
+            config = self._access.settings.adb_serial or "none (select a phone)"
+            self._save_selection(steps, "clear the selection", None, f"back to the config: {config}")
+
+        return await self._action(tools.ADB_DISCONNECT, {}, work)
+
+    async def clear(self) -> DeviceAction:
+        """The old "Clear selection" route (a page from before Disconnect): the same action."""
+        return await self.disconnect()
 
     async def switch_to_wifi(self, serial: str) -> DeviceAction:
         """A USB phone: select it, read its Wi-Fi address, `adb tcpip`, `adb connect`, then use the Wi-Fi serial."""

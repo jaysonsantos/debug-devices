@@ -77,7 +77,7 @@ async def post_overlay(request: Request) -> Response:
         data = IngestOverlay.model_validate_json(await request.body())
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
-    monitor_of(request).remote_overlay(data.origin, data.boxes, data.arrows)
+    monitor_of(request).remote_overlay(data.origin, data.boxes, data.arrows, data.seq)
     return Response(status_code=NO_CONTENT)
 
 
@@ -93,7 +93,9 @@ async def post_screen_start(request: Request) -> Response:
 
 
 async def get_frame(request: Request) -> Response:
-    """The newest phone screen frame (JPEG), or 204 when there is none newer than `after`."""
+    """The newest phone screen frame (JPEG), or 204 when it is frame `after`. An `after` above the newest number
+    comes from before a restart of this server (its counter starts at 0 again): the newest frame goes back
+    (B-F6 of QA round 4)."""
     if not token_ok(request):
         return error_response("a valid ingest token is required", FORBIDDEN)
     try:
@@ -101,7 +103,7 @@ async def get_frame(request: Request) -> Response:
     except ValueError:
         return error_response(f"{ingest.AFTER_PARAM} must be a number", BAD_REQUEST)
     frame = monitor_of(request).scene_frame()
-    if frame is None or frame[0] <= after:
+    if frame is None or frame[0] == after:
         return Response(status_code=NO_CONTENT)
     seq, jpeg = frame
     return Response(jpeg, media_type=http.JPEG_MEDIA_TYPE, headers={ingest.FRAME_SEQ_HEADER: str(seq)})

@@ -26,6 +26,16 @@ class Health(BaseModel):
 
 # Snapshot rotation in degrees, as the contract allows it.
 type RotationDegrees = Literal[0, 90, 180, 270]
+ROTATIONS = frozenset({"0", "90", "180", "270"})
+
+
+class Still(BaseModel):
+    """A `/v1/snapshot` answer: the JPEG, and the rotation and the app run that the app used for it (its response
+    headers). Clients use these for the still, not a status read before it: the phone can turn in between (C12)."""
+
+    jpeg: bytes
+    rotation_degrees: int | None = None
+    app_start_id: str | None = None
 
 
 class FocusState(StrEnum):
@@ -136,6 +146,13 @@ class CameraStatus(BaseModel):
     preview_region: PreviewRegion | None = None
     # False while the boxes and arrows are hidden on the phone (not removed). None: an app from before it.
     overlay_visible: bool | None = None
+    # The part of the still where the app draws boxes: preview_region without the system bars, cutouts, and the
+    # status label. It changes with the preview flips and the rotation. None: not known, or an app from before it.
+    overlay_region: PreviewRegion | None = None
+
+    def visible_region(self) -> PreviewRegion | None:
+        """Where a box shows on the phone: `overlay_region`, else `preview_region` (an app from before it)."""
+        return self.overlay_region or self.preview_region
 
 
 class ApiErrorCode(StrEnum):
@@ -211,7 +228,7 @@ class OverlayBox(BaseModel):
     height: Annotated[float, Field(gt=0, le=1)]
     label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
     # The short tag at the box (docs/overlay-layout.md); the label goes into the legend. None: the app picks one.
-    tag: Annotated[str, Field(min_length=1, max_length=phone.OVERLAY_MAX_TAG)] | None = None
+    tag: Annotated[str, Field(pattern=phone.OVERLAY_TAG_PATTERN)] | None = None
 
     @model_validator(mode="after")
     def _inside(self) -> OverlayBox:
@@ -228,6 +245,8 @@ class OverlayArrow(BaseModel):
 
     angle_deg: float
     label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
+    # The same rule as a box tag (C3 of QA round 4).
+    tag: Annotated[str, Field(pattern=phone.OVERLAY_TAG_PATTERN)] | None = None
 
 
 class OverlayRequest(BaseModel):
@@ -402,12 +421,24 @@ class PhoneClient:
             raise
         return _parse(CameraStatus, phone.PATH_OVERLAY, body)
 
-    async def snapshot(self) -> bytes:
-        return await self._request(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)
+    async def snapshot(self) -> Still:
+        """One still with the rotation and the app run of its response headers (None: an app without them)."""
+        response = await self._response(HTTPMethod.GET, phone.PATH_SNAPSHOT, timeout=self._snapshot_timeout)
+        rotation = response.headers.get(phone.ROTATION_HEADER, "")
+        return Still(
+            jpeg=response.content,
+            rotation_degrees=int(rotation) if rotation in ROTATIONS else None,
+            app_start_id=response.headers.get(phone.APP_START_HEADER) or None,
+        )
 
     async def _request(
         self, method: HTTPMethod, path: str, body: BaseModel | None = None, timeout: timedelta | None = None
     ) -> bytes:
+        return (await self._response(method, path, body, timeout)).content
+
+    async def _response(
+        self, method: HTTPMethod, path: str, body: BaseModel | None = None, timeout: timedelta | None = None
+    ) -> httpx.Response:
         content = body.model_dump_json(exclude_none=True).encode() if body is not None else None
         headers = {CONTENT_TYPE_HEADER: JSON_CONTENT_TYPE} if body is not None else None
         extra = {"timeout": timeout.total_seconds()} if timeout is not None else {}
@@ -424,7 +455,7 @@ class PhoneClient:
                     f"phone API returned {response.status_code} without an ApiError body: {preview!r}"
                 ) from exc
             raise PhoneApiError(response.status_code, error)
-        return response.content
+        return response
 
 
 def _parse[T: BaseModel](model: type[T], path: str, body: bytes) -> T:

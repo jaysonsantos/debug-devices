@@ -61,6 +61,7 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
         env.BENCH_STATE_FILE,
         env.MAX_VOLTAGE,
         env.MAX_CURRENT,
+        env.MAX_DIODE_VOLTAGE,
         env.METER_FRAME_INTERVAL,
         env.METER_COUNTS,
     ):

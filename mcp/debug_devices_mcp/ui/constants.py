@@ -193,6 +193,7 @@ class tools:
     PHONE_ZOOM = "phone_zoom"
     PHONE_TORCH = "phone_torch"
     PHONE_SNAPSHOT = "phone_snapshot"
+    BENCH_MEASURE = "bench_measure"
     PHONE_ROTATION = "phone_rotation"
     PHONE_SNAPSHOT_ORIENTATION = "phone_snapshot_orientation"
     PHONE_IN_SENSOR_ZOOM = "phone_in_sensor_zoom"
@@ -212,6 +213,7 @@ class tools:
     # Not MCP tools: the log entries of the Devices actions of the page (only the user selects the phone).
     ADB_SELECT = "adb_select"
     ADB_CLEAR = "adb_clear"
+    ADB_DISCONNECT = "adb_disconnect"
     ADB_WIFI = "adb_switch_to_wifi"
     ADB_PAIR = "adb_pair"
     ADB_CONNECT = "adb_connect"

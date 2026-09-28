@@ -35,6 +35,7 @@ from debug_devices_mcp.board.identity import (
     IdentityReport,
     IdentityState,
     PhotoChecker,
+    VisualInput,
     identify,
 )
 from debug_devices_mcp.board.loader import BoardLoadError, BoardviewLoader, LoaderOptions
@@ -53,6 +54,7 @@ from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, SideLabel
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
 from debug_devices_mcp.board.session_store import BoardSessionRecord, BoardSessionStore
 from debug_devices_mcp.constants import phone
+from debug_devices_mcp.evidence import photo_scale
 from debug_devices_mcp.highlight import PixelBox
 from debug_devices_mcp.pointer import PointResult
 from debug_devices_mcp.process import CommandRunner
@@ -192,7 +194,8 @@ class Registration(BaseModel):
     checked: bool
     # True after the board or the phone moved (scene change): the photo positions are for the old scene.
     stale: bool = False
-    # Why it is stale when not a move (for example an app restart); None: the move message.
+    # Why it is stale when not a move (for example an app restart); None: the move message. Set both with mark_stale:
+    # a new reason replaces an old one.
     stale_reason: str | None = None
     # Live tracking of this registration in the phone screen stream (on, or why not).
     tracking: str | None = None
@@ -202,6 +205,11 @@ class Registration(BaseModel):
     # the registration it came from, and the quality of the match.
     carried_from: str | None = None
     carry_quality: CarryQuality | None = None
+
+    def mark_stale(self, reason: str | None = None) -> None:
+        """Stale for this reason (a message with `{id}`; None: the move message). It replaces an older reason."""
+        self.stale = True
+        self.stale_reason = reason
 
 
 class LocatedPart(BaseModel):
@@ -258,6 +266,16 @@ STALE_REGISTRATION = (
     "registration {id!r} is from before the board or the phone moved: take a fresh phone_snapshot and call "
     "board_register_photo again"
 )
+RESTORED_STALE_REASON = (
+    "registration {id!r} was restored after a server restart, so its scene cannot be checked: take a fresh "
+    "phone_snapshot and call board_register_photo again"
+)
+
+
+def scene_stale_reason(scene_reason: str) -> str:
+    """A registration message (with `{id}`) from a scene change reason (scene.py)."""
+    escaped = scene_reason.replace("{", "{{").replace("}", "}}")
+    return f"registration {{id!r}}: {escaped}, then call board_register_photo again"
 
 
 class BoardSession:
@@ -296,8 +314,7 @@ class BoardSession:
     def mark_registrations_stale(self, reason: str | None = None) -> None:
         """`reason`: a message with `{id}` for the tools that refuse the registration (None: the move message)."""
         for registration in self.registrations.values():
-            registration.stale = True
-            registration.stale_reason = reason
+            registration.mark_stale(reason)
 
     def open_board(self, board: Board, path: str, side_labels: SideLabels) -> None:
         """board_open: the user's side label choice, then the board."""
@@ -360,7 +377,7 @@ class BoardSession:
             except ValidationError:
                 continue
             # A new process cannot check the scene of an old photo: register a fresh phone_snapshot.
-            registration.stale = True
+            registration.mark_stale(RESTORED_STALE_REASON)
             self.registrations[registration.registration_id] = registration
         self.last_registration_id = record.last_registration_id
         self.restore_note = (
@@ -734,6 +751,26 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
         return CallToolResult(content=content, structured_content=legend.model_dump(mode="json"))
 
 
+def photo_to_registered(session: BoardSession, registration: Registration, photo_id: str | None) -> tuple[float, float]:
+    """Scale factors from pixels of a phone_snapshot (`photo_id`; None: the latest) to pixels of the registered photo.
+
+    Refuses a photo of another scene or camera view than the registered photo (register that photo), and a photo
+    of another shape. Another size of the same view is the same photo scaled: the factors scale it (from the image
+    sizes that the agent got for both photos).
+    """
+    if session.photos is None or registration.photo_id is None:
+        # A registration of a photo that is not a phone_snapshot of this session: the old scene and view check.
+        session.check_scene(registration.registration_id)
+        return 1.0, 1.0
+    problem = session.photos.reuse_problem(registration.photo_id, photo_id)
+    if problem is not None:
+        raise ToolError(f"registration {registration.registration_id}: {problem}")
+    registered_size = session.photos.photo_size(registration.photo_id)
+    if registered_size is None:
+        return 1.0, 1.0
+    return photo_scale(session.photos.photo_size(photo_id), registered_size)
+
+
 def match_marking(
     session: BoardSession,
     marking: str,
@@ -741,6 +778,7 @@ def match_marking(
     registration_id: str | None,
     point: tuple[float, float] | None,
     try_rotations: bool = True,
+    photo_id: str | None = None,
 ) -> MarkingMatch:
     board = session.current()
     lookup = lookup_marking(board, marking, side, try_rotations)
@@ -749,8 +787,11 @@ def match_marking(
     ranked = registration_id is not None and point is not None and bool(candidates)
     if ranked:
         registration = session.registration(registration_id)
+        # The positions and distances are in pixels of the agent's photo (the registered photo can have another size).
+        scale_x, scale_y = photo_to_registered(session, registration, photo_id)
         pixels = map_points(registration.fit.matrix, [(item.center.x, item.center.y) for item in candidates])
-        for item, (x, y) in zip(candidates, pixels, strict=True):
+        for item, (registered_x, registered_y) in zip(candidates, pixels, strict=True):
+            x, y = registered_x / scale_x, registered_y / scale_y
             item.photo_position = PixelPosition(x_px=round(x, 1), y_px=round(y, 1))
             item.distance_px = math.hypot(x - point[0], y - point[1])
         candidates.sort(key=lambda item: item.distance_px or 0.0)
@@ -782,6 +823,7 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         x_px: float | None = None,
         y_px: float | None = None,
         try_rotations: bool = True,
+        photo_id: str | None = None,
     ) -> MarkingMatch:
         """Match a marking that you see on the board (silkscreen, from phone_snapshot) to boardview parts.
 
@@ -789,8 +831,10 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         candidates: a start of a name ("U730" for U7301, U7302: cut-off or hidden silkscreen), a part of a name, or
         a match with O/0, I/1, S/5, B/8, Z/2, G/6 read wrong. Tell the user which one it is, and never replace the
         visible marking with a boardview name without saying so. With `registration_id` (board_register_photo) and
-        `x_px`/`y_px` of the marking in that photo, the candidates are sorted by distance, and `best_candidate` is
-        set only when one is clearly nearest. With `try_rotations` (default), the marking is also read upside down
+        `x_px`/`y_px` of the marking, the candidates are sorted by distance, and `best_candidate` is set only when
+        one is clearly nearest. The pixels are of `photo_id` (default: your last phone_snapshot): the registered
+        photo, or a phone_snapshot of the same scene and camera view (another size is scaled). With `try_rotations`
+        (default), the marking is also read upside down
         ("00T" in a turned photo is "100"); `reading` says which reading matched, and `rotated_reading` gives the
         upright text. `value_interpretations` reads the marking as an SMD value code ("100" = 10 Ω, "4R7" = 4.7 Ω):
         an interpretation only, never a part name.
@@ -800,7 +844,7 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         point = (x_px, y_px) if x_px is not None and y_px is not None else None
         if point is not None and registration_id is None:
             raise ToolError("`x_px`/`y_px` need a `registration_id` from board_register_photo")
-        return match_marking(session, marking, side, registration_id, point, try_rotations)
+        return match_marking(session, marking, side, registration_id, point, try_rotations, photo_id)
 
     @tool
     async def board_register_photo(
@@ -838,8 +882,9 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         With `photo_path` (for example a phone_snapshot save_path, any size of the same photo), the result also
         has the photo with circles on the parts and pins. Pins on the other side are left out.
         `highlight: true` also points to the parts on the phone screen and the monitor page (phone_point_to): a green
-        box in view, an arrow outside it (the registered photo must be your last phone_snapshot). The boxes are
-        boardview estimates: say so, and clear them (phone_highlight clear) when done.
+        box in view, an arrow outside it. Your last phone_snapshot must show the scene of the registered photo with
+        the same camera view (zoom, lens, turn, flips; another size is fine), unless the live tracking follows the
+        registration. The boxes are boardview estimates: say so, and clear them (phone_highlight clear) when done.
         """
         session.check_scene(registration_id)
         registration = session.registration(registration_id)
@@ -892,8 +937,12 @@ class PartAtPhoto(BaseModel):
 
 class PartsAtPhoto(BaseModel):
     registration_id: str
+    # The point as given, in pixels of `photo_id` (null: the last phone_snapshot).
     x_px: float
     y_px: float
+    photo_id: str | None = None
+    # Factor from those pixels to the pixels of the registered photo (1 for the same size).
+    scale: float = 1.0
     board_point: Point
     radius_mm: Mm
     side: Side
@@ -949,6 +998,24 @@ def parts_at_photo(
     )
 
 
+def registration_for_photo(
+    session: BoardSession, registration_id: str, photo_id: str
+) -> tuple[Registration, str | None]:
+    """The registration for a claim about `photo_id`: this one, or the one that was carried over from it to that
+    photo (after the board or the phone moved). Returns it and a note when it is a carried one."""
+    registration = session.registrations.get(registration_id)
+    current_id = registration_id
+    # Follow the carry-overs (a stale registration, carried to a newer photo, possibly more than once).
+    while registration is not None and registration.stale:
+        carried = next((item for item in session.registrations.values() if item.carried_from == current_id), None)
+        if carried is None:
+            break
+        registration, current_id = carried, carried.registration_id
+    if current_id != registration_id and registration is not None and registration.photo_id == photo_id:
+        return session.registration(current_id), f"registration {registration_id} carried over as {current_id}"
+    return session.registration(registration_id), None
+
+
 def register_identity_tools(server: MCPServer, session: BoardSession) -> None:
     tool = board_tool(server, session)
 
@@ -958,19 +1025,20 @@ def register_identity_tools(server: MCPServer, session: BoardSession) -> None:
         x_px: float,
         y_px: float,
         radius_px: Annotated[float, Field(gt=0)] = DEFAULT_RADIUS_PX,
+        photo_id: str | None = None,
     ) -> PartsAtPhoto:
         """Which boardview parts are at a pixel of the photo: the inverse of board_locate_in_photo.
 
-        `x_px`/`y_px` are in the registered photo, or in a newer phone_snapshot of the same scene with the same zoom,
-        lens, and orientation (otherwise it is refused: register the new photo). Returns the parts of the registered
-        side within `radius_px` of that point, nearest first, with their distance in mm. This is supporting evidence
+        `x_px`/`y_px` (and `radius_px`) are in pixels of `photo_id` (default: your last phone_snapshot): the
+        registered photo, or a phone_snapshot of the same scene with the same zoom, lens, and orientation (another
+        size is scaled; another view is refused: register that photo). Returns the parts of the registered side
+        within `radius_px` of that point, nearest first, with their distance in mm. This is supporting evidence
         (identity: candidate), never a visual fact: board_identify confirms a part.
         """
-        session.check_scene(registration_id)
         registration = session.registration(registration_id)
-        if session.snapshot_guard is not None:
-            session.snapshot_guard(registration_id)
-        return parts_at_photo(session.current(), registration, x_px, y_px, radius_px)
+        scale_x, scale_y = photo_to_registered(session, registration, photo_id)
+        found = parts_at_photo(session.current(), registration, x_px * scale_x, y_px * scale_y, radius_px * scale_x)
+        return found.model_copy(update={"x_px": x_px, "y_px": y_px, "photo_id": photo_id, "scale": scale_x})
 
     @tool
     async def board_identify(
@@ -979,15 +1047,20 @@ def register_identity_tools(server: MCPServer, session: BoardSession) -> None:
         registration_id: str | None = None,
         x_px: float | None = None,
         y_px: float | None = None,
+        user_confirmed: bool = False,
     ) -> IdentityClaim:
         """Decide which boardview part a place in a current phone_snapshot is: visible_marking, candidate, or confirmed.
 
         `photo_id` is the capture_id of a current phone_snapshot (a stale one is refused). `marking` is the text that
         the photo shows at that place, quoted exactly (null when there is none). `registration_id` (board_register_photo
-        on this photo, 5+ pairs) and `x_px`/`y_px` give the position. Confirmed needs all three: a current photo, a
-        valid checked registration, and a visible marking (or a unique landmark with no look-alike part near).
-        Look-alike parts (for example similar coils) stay candidates: ask for a closer photo. A part on the other
-        board side cannot be confirmed. Never call a candidate a visual fact.
+        on this photo, 5+ pairs) and `x_px`/`y_px` (pixels of `photo_id`) give the position. The registration must be
+        of this photo, or of a photo with the same scene and camera view (another size is scaled); a registration
+        that was carried over to this photo is used for its old id. Confirmed needs a current photo, a valid checked
+        registration, and a visual input: a visible marking read in this photo, or a unique landmark (one part at the
+        point, no look-alike near) that the user confirmed (`user_confirmed: true`, only after the user said so).
+        Without a visual input, a landmark stays a candidate. Look-alike parts (for example similar coils) stay
+        candidates: ask for a closer photo. A part on the other board side cannot be confirmed. Never call a
+        candidate a visual fact.
         """
         if (x_px is None) != (y_px is None):
             raise ToolError("give both `x_px` and `y_px`, or neither")
@@ -995,15 +1068,20 @@ def register_identity_tools(server: MCPServer, session: BoardSession) -> None:
             session.photos.require_current_photo(photo_id)
         point = (x_px, y_px) if x_px is not None and y_px is not None else None
         registration = None
+        carried_note = None
         if registration_id is not None:
-            session.check_scene(registration_id)
-            registration = session.registration(registration_id)
-            if session.snapshot_guard is not None:
-                session.snapshot_guard(registration_id)
             if point is None:
                 raise ToolError("a `registration_id` needs `x_px` and `y_px` of the part in that photo")
-        claim = identify(session.current(), photo_id, registration, point, marking)
-        return session.identities.add(claim)
+            registration, carried_note = registration_for_photo(session, registration_id, photo_id)
+            scale_x, scale_y = photo_to_registered(session, registration, photo_id)
+            point = (point[0] * scale_x, point[1] * scale_y)
+        seen = VisualInput(marking=marking, user_confirmed=user_confirmed)
+        claim = identify(session.current(), photo_id, registration, point, seen)
+        # The claim keeps the point as given (pixels of `photo_id`).
+        update: dict[str, object] = {"x_px": x_px, "y_px": y_px}
+        if carried_note is not None:
+            update["reason"] = f"{claim.reason} ({carried_note})"
+        return session.identities.add(claim.model_copy(update=update))
 
     @tool
     async def board_identity() -> IdentityReport:

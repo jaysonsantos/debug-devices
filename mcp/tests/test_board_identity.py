@@ -138,15 +138,26 @@ async def test_marking_without_registration_is_only_visible_marking(bench: Bench
     assert prefix["candidates"] == ["L501", "L502", "L503", "L504"]
 
 
-async def test_unique_landmark_confirms(bench: Bench) -> None:
+async def test_unique_landmark_needs_a_visual_input(bench: Bench) -> None:
+    """QA B-E6: the agent's pixel and the boardview data alone are no visual input: a landmark stays a candidate
+    until the user confirms it (or a marking is read)."""
     async with Client(bench.server) as client:
         photo, registration = await bench.ready(client)
         x, y = to_photo("J4")
-        claim = await identify(client, photo_id=photo, registration_id=registration, x_px=x, y_px=y)
+        alone = await identify(client, photo_id=photo, registration_id=registration, x_px=x, y_px=y)
+        confirmed = await identify(
+            client, photo_id=photo, registration_id=registration, x_px=x, y_px=y, user_confirmed=True
+        )
 
-    assert claim["state"] == "confirmed"
-    assert claim["refdes"] == "J4"
-    assert claim["basis"] == "landmark"
+    assert alone["state"] == "candidate"
+    assert alone["refdes"] is None
+    assert alone["candidates"] == ["J4"]
+    assert "no visual input" in alone["reason"]
+    assert "user_confirmed" in alone["request"]
+    assert confirmed["state"] == "confirmed"
+    assert confirmed["refdes"] == "J4"
+    assert confirmed["basis"] == "landmark"
+    assert confirmed["user_confirmed"] is True
 
 
 async def test_four_pair_registration_does_not_confirm(bench: Bench) -> None:

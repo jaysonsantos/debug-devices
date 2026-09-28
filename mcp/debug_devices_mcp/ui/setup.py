@@ -65,9 +65,6 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
         # The status poll also sees an app restart (other preview flips) and sends the flips again.
         return await services.sync_phone(await services.phone.status())
 
-    async def remove_forward(serial: str) -> None:
-        await services.adb.remove_forward(serial, settings.local_forward_port)
-
     shared = SharedWebcam(stream, RemoteMonitor(settings.ui_port, settings.webcam_timeout))
     monitor = Monitor(
         start,
@@ -83,7 +80,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             scrcpy=scrcpy,
             shared=shared,
             status_reader=read_status,
-            forward_remover=remove_forward,
+            forward_remover=services.release_forward,
             orientation=services.orientation,
             in_sensor_zoom=services.in_sensor_zoom,
             af_mode=services.af_mode,

@@ -64,6 +64,8 @@ async def test_newer_snapshot_with_the_same_view_reuses_the_registration(bench: 
 async def test_zoom_change_refuses_the_old_registration(bench: Bench) -> None:
     async with Client(bench.server) as client:
         photo, registration = await bench.ready(client)
+        # A running scene watcher: the zoom is our own command, not a move (no watcher: test_evidence_round4.py).
+        bench.services.scene.watcher_alive()
         await client.call_tool("phone_zoom", {"ratio": 2.0})
         new_photo = photo_id(await client.call_tool("phone_snapshot", {}))
         x, y = to_photo("U7301")

@@ -23,6 +23,7 @@ class env:
     BENCH_STATE_FILE = f"{PREFIX}BENCH_STATE_FILE"
     MAX_VOLTAGE = f"{PREFIX}MAX_VOLTAGE"
     MAX_CURRENT = f"{PREFIX}MAX_CURRENT"
+    MAX_DIODE_VOLTAGE = f"{PREFIX}MAX_DIODE_VOLTAGE"
     METER_FRAME_INTERVAL = f"{PREFIX}METER_FRAME_INTERVAL"
     METER_COUNTS = f"{PREFIX}METER_COUNTS"
 
@@ -31,6 +32,8 @@ class defaults:
     VISION_MODEL = "openai/gpt-6-luna"
     WEBCAM = Path("/dev/video0")
     ADB = "adb"
+    # Finds wireless-debugging phones when python-zeroconf finds none (discovery.py).
+    AVAHI_BROWSE = "avahi-browse"
     FFMPEG = "ffmpeg"
     LOCAL_FORWARD_PORT = 18765
     MAX_PORT = 2**16 - 1
@@ -47,6 +50,8 @@ class defaults:
     # Bench plausibility limits (a laptop or USB-C bench): a meter value above them is disputed.
     MAX_VOLTAGE = 30.0
     MAX_CURRENT = 10.0
+    # The diode test voltage of the meter: a diode-mode reading above it is probably DC V (the dial).
+    MAX_DIODE_VOLTAGE = 3.0
     METER_FRAME_INTERVAL = timedelta(seconds=1)
     # The display counts of the meter (6000 for the Proster T21D). 0: unknown, no display check.
     METER_COUNTS = 0
@@ -75,7 +80,14 @@ class phone:
     OVERLAY_MAX_ARROWS = 4
     OVERLAY_MAX_LABEL = 32
     OVERLAY_MAX_TAG = 3
+    # docs/phone-api.md: a box or arrow tag is 1-3 ASCII letters or digits (the app answers 400 otherwise).
+    OVERLAY_TAG_PATTERN = r"^[A-Za-z0-9]{1,3}$"
     PATH_SNAPSHOT = "/v1/snapshot"
+    # The /v1/snapshot response headers: the rotation that the app used for this still, and its app run.
+    ROTATION_HEADER = "X-Rotation-Degrees"
+    APP_START_HEADER = "X-App-Start-Id"
+    # The app forgets its boxes and arrows this long after the call; the clients forget their copy too.
+    OVERLAY_TTL = timedelta(minutes=10)
 
 
 class adb:
@@ -86,6 +98,7 @@ class adb:
     AM_MISSING_MARKER = "does not exist"
     FORWARD = "forward"
     REMOVE_FLAG = "--remove"
+    LIST_FLAG = "--list"
     SERIAL_FLAG = "-s"
     SHELL = "shell"
     TCP_PREFIX = "tcp:"
@@ -94,6 +107,8 @@ class adb:
     STATE_DEVICE = "device"
     TCPIP = "tcpip"
     CONNECT = "connect"
+    DISCONNECT = "disconnect"
+    STATE_OFFLINE = "offline"
     PAIR = "pair"
     MDNS = ("mdns", "services")
     MDNS_UNSUPPORTED_MARKER = "not supported"

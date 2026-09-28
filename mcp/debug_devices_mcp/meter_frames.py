@@ -7,7 +7,9 @@ are the same, and the value is below the plausibility limit of its unit (--max-v
 
 from pydantic import BaseModel
 
+from debug_devices_mcp.constants import defaults
 from debug_devices_mcp.multimeter import (
+    MINUS_SIGNS,
     FrameReading,
     MeterMode,
     MeterResult,
@@ -31,6 +33,10 @@ USER_MODE_MIN_FRAMES = 2
 STATUS_ORDER = (MeterStatus.DISPUTED, MeterStatus.UNREADABLE, MeterStatus.UNCERTAIN, MeterStatus.CONFIRMED)
 PREFIX_FACTORS = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3, "": 1.0, "k": 1e3, "M": 1e6}
 BASE_SYMBOLS = {UnitFamily.VOLTAGE: "V", UnitFamily.CURRENT: "A"}
+DIODE_REQUEST = (
+    "Ask the user which mode the dial is on. If it is DC V, record it (bench_state_update "
+    "meter_mode_confirmed_by_user dc_voltage) and read the meter again."
+)
 MORE_FRAMES_REQUEST = (
     "Read the meter again (multimeter_read with frames 2 or 3) and keep the probes still. If the digits keep "
     "changing, report the range, not one value."
@@ -101,16 +107,21 @@ class MeterLimits(BaseModel):
 
     max_volts: float
     max_amps: float
+    max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE
 
 
 def base_value(result: MeterResult) -> float | None:
-    """The value in V or A (the unit prefix applied), or None for other families or no value."""
-    symbol = BASE_SYMBOLS.get(result.unit_family)
-    if symbol is None or result.value is None:
-        return None
-    prefix = result.unit.strip().removesuffix(symbol).strip()
+    """The number on the LCD in V or A (the unit prefix applied), or None for other families, an overload, or no digits.
+
+    It comes from the LCD text, not from `value`: a frame that a different check lowered (the digit count, a low
+    confidence) has no value, but the bench limit still applies to the number that the LCD shows.
+    """
+    family, prefix = unit_parts(result.unit)
     factor = PREFIX_FACTORS.get(prefix)
-    return None if factor is None else result.value * factor
+    digits, point = signature(result.display_text)
+    if family not in BASE_SYMBOLS or factor is None or not digits or not result.readable or result.overload:
+        return None
+    return signed_value(result.display_text, digits, point) * factor
 
 
 def frame_of(result: MeterResult) -> FrameReading:
@@ -141,6 +152,52 @@ def limit_problem(result: MeterResult, limits: MeterLimits) -> str | None:
     return None
 
 
+def diode_problem(result: MeterResult, limits: MeterLimits) -> str | None:
+    """A diode test shows at most the test voltage of the meter; a higher number is a DC V reading with a wrong mode.
+
+    The mode is the checked one: a DC V mode that the user confirmed replaces the model's "diode".
+    """
+    value = base_value(result)
+    if result.mode is not MeterMode.DIODE or value is None or abs(value) <= limits.max_diode_volts:
+        return None
+    return (
+        f"{result.display_text} {result.unit} in diode mode is above the diode test voltage of "
+        f"{limits.max_diode_volts:g} V: the dial is probably on DC V"
+    )
+
+
+def unit_key(unit: str) -> tuple[UnitFamily, str] | None:
+    """The family and the prefix ("V" and "mV" differ). None for a unit that is not readable: that frame is already
+    uncertain, and it does not show another unit."""
+    family, prefix = unit_parts(unit)
+    return (family, prefix) if family is not UnitFamily.UNKNOWN else None
+
+
+def sign_key(display_text: str) -> bool | None:
+    """True for a minus sign; None for a zero or no digits (a meter can show "-0.00" and "0.00" at zero)."""
+    digits, _ = signature(display_text)
+    if not digits.strip("0"):
+        return None
+    text = display_text.replace(" ", "")
+    return text[:1] in MINUS_SIGNS
+
+
+def disagreements(readable: list[MeterResult]) -> list[str]:
+    """The frames must show the same unit, mode, and sign: "4.98 V" and "4.98 mV", or "-0.12" and "0.12", disagree."""
+    problems = []
+    checks = (
+        ("unit", [result.unit for result in readable], [unit_key(result.unit) for result in readable]),
+        ("mode", [str(result.mode) for result in readable], [result.mode for result in readable]),
+        ("sign", [result.display_text for result in readable], [sign_key(result.display_text) for result in readable]),
+    )
+    for name, texts, keys in checks:
+        if len({key for key in keys if key is not None}) > 1:
+            problems.append(
+                f"the {name} changed between the frames ({', '.join(texts)}): one of the frames is a misread"
+            )
+    return problems
+
+
 def combine(
     results: list[MeterResult],
     limits: MeterLimits,
@@ -156,14 +213,18 @@ def combine(
     first = results[0]
     problems = list(dict.fromkeys(problem for result in results for problem in result.problems))
     status = min((result.status for result in results), key=STATUS_ORDER.index)
-    for result in results:
-        if (problem := limit_problem(result, limits)) is not None:
-            status = MeterStatus.DISPUTED
-            problems.append(problem)
+    # Frames with the same LCD text give the same problem: show it once.
+    above_limit = list(dict.fromkeys(problem for result in results if (problem := limit_problem(result, limits))))
+    if above_limit:
+        status = MeterStatus.DISPUTED
+        problems.extend(above_limit)
     readable = [result for result in results if result.readable]
     signatures = {signature(result.display_text) for result in readable}
     points = {point for _, point in signatures}
-    stable = len(signatures) == 1 and len(readable) == len(results)
+    diode = list(dict.fromkeys(problem for result in results if (problem := diode_problem(result, limits))))
+    status = lower(status, diode, problems)
+    changed = disagreements(readable)
+    stable = len(signatures) == 1 and not changed and len(readable) == len(results)
     if len(points) > 1:
         status = MeterStatus.DISPUTED
         problems.append(
@@ -171,6 +232,9 @@ def combine(
             + ", ".join(result.display_text for result in readable)
             + "): one of the frames is a misread"
         )
+    if changed:
+        status = MeterStatus.DISPUTED
+        problems.extend(changed)
     elif len(signatures) > 1 and status is MeterStatus.CONFIRMED:
         status = MeterStatus.UNCERTAIN
         problems.append("the digits changed between the frames: the value is not stable")
@@ -184,8 +248,8 @@ def combine(
     request = None
     if not confirmed:
         request = EXPECTED_REQUEST if far_from_expected and first.request is None else first.request
-        request = request or MORE_FRAMES_REQUEST
-        if len(signatures) > 1 and MORE_FRAMES_REQUEST not in request:
+        request = request or (DIODE_REQUEST if diode else MORE_FRAMES_REQUEST)
+        if (len(signatures) > 1 or changed) and MORE_FRAMES_REQUEST not in request:
             request = f"{request} {MORE_FRAMES_REQUEST}"
     return first.model_copy(
         update={

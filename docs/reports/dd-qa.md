@@ -239,3 +239,551 @@ At the end, I set the zoom to 1.0 and the rotation to auto. The app runs (PID 15
 - `snapshot_rotation` cannot tell 0 from 180, or 90 from 270, by size. I checked 0 and 180 by eye one time. A script check needs image content analysis, and I did not add it.
 
 A process restart (Herdr) killed one run of `qa_mcp_stdio.py`. I ran it again. No process of mine was left.
+
+## Round 4: QA review of the work up to 2026-09-28
+
+### Scope
+
+- The working tree at `e7f0da9`, with the uncommitted work of other agents (network discovery, "device gone" handling, meter decimal point). The brief items are in `e7f0da9`. The uncommitted work does not change their status.
+- No real phone (not connected), no real webcam, no browser, and no request to the monitor page.
+- Four read-only review agents compared the code with the briefs. I checked the safety findings and the main bugs in the code myself. These have "checked" in the lists below.
+- File names without a directory: Python files are in `mcp/debug_devices_mcp/`, `test_*.py` files are in `mcp/tests/`, and Kotlin files are in `android/app/src/main/java/dev/jayson/debugdevices/camera/` (tests in `android/app/src/test/...`). `M/`, `T/`, `A/`, and `AT/` are short forms of these directories.
+- Line numbers are from about 19:00 to 19:10. Other agents edited `server.py`, `ui/monitor.py`, and `app.js` at the same time, so some line numbers can be a few lines off.
+
+### What I ran
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 11 modes: default, fixed zoom, ultrawide (new), no flash 29/29 each; not ready 3/3; capture fails 26/26; starting 29/29; starting race 29/29; internal error 4/4; background 3/3; lying at 270 29/29 |
+| The committed fake phone with `--min-zoom 0.6`, then `python3 scripts/qa_contract.py --strict --after-start` | 27/29. The two new checks fail as they must: start zoom 0.6 (expected 1.0), and `preview_region` does not follow the rotation. This shows that the new checks find these faults. |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <scratch dir>` (the server runs with `--no-ui`) | 14/15. The failure is safety finding S1 (see Bugs). |
+| `uv run pytest -q` | 746 passed, 1 skipped |
+| `uv run ruff check` and `uv run ruff format --check` | Clean |
+| `nix develop .. --command ./gradlew :app:testDebugUnitTest --rerun` (in `android/`) | BUILD SUCCESSFUL. 141 tests in 13 suites, 0 failures |
+| Not run | Real phone, webcam cases of `qa_mcp_stdio.py`, `prek`. The repository has no Playwright tests. |
+
+### Changes to the QA tools
+
+- `scripts/fake_phone.py`:
+  - The start zoom is 1.0 when 1.0 is inside `[min, max]`, else min (contract). Before, it was always min.
+  - `preview_region` follows the rotation: at 90 and 270, width and height swap.
+  - New self-check mode `ultrawide` (`min_zoom_ratio` 0.6).
+- `scripts/qa_contract.py`:
+  - The start state uses the contract start zoom (the check expected min before, which is wrong for a phone with an ultrawide lens).
+  - `--expect not-ready` and `--expect background` check 503 on `/v1/preview`, `/v1/camera`, `/v1/focus`, and `/v1/overlay`.
+  - The content-type check covers the same four routes.
+  - `check_overlay_visible` also checks that a `visible` body keeps the arrows.
+  - New `--strict` checks: `preview_region_rotation`, `camera_both_fields`, and `preview_keeps_snapshot`.
+- `scripts/qa_mcp_stdio.py`:
+  - Each run uses a fresh `XDG_STATE_HOME`. Before, the server read the user's saved phone selection from `~/.local/state/debug-devices/ui-settings.json`, and `phone_connect` failed with the saved Wi-Fi serial. The run used the fake adb only, so no command went to a real device, and the file did not change.
+  - `phone_snapshot` compares the image size with the fake still turned by `turn_degrees`, not the bytes: the server turns and flips each still.
+  - New group `fire-tv`: a fake Fire TV in state `device`, the phone `unauthorized`, and no selection. It proves S1.
+- `scripts/fake_adb.py`: the single-device mode accepts `forward --remove tcp:<port>` (it refused it before, so every `stop_phone` failed with the fake).
+- `docs/qa.md`: the new checks, the state isolation, the `fire-tv` group, and the adb version warning for `--real-adb-several-devices`.
+
+### Status of the brief items
+#### docs/briefs/bench-feedback-1.md
+
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| dd-android: `preview_region` in `CameraStatus` | done | `A/Overlay.kt:262-284`, `A/CameraController.kt:575-606`; tests `AT/OverlayLogicTest.kt:174-202`, `AT/ApiServerTest.kt:170`, `:404` | Zoom and flips are not inputs (contract gap C9). Install and check on the S22: not verified, no phone. |
+| dd-ui 1a: `phone_highlight` gives `in_preview` per box and a warning | done | `M/highlight.py:83-126`, `M/server.py:462-497`; test `T/test_bench_feedback.py:42-65` | – |
+| dd-ui 1b: `phone_point_to` | done | `M/pointing.py:426-434`, `:474-500`; test `T/test_bench_feedback.py:86` | – |
+| dd-ui 1c: `board_locate_in_photo(highlight)` | done | `M/board/tools.py:855-866`, `M/server.py:418-430` | No test checks the visibility on this path. |
+| dd-ui 1d: the page draws `preview_region` as a thin frame | done | `M/ui/static/app.js:1196-1217`, `style.css:480` | No test in the repository. |
+| dd-ui 2a: a secondary server sends its boxes and arrows to the primary | done | `M/ui/monitor.py:440-445`, `M/ui/forward.py:231-242`, `M/ui/routes/ingest.py:33-36`, `:72-81`; tests `T/test_bench_feedback.py:108`, `:166` | Order problem: B-F9. |
+| dd-ui 2b: source label | done | `app.js:1219-1224`, `M/ui/monitor.py:461-463` | – |
+| dd-ui 2c: latest annotated snapshot | done | `app.js:93`, `app.js:1341-1347`, `index.html:124-127` | No test in the repository. |
+| dd-ui 3: a secondary gets live frames from the primary | partly | `M/ui/routes/ingest.py:84-107`, `M/ui/remote_screen.py:55-96`, `M/ui/monitor.py:467-541`; tests `T/test_bench_feedback.py:140-201` | A secondary asks for frames only after its own `phone_connect` (`monitor.py:541`). Without it, the tools say "no phone screen stream", also when the primary streams (`M/pointing.py:55`). See B-F6. |
+| dd-ui 4: `bench_start` has its own screen step | done | `M/ui/tools.py:123-134`; test `T/test_lazy.py:190-217` | – |
+| dd-mcp 5: `board_parts_at_photo` | partly | `M/board/tools.py:875-972`; test `T/test_board_parts_at.py:30` | No mapping through the live tracker ("tracked"). Pixels of a newer photo of another size are not scaled (B-F2). |
+| dd-mcp 6: registration reuse for a newer snapshot | partly | `M/evidence.py:37-62`, `:146-170`, `M/server.py:331-347`; tests `T/test_board_parts_at.py:52-87` | `phone_point_to` has no camera-view check (B-F1, checked). The docstring `M/board/tools.py:841` still says that the registered photo must be the last one. |
+| dd-mcp 7: webcam controls for the meter, dim-LCD hint | done | `M/webcam_controls.py:104-222`, `M/multimeter.py:237-251`; test `T/test_webcam_controls.py:49-137` | No page setting yet (the brief says "later"). Suspect B-F10. |
+| Addition: keep the board session over a server restart | partly | `M/board/session_store.py`, `M/board/tools.py:316-370`; tests `T/test_board_restart.py:56-112` | Every restored registration comes back stale, with a wrong reason (B-F7). The note goes only to the log. The page Board panel does not restore. |
+
+#### docs/briefs/bench-feedback-2.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| 1 Multi-frame meter check and plausibility limit | partly | `M/meter_frames.py:131-202`, `M/server.py:703-750`, `M/config.py:86-94`; tests `T/test_meter_frames.py:48-115` | The limit checks only frames that are already confirmed (B-F4). `frames=1` confirms one frame with no agreement check. The default is 2 frames 1 s apart, not about 2 s. |
+| 2 The user-confirmed meter mode is context | partly | `M/multimeter.py:449-529`, `M/bench_state.py:469-478`; tests `T/test_meter_frames.py:139-182` | No "no dial change seen" check. Recording a measurement erases the user's mode (B-F3, checked). |
+| 3 `bench_measure` | done | `M/server.py:1123-1165`, `M/instructions.py:83`; tests `T/test_bench_measure.py:12-51` | It does not carry the app restart notice (item 7). |
+| 4 Automatic re-registration (ORB and RANSAC) | partly | `M/tracking.py:123-163`, `M/pointing.py:59-66`, `:232-294`; tests `T/test_carry.py:58`, `:87` | Carry runs only when the scene watcher marks the registration stale. Without the live stream, a move is not seen. The test marks the change by hand. See B-F5. |
+| 5 `phone_snapshot` crop | done | `M/snapshot_crop.py:24-93`, `M/server.py:672-682`; tests `T/test_snapshot_crop.py:34-47` | B-F8 (low). |
+| 7 App restart notice | done | `M/app_restart.py`, `M/server.py:309-321`, `:1167-1196`, `app.js:1311-1315`; tests `T/test_app_restart.py:25-34` | Only on `phone_*` tools, and only when a status is read. The status that `phone_highlight` or `phone_zoom` returns does not trigger it. |
+| 8 Board side labels | partly | `M/board/model.py:169-195`, `:255-290`, `M/board/constants.py:47-56`; tests `T/test_board_sides.py:43-126` | The mixed-file check counts over the whole board, not per area. In a mixed file, `pointer.plan` (`M/pointer.py:167`) and `board_match_marking` with `side` (`M/board/marking.py:83`) still rule parts out by the label. |
+| 9 Bench record | done | `M/bench_state.py:92-95`, `:251-341`, `M/server.py:687`; tests `T/test_bench_state.py:237-296` | B-F3 is in the same function. |
+| 10 `schematic_find` | done | `M/schematic.py:44`, `:255-374`, `M/config.py:184-192`, `flake.nix:135`; tests `T/test_schematic.py:113-211` | A note in `bench_instructions`, not an MCP resource (the brief allows both). |
+| 11 Rotated markings and value codes | done | `M/board/rotation.py`, `M/board/marking_readings.py`, `M/board/value_code.py:59-100`; tests `T/test_marking_rotation.py:39-170` | 180 degrees and resistor codes only. |
+
+#### docs/briefs/sync-fix.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| dd-android: `app_start_id` UUID v7, once per start, in `CameraStatus` | done | `android/.../AppStart.kt:8-28`, `CameraController.kt:79-80`, `Models.kt:34` | The app makes the id once per activity start (`MainActivity.kt:82`), not once per process. See contract gap C8. |
+| dd-android: unit test (stable; new after a restart) | partly | `AppStartTest.kt:13-39`, `ApiServerTest.kt:170` | The test makes new `AppStart` objects, not a new `CameraController`. |
+| dd-android: install and check `/v1/status` on the phone | not verified | – | The phone is not connected. |
+| dd-ui: resend a setting only after an app restart or a real change | partly | `app_start.py:23-53`, `orientation.py:267-283`, `camera_choice.py:95-110`, `camera_choice.py:196-212`, `server.py:511-523` | (1) The first status after each server start counts as a connect (`app_start.py:27-44`), so every server start or reload sends once. (2) `PreviewSync` also sends when the wanted flips change, for example after a phone turn in Auto (`orientation.py:275-278`). (3) Bug B-S5. |
+| dd-ui: one source of truth (the settings file) | done | `ui/settings.py:77-122`; test `test_settings_sync.py:90-103`, `:152-162` | The monitor keeps an in-memory copy and writes `markings_visible` from it (`monitor.py:262`, `:578`, bug B-S8). |
+| dd-ui: a status that differs with the same id updates the local view and logs once | partly | `app_start.py:46-53`; test `test_settings_sync.py:121-133`; `app.js:875-884` | The page shows the phone value as text only. The toggle states do not follow the status. |
+| dd-ui: old app: resend only at `phone_connect` | partly | `app_start.py:39-41`; test `test_settings_sync.py:136-149` | It also sends at the first status after a server start. |
+| dd-ui: tests (no ping-pong, one resend after a restart, file change, old app) | done | `test_settings_sync.py:75-162` | The no-ping-pong check is loose (at most 6 sends). |
+
+#### docs/briefs/p0-orientation.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| 1 One transform in pure functions, table tests | done | `orientation.py:40-143`, `server.py:525-541`, `images.py:102-128`; test `test_image_transform.py:131-148` | – |
+| 2 `turn_degrees` and flips in `SnapshotInfo` and in the tool text | done | `server.py:184-203`, `server.py:623-645`; test `test_image_transform.py:244-250` | Confirmed by `scripts/qa_mcp_stdio.py` (the text part has `turn_degrees`). |
+| 3a Saved images | done | `server.py:626` | No test with a turn other than 0. |
+| 3b `multimeter_read(source=phone)` | done | `server.py:649-661` | No test with a turn. |
+| 3c Focus points | done | `focus.py:186-190`; test `test_image_transform.py:252-258` | – |
+| 3d Boxes and arrows | done | `highlight.py:166-181`, `pointer.py:72-79`, `pointing.py:424-433`; test `test_image_transform.py:151-170` | Arrows through a turn: only the angle math has a test. |
+| 3e Registration and tracking | done (code) | `pointing.py:397`, `pointing.py:446`, `evidence.py:54` | No test with a turn. |
+| 3f Page snapshot and full-screen view | done (code) | `monitor.py:104-113`, `monitor.py:363-382`, `app.js:1243-1287` | No committed test with a turn; `test_orientation.py:139-175` tests flips only. |
+| 3g Preview flips in the phone frame | done | `orientation.py:138-142`; test `test_image_transform.py:173-177`, `:281-297` | – |
+| 4 Contract | done | `docs/phone-api.md:77` | – |
+| 5 Acceptance (target, every choice and flip, sizes, focus, boxes, rotation, restart, Playwright) | partly | `test_image_transform.py:59-78`, `:225-278`; `scripts/make_orientation_target.py` | No Playwright test in the repository. The server-level test uses no flip and Flip H only. After a rotation or restart, only the image is checked. |
+| 6 Real-phone steps in the report | done | `docs/reports/dd-ui.md:1193-1204` | The steps did not run: no phone. |
+
+#### docs/briefs/overlay-layout.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| Contract `tag` and the layout spec | done | `docs/phone-api.md:89`, `docs/overlay-layout.md:20-42` | – |
+| One pure function per language, same vectors | done | `overlay_layout.py:330-359`, `OverlayLayout.kt`; tests `test_overlay_layout.py:41-112`, `OverlayLayoutTest.kt:26-146` | – |
+| dd-android: tags | done | `Overlay.kt:20-21`, `Overlay.kt:139-142`, `OverlayLayout.kt:98`; test `ApiServerTest.kt:597-603` | – |
+| dd-android: legend | partly | `OverlayLayout.kt:193-207`, `OverlayView.kt:157-177` | Bug B-S1: an outside legend is always drawn top left, at 40 % and not 50 %. |
+| dd-android: badges, minimum size, outline, colours, arrows | done | `OverlayView.kt:28-36`, `OverlayView.kt:109-148` | Bug B-S2 (colour and tag shift). |
+| dd-android: install after the bench | pending | – | The phone is not connected. |
+| dd-ui: `phone_highlight` annotated image | partly | `overlay_draw.py:46-116`, `highlight.py:201-212` | Bugs B-S3 and B-S4. The inset has no tags. |
+| dd-ui: page snapshot view and inset | partly | `app.js:1190-1242`, `app.js:1397-1569` | The page inset has no tags and no dark outline (`app.js:1557-1567`). An outside legend is clamped into the view and can cover the picture (`app.js:1509-1514`). |
+| dd-ui: vectors file | done | `docs/overlay-layout-vectors.json` (10 cases), `scripts/make_overlay_vectors.py`; test `test_overlay_layout.py:89-109` | – |
+| dd-ui: optional tag per box; result gives tags and legend | done | `highlight.py:44-80`, `server.py:359-367`, `server.py:462-497`; test `test_highlight.py:341-367` | – |
+
+#### docs/briefs/markings-toggle.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| dd-android: visible flag, request rules, `overlay_visible` | done | `CameraController.kt:134-136`, `CameraController.kt:541-547`, `Overlay.kt:37-52`, `Overlay.kt:113-126`; test `ApiServerTest.kt:557-590` | – |
+| Button in the live and snapshot full-screen bars and in the panel | done | `ui/static/index.html:39`, `:110`, `:120` | – |
+| Key "k" in the full-screen views | done | `app.js:95-96`, `app.js:1378-1386` | – |
+| One persisted page state | done | `ui/settings.py:47`, `camera_choice.py:224-261`, `monitor.py:447-450` | – |
+| Off hides the page markings | partly | `app.js:1351-1363`, `style.css:498-503` | The "agent's view" image with drawn-in boxes (`index.html:124-127`) stays visible. |
+| Send `{"visible": ...}` to the phone | done | `server.py:373-386`, `camera_choice.py:264-294`, `phone_api.py:395-403` | – |
+| Markings kept; new highlights while hidden; note in the tool result | partly | `server.py:168-171`, `server.py:349-357`, `server.py:1036`; test `test_markings.py:76-93` | Bug B-S7: the `board_locate_in_photo(highlight)` result has no note. |
+| Old app: hide the page markings only, with a note | done, differs | `server.py:173`, `server.py:369-401`; test `test_markings.py:96-138` | The code removes the boxes from the phone and sends them again when shown. The dd-ui report describes the brief text, not the code. |
+| Tests (Playwright and fake phone) | partly | `test_markings.py:65-182`, `scripts/qa_contract.py` (`check_overlay_visible`) | No Playwright test in the repository. |
+
+#### docs/briefs/adb-wifi.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| 1a List: serial, transport, state, model, product | done | `mcp/debug_devices_mcp/adb.py:48-57`, `devices.py:47-61`, `devices.py:137-181`; test `mcp/tests/test_devices.py:82-100` | Only an IPv4 `ip:port` serial counts as Wi-Fi (bug B-W4). No test for the `adb-….__adb-tls-connect._tcp` serial form. |
+| 1b `adb mdns services` when supported | done | `adb.py:130-139`, `devices.py:130-134` | Only the "unsupported" path has a test: `scripts/fake_adb.py` always answers "not supported". |
+| 1c App check with `pm path` | partly | `devices.py:118-127`, `adb.py:141-152` (3 s timeout) | It checks USB devices and the selected phone only. It skips an unselected Wi-Fi device. The dd-ui report records this decision; the brief does not. |
+| 2a Page list with "Use this phone" | done | `ui/static/index.html:130-160`, `ui/static/app.js:1806-1837`, `ui/routes/devices.py:70-77` | No page test in the repository. |
+| 2b Choice saved as `adb_serial`, over the config, Clear | done | `ui/settings.py:45`, `devices.py:85-115`, `ui/device_panel.py:125-132`; test `test_devices.py:111-125` | No test for "a save of the other page settings keeps the choice" (`monitor.py:575-577`). |
+| 2c No automatic pick of several devices | done | `adb.py:110-115`; tests `test_devices.py:103-108`, `test_adb.py:36-39` | With exactly one ready device, the server uses it by itself (safety finding S1). |
+| 2d Change device: stop the stream, remove the old forward, `phone_connect` | partly | `ui/device_panel.py:101-120`, `ui/monitor.py:821-839` | Bugs B-W1 and B-W2. The test checks only the step names. |
+| 2e "app not installed", no install | done | `devices.py:29`, `devices.py:127`, `app.js:1793` | No test with a USB device without the app. |
+| 3 Switch to Wi-Fi | partly | `ui/device_panel.py:134-161`, `adb.py:154-171`; test `test_devices.py:135-145` | Bug B-W1(a): the switch fails at the last step when a phone was connected before. |
+| 4a Pair form (`adb pair`, then `adb connect`) | done | `ui/device_panel.py:163-171`, `adb.py:173-178`; test `test_devices.py:168-179` | Bug B-W3: a failed pair writes the code to the log. |
+| 4b Plain "Connect IP:port" | done | `ui/device_panel.py:173-177`; tests `test_devices.py:180-182`, `test_discovery.py:298-301` | The address pattern also accepts host names (B-W4). |
+| 5 Reconnect a lost Wi-Fi phone once | done | `server.py:764-776`; test `test_devices.py:148-165` | Suspect: no effect when adb keeps the phone as `offline` (B-W5). |
+| 6a `phone_devices`, read-only, same data as the page | done | `server.py:823-833`, `ui/device_panel.py:75-77`; test `test_devices.py:185-193` | The tool sends `pm path` to unselected USB devices (S2). |
+| 6b Tool text: only the user selects | done | `server.py:826-827`; test `test_devices.py:189` | – |
+| 6c No agent tool for pair, connect, or `tcpip` | done | the tool list; `adb_*` names are log rows only (`ui/constants.py:213-217`) | The page device routes have no token (S4). |
+| 7 Only `-s <selected serial>`, except list, connect, pair | partly | `adb.py:106-163`, `server.py:782`, `server.py:787`, `phone_screen.py:77-84` | Exceptions S1, S2, S3, S5, S6. |
+| 8 AGENTS.md adb rule | done | `AGENTS.md:55` | – |
+| 9a fake adb with several devices, USB and Wi-Fi, `tcpip`, `connect`, `pair` | done | `scripts/fake_adb.py:88-236` | `forward --remove` never fails in the state mode. The single-device mode refused `forward --remove` (B-W7, fixed in this round). |
+| 9b pytest: list, persistence, no automatic pick, switch, reconnect, read-only | done | `test_devices.py:82-193` | – |
+| 9c Playwright test of the page | missing | – | The dd-ui report says that it ran from a scratch folder only. |
+
+#### docs/reports/bench-workflow-improvements.md
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| P0 one transform for the preview and `phone_snapshot` | done | `orientation.py:40-94`, `orientation.py:121-135`, `server.py:525-542` | – |
+| P0 turn before the flips and the scale; no double turn | done | `images.py:102-128`, `server.py:629`; test `test_image_transform.py:140-148` | – |
+| P0 turn and flips in `SnapshotInfo` | done | `server.py:193-198`, `server.py:641-644` | – |
+| P0 same transform for saved images, `multimeter_read(source=phone)`, focus points, overlays, arrows, board photo coordinates | done | `server.py:627`, `server.py:649-661`, `focus.py:185-190`, `highlight.py:165-175`, `pointer.py:72-79`, `evidence.py:37-62` | – |
+| P0 `docs/phone-api.md` updated | done | `docs/phone-api.md:77` | The lines about flips (`:79`, `:87`) do not mention the turn (contract gap). |
+| P0 acceptance with a synthetic target (Screen view, flips, rotations) | done | `test_image_transform.py:59-79`, `:131-148`, `:229-278`; `scripts/make_orientation_target.py` | The server-level cases use no flip and Flip H only. Flip V is tested in the pure functions only. |
+| P0 acceptance on the real phone | missing | – | No report records a real-phone run. The phone is not connected. |
+| P1 meter: unknown unit, LCD text apart from the value, mode/unit check | done | `multimeter.py:186-233`, `multimeter.py:259-278`, `multimeter.py:418-434` | – |
+| P1 meter: a conflict gives uncertain or disputed and no number | done | `multimeter.py:486-489`, `multimeter.py:524` | The frame combine ignores unit and mode differences (B-E1). |
+| P1 meter: request for a frame with the LCD symbols and the dial; expected mode is context | done | `multimeter.py:253-256`, `multimeter.py:490-501`; test `test_multimeter.py:322` | – |
+| P1 meter acceptance: Ω, kΩ, MΩ, V, OL; obscured symbols; "443 V" in a resistance test | done | `test_multimeter.py:261-313` | "443 V" is disputed only with `expected_mode` or a user mode, else only by the 30 V limit. |
+| P1 meter: the model image through `include_image` and the monitor log | partly | `server.py:1089-1093`, `monitor.py:188-196` | A phone-source read without `include_image` puts no image in the log. The log image has no capture id. The page shows the value without its status (`app.js:712-724`), so a disputed value looks like a measurement. |
+| P1 capture id and UTC time on every photo and meter result | done | `evidence.py:107-120`, `server.py:686-698`, `server.py:729-741` | With several frames, the result id is the id of the first frame (`meter_frames.py:152`). |
+| P1 a position statement needs a current photo | partly | `evidence.py:189-198`, `instructions.py:80-84`, `board/tools.py:994-995`, `bench_state.py:394-395` | Free text cannot be enforced. The ids never go stale without the scene watcher (B-E7). |
+| P1 identity states: visible marking, candidate, confirmed | done | `board/identity.py:48-79`; test `test_board_identity.py:81-181` | – |
+| P1 confirmed needs a fresh photo, a marking or landmark, and a valid registration | partly | `board/tools.py:994-1003`, `identity.py:244-308` | `photo_id` is not tied to the photo of the registration (B-E5). A landmark has no visual input (B-E6). |
+| P1 look-alike parts stay candidates; estimates never become visual facts | partly | `identity.py:109-122`, `identity.py:309-323` | See B-E6. |
+| P1 a scene change or the other board side removes a confirmation | done | `identity.py:166-184`, `identity.py:248-253` | Not for boards with "mixed" side labels (by design). |
+| P2 compact record: power, meter mode, contact, measurements, candidates, photo ids, next step | done | `bench_state.py:78-150`, `bench_state.py:333-341` | `probe_contact` does not go stale after a scene change. |
+| P2 a low-confidence result cannot enter | done | `bench_state.py:260-264`; test `test_bench_state.py:61` | – |
+| P2 a step completes when its evidence enters | partly | `bench_state.py:286-303` | Only with `step_id`. A power-check step completes with an unsafe reading (B-E4). |
+| P2 `bench_instructions` shows the current step | done | `instructions.py:112-113`, `bench_state.py:480-486`; test `test_bench_state.py:144` | – |
+| P2 record is local and git-ignored | done | `.gitignore:22-23`, `instructions.py:19-21` | A custom `DEBUG_DEVICES_BENCH_STATE_FILE` path is not git-ignored. |
+| P2 safety gate: isolation, user confirmation, safe residual voltage | partly | `bench_state.py:179-197`, `bench_state.py:441-455`; tests `test_bench_state.py:74-127` | Bugs B-E3 and B-E8. Bypasses: `done_before_gate`, and a measurement without `step_id`. `multimeter_read` never checks the gate. |
+| P2 after a probe short, go back to the power check | done | `bench_state.py:344-351`; test `test_bench_state.py:127` | See B-E4. |
+| P2 update of the user's `instructions.md` | not verified | – | The file is git-ignored and belongs to the user. |
+
+#### docs/briefs/p1-p2-evidence.md
+
+The items of this brief are the P1 and P2 items of the list above. Their status is the same.
+
+| Item | Status | Evidence | Missing / note |
+|---|---|---|---|
+| 1 meter: unknown unit, LCD text, mode/unit check, conflict status, request for LCD and dial, `expected_mode`, tests | done | `multimeter.py:186-233`, `multimeter.py:253-278`, `multimeter.py:456-530`, `server.py:1059`; tests `test_multimeter.py:261-313` | B-E1, B-E2 (frame combine). |
+| 1 keep `include_image` and the monitor log image | partly | `server.py:1089-1093`, `monitor.py:188-196` | Phone source not in the log; the log shows no status. |
+| 2 capture id (UUID v7) and UTC time; meter id = model image; stale ids refused; evidence rule | done | `evidence.py:96-120`, `evidence.py:171-176`, `server.py:686-741`, `board/tools.py:995`, `instructions.py:80-84` | Gap B-E7. |
+| 3 identity state per claim; `board_identify`, `board_identity` | done | `identity.py:48-79`, `board/tools.py:976-1014` | – |
+| 3 confirmed needs a fresh photo, a marking or landmark, and a valid registration | partly | `board/tools.py:994-1003`, `identity.py:218-308` | B-E5, B-E6. No test for a photo and registration mismatch. |
+| 4 local record, fields, tools, `bench_instructions` step, low-confidence refusal, probe short | done | `bench_state.py:78-150`, `bench_state.py:260-264`, `bench_state.py:344-466`, `instructions.py:194-195` | – |
+| 4 safety gate | partly | `bench_state.py:179-197`, `bench_state.py:441-455` | B-E3, B-E4, B-E8. |
+| General: do not edit `instructions.md` | done (per the dd-mcp report) | `docs/reports/dd-mcp.md:511` | Not verifiable from git. |
+
+### Summary of the status
+
+- Done: most items of all 8 briefs and of the improvement list.
+- Partly done, main gaps:
+  - adb-wifi 2d, 3, and 7: device switch and the "only the selected serial" rule (bugs B-W1, S1 to S6).
+  - bench-feedback-1 items 3, 5, 6: live frames for a secondary server, tracked pixels, and the view check of `phone_point_to`.
+  - bench-feedback-2 items 1, 2, 4, 8: meter limit, user mode, re-registration without a stream, mixed side labels.
+  - sync-fix: resend rules.
+  - overlay-layout: legend and annotated image.
+  - markings-toggle: one tool note, and the agent's view image stays visible.
+  - p1-p2-evidence: safety gate and identity rules.
+- Missing:
+  - Playwright tests in the repository (adb-wifi 9c, p0-orientation 5, markings-toggle).
+  - The real-phone acceptance runs (no phone).
+
+### Contract gaps
+
+`docs/phone-api.md`:
+
+- C1: `visible` together with `boxes` or `arrows` returns 400 in the app (`A/Overlay.kt:117-120`) and in the fake. The contract (line 93) does not state it.
+- C2: A body with `arrows` and no `boxes` returns 400 (`A/Overlay.kt:122`). The contract (lines 89-90) does not say that `boxes` is required.
+- C3: `docs/overlay-layout.md:24-25` gives arrows an optional `tag`. `docs/phone-api.md:90`, the app, and the MCP client have no arrow tag.
+- C4: `overlay_boxes` and `overlay_arrows` are "the number on the screen now" (lines 91-92). While the overlay is hidden, the app and the fake give the kept count.
+- C5: The resend list (line 95: preview flips, in-sensor zoom, af_mode) is not complete. The MCP also sends the overlay visibility again, and the preview flips after a Screen view change or a phone turn in Auto (`orientation.py:275-278`).
+- C6: No document says what happens to boxes outside the phone view. The app removes them before the layout, so colours and tags shift (B-S2).
+- C7: "1-3 characters" of a tag is not defined. Kotlin counts UTF-16 units (`A/Overlay.kt:139-142`); Python counts code points (`phone_api.py:214`).
+- C8: `app_start_id` is made "once at each app start". The app makes it once per activity start, not per process.
+- C9: `preview_region` (line 94) takes "the zoom, the rotation, the preview flips" into account. In the app, zoom and flips do not change it (`A/Overlay.kt:262-266`), because zoom crops the still and the preview alike. It can also be null when the view has no size. Proposal: say that it depends on the rotation and the screen, and when it is null.
+- C10: "The box must be inside the image" has a tolerance in the app (`EDGE_TOLERANCE = 1e-4`) and in the client (`phone_api.py:218`). Not stated.
+- C11: The MCP server, the page, and the tracker keep boxes after the app removes them (`OVERLAY_TTL`, 10 min). The contract rule has no client side.
+- C12: `rotation_degrees` is "the rotation of the next snapshot". The server reads `/v1/status`, then `/v1/snapshot` (`server.py:530-535`). A phone turn between the two gives a wrong turn. The snapshot response does not give its own rotation.
+- C13: The contract does not fix EXIF orientation or turned pixels (line 77). The Xiaomi phone turned the pixels (round 3). `optics.output_width_px` "before rotation" depends on this choice.
+- C14: Lines 79 and 87 say that the MCP server applies "its own flips". The server also turns the still (line 77).
+
+Other documents:
+
+- C15: `docs/boardview-json.md:62` gives `side` as `top`, `bottom`, or `both`. The MCP sets `both` for through-hole parts and treats labels as unreliable in "mixed" files (`board/model.py:252-290`). Not stated.
+- C16: AGENTS.md: "use only the serial that the user selected". `config.py:114`, `.env.example:17`, `mcp/README.md:34`, and `adb.py:107-116` keep an "only device" fallback (S1).
+- C17: AGENTS.md and adb-wifi item 7 do not allow `pm path` on unselected devices. The code sends it (S2). `mcp/README.md:35` and `:195` contradict each other.
+- C18: `.env.example` does not list `DEBUG_DEVICES_ADB_PATH`, `DEBUG_DEVICES_ADB_TIMEOUT`, or `DEBUG_DEVICES_LOCAL_FORWARD_PORT` (`config.py:115-128`). AGENTS.md says that it lists every variable.
+
+Report claims that the code does not support:
+
+- `docs/reports/dd-ui.md` rounds 27, 30, and 31 describe Playwright tests. None are in the repository.
+- `docs/reports/dd-ui.md` round 30: the old-app note says "its own boxes stay visible". The code removes the boxes from the phone (`server.py:173`).
+- `docs/reports/dd-ui.md` round 30: `board_locate_in_photo(highlight)` returns the markings note. It does not (B-S7).
+- `docs/reports/dd-ui.md:1228`: "The code is not written to the log". A failed pair writes it (B-W3).
+
+### Bugs
+
+Order: safety first, then by effect. "Suspect" means that the review explains it from the code, but it needs a test or a real run.
+
+Safety:
+
+- **S1 (checked, proven): with no selection, an agent tool sends commands to an unselected device.** `adb.py:107-116` returns the only device in state `device`, with no check that it is the phone. `phone_connect` then sends `adb -s <device> forward tcp:<port> tcp:8765` and `shell am start -n dev.jayson.debugdevices.camera/.MainActivity` (`server.py:782`, `:787`).
+  - Proof: `scripts/qa_mcp_stdio.py`, group `fire-tv`. With a fake Fire TV `192.0.2.50:5555` in state `device` and the phone `unauthorized`, `phone_connect` sent both commands to the Fire TV.
+  - Real case: the phone asks for USB authorization, and one Fire TV is connected.
+  - `test_adb.py:29-33` locks this behaviour in. Fix proposal: no automatic pick; `phone_connect` without a selection lists the devices and stops.
+- **S2: `phone_devices` sends `pm path` to every USB device in state `device`, selected or not** (`devices.py:124-126`, `adb.py:144-146`). This breaks AGENTS.md (C17).
+- **S3: a host-name or IPv6 serial counts as USB** (`devices.py:23`, `:47-48`). After `adb connect firetv.lan:5555` (the page Connect form accepts host names), `phone_devices` sends `pm path` to it, and the page offers "Switch to Wi-Fi" (`tcpip`).
+- **S4: the page device routes have no token** (`ui/routes/devices.py:70-77`). `LocalOnly` (`ui/app.py:47-58`) accepts a POST without an `Origin` header, so any local process can select, pair, connect, or switch a device. Only the AGENTS.md rule stops an agent.
+- **S5 (suspect): `stop_phone` removes the forward of the last phone of this server** (`ui/monitor.py:836-839`). When the user changed the phone through another server's page, `bench_stop` can remove the shared forward of the new phone.
+- **S6 (suspect): the phone screen cleanup uses the new serial for the old port** (`phone_screen.py:271-274`, `ui/monitor.py:541`). The old forward can stay.
+- **B-E3 (checked): a later safe voltage reading hides an earlier unsafe residual voltage.** Every confirmed voltage reading after the isolation replaces `power.residual` (`bench_state.py:283-285`). Case: 5.10 V blocks the gate; then 0.01 V at another point opens it, and the open power checks complete (`:300-303`).
+- **B-E4: a power-check step completes with any confirmed voltage reading** when the agent passes its `step_id` (`bench_state.py:286-298`). Case: after a probe short, "5.10 V" with the power-check `step_id` completes the step.
+- **B-E8 (checked): the residual voltage knows only the prefix "m"** (`bench_state.py:173-176`). "450 µV" counts as 450 V (the gate blocks). "0.4 kV" counts as 0.4 V (safe). "MV" counts as millivolts. `meter_frames.PREFIX_FACTORS` has the correct factors.
+
+Wrong data or blocked work:
+
+- **B-W1: after a stop, a second stop fails** (`ui/monitor.py:836-839` does not clear `bus.phone.serial`). The real adb answers "listener 'tcp:18765' not found", and the step wrapper fails. Effects: "Switch to Wi-Fi" with a connected USB phone fails at the last step; Clear, then "Use this phone", fails; `bench_stop`, then "Use this phone", fails. The fake adb hides it. Related to `docs/briefs/phone-stop-bug.md`.
+- **B-W2 (known): when the old device is gone, `forward --remove` fails with "device not found" and blocks the switch.** This is `docs/briefs/phone-stop-bug.md`. The working tree has part of a fix in progress.
+- **B-W3: the pairing code goes into the activity log.** `adb.py:190` puts the full command into the error text; `ui/device_panel.py:87-96` copies it into the log.
+- **B-E1 (checked): the meter frame combine ignores unit and mode differences.** `multimeter.signature` holds only the digits and the point (`multimeter.py:291-296`); the result takes the value of the first frame (`meter_frames.py:163-190`). Case: "4.98 V" and "4.98 mV" give a confirmed 4.98 V.
+- **B-E2 (checked): the frame combine ignores the sign.** "-0.12 V" and "0.12 V" give a confirmed -0.12 V.
+- **B-F1 (checked): `phone_point_to` has no camera-view check.** `pointing.py:417-424` calls only `scene.guard()`, not `guard_snapshot_registration`. Case: register at 1x without a stream, zoom to 2x, new photo, `phone_point_to`: the boxes go to the wrong place with no error. The board tools refuse this case.
+- **B-F2: a newer photo of another size is not scaled.** `CameraView` has no image size (`evidence.py:37-62`). Case: register a `max_side=0` photo, take a default photo, call `board_parts_at_photo` with its pixels: wrong board point, no error.
+- **B-F3 (checked): recording a measurement erases the user's meter mode.** `bench_state.py:281` writes the meter mode with the source "reading", so `recent_user_mode` returns None.
+- **B-F4: the plausibility limit misses frames that are not confirmed** (`meter_frames.py:106-141`). "93.2 V" at confidence 0.6 gives "uncertain", not "disputed". The limit text can also appear once per frame.
+- **B-E5: `board_identify` does not tie `photo_id` to the photo of the registration** (`board/tools.py:994-1006`). Case: photo A at 1x, zoom 2x, photo B, register on B, identify with A and pixels of A: the result can be "confirmed" at a wrong point.
+- **B-E6 (suspect, design): a "landmark" confirmation has no visual input** (`identity.py:125-141`, `:299-308`). Only the agent's pixel and the boardview data decide.
+- **B-E7: capture ids and registrations never go stale without the scene watcher** (`evidence.py:130-144`). With `--no-ui`, `--no-phone-screen`, or a failed stream, a moved board keeps "current scene".
+- **B-S5 (checked): a read-only call sends the preview flips.** `phone_snapshot_orientation()` with no argument calls `orientation.update(None, None)` and `preview_sync.push()` (`server.py:924-927`). A read can undo the flips of another client.
+- **B-S2: the Android app shifts box colours and tags.** `A/CameraController.kt:563-565` drops boxes outside the preview before the layout. Case: two boxes, the first outside the view: the phone shows the second as "A" in green, the page and the annotated image show "B" in cyan.
+- **B-S1: the Android legend is always top left, at 40 %** (`A/OverlayView.kt:159`, `:205`). The spec says the first corner of the sorted list, at 50 % (`docs/overlay-layout.md:31`).
+- **B-S3: the annotated image has no dark outline on the outer side** (`overlay_draw.py:46-48`: PIL draws the outline inward). Rule 5 asks for 2 px on each side.
+- **B-S4: a small box gets no outline in the inset** (`overlay_draw.py:90-99`), and the inset draws no tags (also `app.js:1557-1567`).
+- **B-S7: `board_locate_in_photo(highlight)` gives no "markings are hidden" note** (`server.py:418-431`). Only `phone_point_to` adds it (`server.py:1036`).
+- **B-F5: a carried registration keeps its old stale reason** (`pointing.py:271-283`). After an app restart and a later tracking loss, the message says "from before the phone app restarted".
+- **B-F6: a secondary server gets no frames for a long time after a primary restart** (`ui/remote_screen.py:78-96`). It keeps its frame counter; the new primary counts from 0 (`ui/routes/ingest.py:104` returns 204).
+- **B-F7: after a server restart, a restored registration has a wrong stale message** (`board/tools.py:360-364`): "the board or the phone moved".
+- **B-F8 (low): a bad crop area loses the still** (`server.py:674-678`) after the view state has already changed.
+- **B-W7 (fixed in this round): the fake adb refused `forward --remove`** in its single-device mode.
+
+Suspect, lower effect:
+
+- **B-S6: a failed resend after an app restart is never retried** (`app_start.py:35-44`). `AfModeSync` also stops on any phone error (`camera_choice.py:209-211`).
+- **B-S8: a page settings save can write an old `markings_visible` value** (`ui/monitor.py:578`).
+- **B-S9: boxes flicker on the page during a wheel zoom** (`app.js:1422-1442`).
+- **B-S10: a tag of two emojis passes the MCP check and fails in the app** (C7). The server then sends the boxes without tags.
+- **B-S11: mirrored boxes after a flip change when the raw still is missing** (`ui/monitor.py:369-370`).
+- **B-F9: overlay changes that a secondary sends to the primary can arrive out of order** (`ui/forward.py:231-235`).
+- **B-F10: saved webcam controls can fail to apply** (`webcam_controls.py:66-79`, `:170-181`) when auto exposure and a fixed exposure time go in one call.
+- **B-F11 (Android): `preview_region` takes the preview aspect from the ImageCapture resolution** (`A/CameraController.kt:586-590`).
+- **B-W4: host-name and IPv6 Wi-Fi serials get no reconnect** (`server.py:770`), see S3.
+- **B-W5: a Wi-Fi serial that adb keeps as `offline` is not reconnected** ("already connected" counts as success).
+- **B-W8: a failed selection save still shows "select: ok"** (`devices.py:102-106`, `ui/device_panel.py:110-111`).
+- **B-W9: the settings writers have no lock across processes** (`devices.py:103-104`, `camera_choice.py:63-64`, `orientation.py:204-205`).
+- **B-E9: `bench_measure` photos do not update the page snapshot** (`ui/monitor.py:425-433`), so a later `phone_highlight` is drawn on an older picture.
+- **B-E10: preview flips can use a stale rotation** (`orientation.py:227-254`).
+- **Docs: `board/tools.py:841`** still says that the registered photo must be the last `phone_snapshot`.
+
+### What to do next
+
+1. Fix S1 first: no automatic device pick. The `fire-tv` group of `scripts/qa_mcp_stdio.py` shows the fix (it passes when `phone_connect` refuses and sends nothing).
+2. Fix the safety gate bugs B-E3, B-E4, and B-E8.
+3. Fix B-W1 together with `docs/briefs/phone-stop-bug.md`, then B-W3.
+4. Decide the contract gaps C1 to C14 in `docs/phone-api.md`.
+5. When the phone is connected: `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict --after-start` on the selected serial, and the real-phone steps in `docs/reports/dd-ui.md:1193-1204`.
+
+## Round 5: QA tools for the contract gaps C1-C18
+
+Task: `docs/briefs/qa-round4-fixes.md`, last section (dd-qa part). I read the new `docs/phone-api.md` first. I changed only `scripts/` and `docs/qa.md`. I did not commit.
+
+### What changed
+
+- `scripts/fake_phone.py`:
+  - The fake turns the pixels of the still, like the app now must. EXIF `Orientation` is absent. The built-in test image has four embedded turned copies (made once with ffmpeg), so the fake still needs only the standard library. A `--snapshot` file turns only when Pillow is installed; the fake prints a note otherwise.
+  - `/v1/snapshot` sends `X-Rotation-Degrees` (the rotation that it used for this still) and `X-App-Start-Id`.
+  - Tags of boxes and arrows must match `^[A-Za-z0-9]{1,3}$`. Arrows can have a `tag`.
+  - The edge tolerance is 0.0001 at the right and bottom edges, as in the app (`A/Overlay.kt:141-143`).
+  - `visible` together with `boxes` or `arrows`, and a body without `boxes`, already gave 400. No change.
+- `scripts/qa_contract.py`:
+  - `snapshot`: EXIF `Orientation` 1 or absent; both headers present; the rotation header equals the status; the start id header equals the status.
+  - `snapshot_rotation`: compares pixel sizes (not the EXIF-turned size); `X-Rotation-Degrees` equals the locked rotation.
+  - `overlay`: a box at the edge tolerance passes; a box beyond it gives 400; tags `A-B`, `A B`, `É`, two emojis, and a number give 400; tags `U1` and `9Z9` pass.
+  - `overlay_arrows`: an arrow tag `A1` passes; arrows without `boxes` and bad arrow tags give 400.
+  - `overlay_visible`: `visible` together with `boxes` or `arrows` gives 400. The kept counts while hidden were already checked (C4).
+  - `--strict` `preview_region_rotation`: a zoom to max and both preview flips do not change `preview_region`.
+- `docs/qa.md`: the check table has the new rules and the checks of the newer endpoints.
+
+### Results
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 11 modes (default 29/29) |
+| The committed fake phone (before this round), then `python3 scripts/qa_contract.py --strict` | 23/28. The new checks fail as they must: EXIF 6 in `snapshot` and `snapshot_rotation`, the edge-tolerance box and the arrow tag in `overlay` and `overlay_arrows`, and `preview_region_rotation`. |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <scratch dir>` (`--no-ui`) | 15/15. The `fire-tv` case passes now: `phone_connect` answers "no phone is selected" and sends no command to the Fire TV. S1 is fixed. |
+| `uv run ruff check` and `uv run ruff format --check` on my three scripts | Clean |
+
+### Notes
+
+- The contract says "inside the image allows an edge tolerance of 0.0001". The app applies it only at the right and bottom edges (`x >= 0`, `y >= 0` stay strict). My checks test only the right edge. Proposal: say "at the right and bottom edges" in `docs/phone-api.md`.
+- The app does not have the tag regex, the arrow tag, or the snapshot headers yet (dd-android task). When the phone is connected, `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict --after-start` will show these rules on the real app.
+- During this round, another agent edited `scripts/fake_adb.py` (`forward --list`). For a short time it did not pass ruff. At the end of the round it passes. I did not touch it.
+
+### Round 5, part 2: the exact edge rule
+
+The contract now says: `snapshot_x >= 0` and `snapshot_y >= 0` (strict), `snapshot_x + width <= 1.0001` and `snapshot_y + height <= 1.0001`.
+
+- `scripts/fake_phone.py:558` follows this text exactly. No logic change; the comment now quotes the rule.
+- `scripts/qa_contract.py` `overlay` has new cases: a box inside the tolerance at the bottom edge passes; a box beyond it at the bottom edge gives 400; `snapshot_x` or `snapshot_y` of -0.00005 gives 400 (0 is strict, also inside the tolerance range).
+- `python3 scripts/fake_phone.py --self-check`: PASSED (default 29/29). ruff is clean on both files.
+
+### Round 5, part 3: `overlay_region`
+
+- `scripts/fake_phone.py`: new status field `overlay_region`. The fake has a safe area in the natural portrait frame of the preview: 0.04 at the top (status bar and label) and 0.06 at the bottom (navigation bar). It maps this area through the preview flips and the rotation into `preview_region`. At rotation 0 with no flip, it gives the contract example `{0.2, 0.04, 0.6, 0.9}`. A vertical flip gives `{0.2, 0.06, 0.6, 0.9}`. It is `null` when `preview_region` is `null`.
+- `scripts/qa_contract.py`:
+  - Every status: `overlay_region` is a key, has the region format, and has the same null rule as `preview_region`.
+  - `--strict` `overlay_region`: inside `preview_region` (2 % tolerance) with no flip and with a vertical flip; a vertical flip moves it by more than 0.001. The check puts the flips back at the end.
+- Results: `python3 scripts/fake_phone.py --self-check` PASSED (default 30/30, "lying at 270" gives `{0.06, 0.2, 0.9, 0.6}`). `uv run python scripts/qa_mcp_stdio.py --skip-webcam`: 15/15. ruff is clean.
+- Note: an app without `overlay_region` now fails the status key check in every check. This is correct for the new contract. The real app gets the field from dd-android.
+
+## Round 6: final run
+
+Date: 2026-09-28. The working tree at `e7f0da9` with the uncommitted fixes of all agents (QA round 4). All other agents had stopped editing. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 859 passed, 1 skipped |
+| `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped |
+| `nix develop --command prek run --all-files` (on a copy of the working tree, with the new files added in the copy only, because the prek fixers change files) | All hooks pass except `end-of-file-fixer`: `docs/reports/dd-qa.md` (my file) ended with an empty line. Fixed in this round. |
+| `(cd android && nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest)` | BUILD SUCCESSFUL. Gradle reused the results (`UP-TO-DATE`), so I also ran `testDebugUnitTest --rerun`: BUILD SUCCESSFUL, 160 tests in 14 suites, 0 failures. |
+
+### 2. QA scripts
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 11 modes (default 30/30) |
+| `python3 scripts/fake_phone.py --port 18897`, then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18897 --strict --after-start` | 30/30 |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` (server with `--no-ui`) | 15/15, with `fire-tv`: `phone_connect` answers "no phone is selected" and sends no command to the fake Fire TV |
+| The same with `--real-adb-several-devices` (the real adb 37.0.0, the same version as the running adb server; no selection) | 16/16. Only `adb devices -l` ran. The adb forwards did not change. |
+
+Two QA tool fixes in this round (my files only):
+
+- `scripts/qa_contract.py`: `FOCUS_STATES` was defined two times. The second definition (without `unknown`) replaced the first one, so every status with `focus.state` `unknown` failed. The contract allows `unknown`. The second list is now `FOCUS_STATES_AFTER_FOCUS` (used only right after `POST /v1/focus`). The first real-phone run failed 3 checks for this reason alone (see 4).
+- `scripts/qa_mcp_stdio.py`: the opt-in group `--real-adb-several-devices` expected the old text "several adb devices". The server now answers "no phone is selected" (S1 fix). The group now expects this text.
+
+### 3. Re-check of the round 4 findings
+
+Three read-only agents re-checked every finding against the current code. I checked S1 end to end (`fire-tv` and real-adb groups above). All fixes are in uncommitted files; the new tests are untracked files. Paths are in `mcp/debug_devices_mcp/` unless they start with another directory.
+
+#### Devices and safety (S1-S6, B-W*, C16-C18)
+
+`uv run pytest -q mcp/tests/test_adb.py mcp/tests/test_devices.py mcp/tests/test_device_safety.py mcp/tests/test_phone_stop.py mcp/tests/test_env_example.py`: 55 passed.
+
+| Id | Status | Evidence | Remaining |
+|---|---|---|---|
+| S1 | fixed | `adb.py:44-47`, `adb.py:153-158` (no selection: only `devices -l`), `devices.py:123-130`, `server.py:847-858`; tests `test_adb.py:29-40`, `test_devices.py:109-115`; `scripts/qa_mcp_stdio.py` `fire-tv` and `real-adb` pass | – |
+| S2 | fixed | `devices.py:133-143` (`pm path` only for the selected serial); test `test_devices.py:82-106` | – |
+| S3 | fixed | `devices.py:23-27`, `devices.py:53-55` (any colon or mDNS name is Wi-Fi), `ui/device_panel.py:170-172`; tests `test_device_safety.py:38-65` | Display only: the "gone" row uses an IPv4-only pattern (`ui/static/app.js:1890`), so a gone host-name, IPv6, or mDNS serial shows "usb". |
+| S4 | fixed (same-origin check) | `ui/routes/devices.py:19-28`, `:38-93`; tests `test_device_safety.py:82-106` | `Origin` is not a secret: a local process can send `Origin: http://127.0.0.1:18766`. This is a check, not authentication. |
+| S5 | fixed | `server.py:244`, `server.py:556-564`, `adb.py:185-195` (owner check with `forward --list`), `ui/monitor.py:898-907`; test `test_phone_stop.py:162-171` | Edge case: two servers forward the same serial on the same port; a `bench_stop` on one removes the forward of the other. |
+| S6 | fixed | `phone_screen.py:270-278`, `:319`; test `test_device_safety.py:114-145` | – |
+| B-W1 | fixed | `ui/monitor.py:898-899`, `server.py:559`, `adb.py:177-183`, `ui/device_panel.py:109-115`; tests `test_phone_stop.py:148-159`, `test_device_safety.py:153-156` | No direct test for "Switch to Wi-Fi with a connected USB phone". |
+| B-W2 | fixed | `adb.py:39`, `adb.py:280-283`, `ui/monitor.py:903-907`, Disconnect `ui/device_panel.py:150-164`, gone state `devices.py:171`, `:197-198`; tests `test_phone_stop.py:91-201` | For "device offline", adb can keep the forward listed; the note says that it is cleared. Harmless. |
+| B-W3 | fixed | `adb.py:131-135`, `:261-284` (the code is removed from the error), `ui/device_panel.py:201-202`; tests `test_device_safety.py:159-186` | – |
+| B-W4 | fixed | `devices.py:53-55`, `server.py:856-870` | No host-name or IPv6 reconnect test. |
+| B-W5 | fixed | `server.py:861-865` (`disconnect`, then `connect`), `adb.py:161-163`, `:256-259`; test `test_device_safety.py:195-206` | Suspect, real adb only: `select_device` runs at once after `connect` (`server.py:870`); a phone that is `offline` for a moment fails. |
+| B-W7 | fixed | `scripts/fake_adb.py:271-284`; state mode `:183-206` fails like the real adb | – |
+| B-W8 | fixed | `devices.py:113-121`, `ui/device_panel.py:117-138`; tests `test_device_safety.py:209-228`, `test_devices.py:118-133` | – |
+| B-W9 | fixed | `ui/settings.py:125-150` (`flock`, 2 s limit), all writers use it; tests `test_device_safety.py:231-259` | New N3 below. |
+| C16 | partly | `.env.example:31-33`, `config.py:120-123`, `mcp/README.md:34`, `:263` | `mcp/README.md:17` still says "If more than one ADB device is connected, set `DEBUG_DEVICES_ADB_SERIAL`" (it implies the old single-device pick). `mcp/README.md:198` is weaker than the rule. |
+| C17 | fixed | `mcp/README.md:35`, `:198`, `devices.py:1-7`, `:133-143` | – |
+| C18 | fixed | `.env.example:36-40`; test `test_env_example.py:22-40` | `DEBUG_DEVICES_DEV_RELOAD` (`scripts/mcp-server.sh:45`) is a script variable, not a Settings variable. |
+
+adb audit: every `forward`, `shell`, `tcpip`, and `push` uses `-s` with the selected serial (or the serial that `phone_connect` connected). By design, `forward --remove` of this server's own forward goes to the previous phone after a switch.
+
+New findings (devices):
+
+- N1 (low, fixed in this round): `scripts/qa_mcp_stdio.py` expected "several adb devices" (see 2).
+- N2 (low, hardening): `ui/routes/ingest.py:83-92` and `ui/monitor.py:516-522` accept any `serial` from a secondary server. The primary then runs `adb -s <serial> push/forward/shell` on it. Only the ingest token protects this route; there is no check against the page selection.
+- N3 (low): `ui/settings.py:139-146` waits for the file lock with `time.sleep` on the event loop: the server can stop for up to 2 s.
+- N4 (low): `server.py:559` clears `forwarded_serial` before the adb calls. When `forward --remove` fails for a temporary reason, the forward stays and this server forgets it.
+
+#### Evidence, meter, bench, and tracking (B-E*, B-F*)
+
+`uv run pytest -q` on the 10 test files of this area: 165 passed.
+
+| Id | Status | Evidence | Remaining |
+|---|---|---|---|
+| B-E1 | fixed | `meter_frames.py:169-173`, `:185-198`, `:226-237`; tests `test_meter_frames.py:196-251` | – |
+| B-E2 | partly (checked) | `meter_frames.py:176-182` (`sign_key`); tests `test_meter_frames.py:200`, `:223-230` | `sign_key` reads only the first character, but `signed_value` (`multimeter.py:299-304`) finds a minus anywhere before the first digit. "DC -5.10" and "DC 5.10" give a confirmed -5.1 V. Fix: use the `signed_value` rule in `sign_key`. |
+| B-E3 | fixed as the brief asks | `bench_state.py:200-218` (residual per point `label`), `:237-240`; tests `test_bench_state.py:337`, `:358` | The point is the free-text `label`. The same label at two points ("residual") lets a later safe reading replace an unsafe one, and the gate opens. After a new isolation confirmation (`:477`), a safe reading at any point opens the gate. A confirmation does not discharge a capacitor. |
+| B-E4 | fixed | `bench_state.py:299-309`, `:364-376`; test `test_bench_state.py:374` | `complete_step` with `step_reason` can still close a power-check step as `user_report` (`:392-395`). It does not open the gate. |
+| B-E5 | fixed | `board/tools.py:1001-1016`, `:1075-1077`, `evidence.py:204-229`; tests `test_evidence_round4.py:124`, `:147` | Low: a registration with no `photo_id` (registered before any `phone_snapshot` of the session) skips the check (`board/tools.py:761-764`). |
+| B-E6 | fixed as the brief asks | `board/identity.py:322-343`, `board/tools.py:1044-1085`; test `test_board_identity.py:141` | The agent sets `user_confirmed`; the server cannot check it. |
+| B-E7 | fixed | `scene.py:163-196`, `server.py:959`, `:982`, `:1031`, `:1073`, expiry task `server.py:1318`; tests `test_evidence_round4.py:184-243` | Low: without a watcher, a Screen view change from the page, flips from another server, and an app restart (capture ids stay valid, `server.py:323-335`) do not make photos stale before the 5 min expiry. |
+| B-E8 | fixed | `bench_state.py:180-191` (`PREFIX_FACTORS`); tests `test_bench_state.py:409`, `:425` | – |
+| B-E9 | fixed | `ui/monitor.py:73-74`, `:112-124`, `:471-481`; test `test_overlay_sync_round4.py:237` | – |
+| B-E10 | fixed | `orientation.py:248-259`; test `test_overlay_sync_round4.py:112` | – |
+| B-F1 | fixed | `pointing.py:426-437`; test `test_evidence_round4.py:60` | – |
+| B-F2 | fixed for the QA case | `evidence.py:52-61`, `:90-100`, `:175-181`, `board/tools.py:754-771`, `:1036-1041`; tests `test_evidence_round4.py:79`, `:114` | Low: `board_register_photo` does not check that the declared `photo_width_px` matches the photo of the capture log (`board/tools.py:850-869`). A registration with pixels of the full-size `save_path` file, then pixels of the returned smaller image, gives scale 1: a wrong board point with no error. |
+| B-F3 | fixed | `bench_state.py:345-347`, `:545-546`; tests `test_bench_state.py:441`, `:458` | – |
+| B-F4 | fixed | `meter_frames.py:113-124`, `:142-152`, `:217-220`; tests `test_meter_decimal.py:364`, `:411-434` | – |
+| B-F5 | fixed | `board/tools.py:209-212`, `pointing.py:286`, `:347`, `server.py:486-501`, `evidence.py:145-155`; tests `test_evidence_round4.py:267`, `:291` | – |
+| B-F6 | fixed | `ui/routes/ingest.py:96-109`, `ui/remote_screen.py:86-88`; test `test_overlay_sync_round4.py:255` | – |
+| B-F7 | fixed | `board/tools.py:269-272`, `:380`; test `test_evidence_round4.py:299` | – |
+| B-F8 | fixed | `snapshot_crop.py:67-74`, `server.py:738-757` (the photo stays, with `crop_error`); test `test_evidence_round4.py:317` | – |
+| B-F9 | fixed | `ui/forward.py:235-249`, `ui/monitor.py:504-512`; test `test_overlay_sync_round4.py:269` | – |
+| B-F10 | fixed (apply) | `webcam_controls.py:66-77`, `:168-174`; tests `test_webcam_controls.py:57`, `:68` | New N7 below. |
+| B-F11 | fixed | `A/CameraController.kt:130-131`, `:576-605`, `A/Overlay.kt:202-221`, `:317-336`; tests `AT/OverlayLogicTest.kt:218-260` (pass in the Gradle run) | – |
+| Docs `board/tools.py:841` | partly | The docstring is correct (`board/tools.py:885-887`) | `mcp/README.md:110` still says "the registered photo must be the last `phone_snapshot`". |
+
+New findings (evidence and bench):
+
+- **N5 (safety, checked, also in `e7f0da9`): an AC voltage reading counts as the residual-voltage check.** `VOLTAGE_MODES` has `AC_VOLTAGE` (`bench_state.py:42`), and the residual check and the power-check step use it (`:69-70`, `:350`). Case: a capacitor holds 5 V DC, the meter is on AC V and reads 0.01 V; recorded with the power-check `step_id`, it opens the gate and completes the power check. Fix: only DC voltage for the residual check.
+- **N6 (safety): a refused `bench_record_measurement` loses an unsafe residual reading.** `record_measurement` adds the residual (`bench_state.py:351-352`), then raises for an unknown `step_id` or a mode that does not fit the step (`:354-357`). The tool saves only after a success (`:512-514`). Case: the gate is open after "C12 0.01 V"; the agent records "VBUS 5.10 V" with a resistance `step_id`: error, the 5.10 V is not stored, and `bench_begin_step` still allows the resistance step.
+- **N7 (low): saved webcam controls can disagree with the camera.** `webcam_controls.py:75`, `:189-194`. Case: `auto_exposure=true` is saved, then `webcam_controls(exposure=900)`: the camera is at manual 900, the file keeps `auto_exposure: true, exposure: 900`. After a restart, only `auto_exposure=3` goes to the camera, and the fixed exposure for the dim LCD is lost without a warning.
+
+#### Overlay, sync, and contract gaps (B-S*, C1-C15)
+
+`uv run pytest -q` on the 19 test files of this area: 315 passed. The Android tests pass in the Gradle run (1.).
+
+| Id | Status | Evidence | Remaining |
+|---|---|---|---|
+| B-S1 | fixed | `A/OverlayLayout.kt:56-62`, `:207-225`, `A/OverlayView.kt:170-189`, `:216` (alpha 0x80); test `AT/OverlayLayoutTest.kt:175` | The 50 % drawing has no unit test (View code). |
+| B-S2 | fixed | `A/CameraController.kt:567` keeps every box, `A/OverlayLayout.kt:21-25`, `:138-149`, `A/OverlayView.kt:67-81`; test `AT/OverlayLayoutTest.kt:157` | Contract text: see C6. |
+| B-S3 | fixed | `overlay_draw.py:25-29`, `:48-50`; test `test_overlay_sync_round4.py:58` | – |
+| B-S4 | fixed | `overlay_draw.py:88-111`, page `ui/static/app.js:1559-1604`; test `test_overlay_sync_round4.py:70` | No page test in the repository. |
+| B-S5 | fixed | `server.py:1021-1023` (no argument: read only, no save, no push); test `test_overlay_sync_round4.py:97` | – |
+| B-S6 | fixed | `app_start.py:21-45` (up to 3 tries), `orientation.py:292-295`, `camera_choice.py:108`, `:209-216`, `:297`; tests `test_overlay_sync_round4.py:134`, `:161` | – |
+| B-S7 | fixed | `server.py:460-466`; test `test_overlay_sync_round4.py:180` | – |
+| B-S8 | fixed | `ui/monitor.py:618-639` | No test for `markings_visible` (the same rule for flips and in-sensor zoom has tests). |
+| B-S9 | fixed | `ui/static/app.js:1426-1451` | No test in the repository. |
+| B-S10 | fixed | `constants.py:84` (regex), `phone_api.py:231`, `:249`, `highlight.py:43`; tests `test_overlay_sync_round4.py:196`, `:203` | – |
+| B-S11 | fixed | `ui/monitor.py:392-424`; test `test_overlay_sync_round4.py:221` | – |
+| C1 | done | `docs/phone-api.md:99`, `A/Overlay.kt:126-128`, `phone_api.py:252-261`; test `AT/ApiServerTest.kt:655`; fake and `qa_contract.py` (`visible with boxes`) | – |
+| C2 | done | `docs/phone-api.md:94`, `A/Overlay.kt:130`, `phone_api.py:253`; test `AT/ApiServerTest.kt:655`; `qa_contract.py` (`arrows without boxes`) | – |
+| C3 | done | `docs/phone-api.md:94`, `docs/overlay-layout.md:25-26`, `A/Overlay.kt:26-33`, `:150-154`, `phone_api.py:249`, `pointer.py:156`, `app.js:1421`; tests `AT/ApiServerTest.kt:607`, `test_contract_round4.py:97`, `:113` | – |
+| C4 | done | `docs/phone-api.md:97-98`, `A/CameraController.kt:810-811`; test `AT/ApiServerTest.kt:655` | Old comments in the client: `phone_api.py:137-140` ("on the phone screen"), `highlight.py:69` ("shows now"). |
+| C5 | done | `docs/phone-api.md:102`, `orientation.py` (`PreviewSync.ensure`), `camera_choice.py` (`MarkingsSync`) | – |
+| C6 | partly (text) | App: see B-S2 | `docs/phone-api.md:95` says that the app draws "only the boxes that are inside `preview_region`"; `:101` and `docs/overlay-layout.md:24` say the safe area (`overlay_region`). The app draws a whole box when a part of it is in the safe area (`A/OverlayLayout.kt:464`, `A/OverlayView.kt:70`). The text must say one rule. |
+| C7 | done | `docs/phone-api.md:94`, `A/Constants.kt:92`, `A/Overlay.kt:157-162`, `constants.py:84`; tests `AT/ApiServerTest.kt:607`, `:677`; real phone 29/29 | – |
+| C8 | done | `docs/phone-api.md:102`, `A/CameraController.kt:79-80`, `A/MainActivity.kt:86`; test `AT/AppStartTest.kt:31` | – |
+| C9 | partly (text) | `A/Overlay.kt:317-335`; tests `AT/OverlayLogicTest.kt:208`, `AT/ApiServerTest.kt:405`; real phone: zoom and flips keep it | `docs/phone-api.md:100` says both "It takes the zoom, … the preview flips … into account" and "Zoom and the preview flips do not change it". The null sentence is there two times. |
+| C10 | done | `docs/phone-api.md:94`, `A/Overlay.kt:142-145`, `A/Constants.kt:98`; test `AT/ApiServerTest.kt:627`; fake and `qa_contract.py` | The client is stricter (`phone_api.py:200`, 1e-9). Correct: the app accepts every box that the client sends. |
+| C11 | partly | `docs/phone-api.md:96`, `server.py:388-407` (TTL), `server.py:324-339` (app restart); tests `test_contract_round4.py:128`, `:153` | (a) The primary page never forgets the boxes of a secondary server (`ui/monitor.py:504-512` has no TTL; `server.py:334` clears only this server's boxes). Case: a secondary draws boxes and exits; the primary page shows them after 10 min and after an app restart. (b) Old app with the markings hidden: `server.py:367` sends `[]`, which stops the TTL (`:388-393`), but `self.highlights` keeps the boxes with no expiry. |
+| C12 | done | `docs/phone-api.md:80`, `A/ApiServer.kt:103-108`, `A/CameraController.kt:750-783`, `phone_api.py:424-432`, `server.py:587-605`; tests `AT/ApiServerTest.kt:599`, `test_contract_round4.py:62-81`; real phone: headers correct | – |
+| C13 | done (app); text and client differ | `docs/phone-api.md:79`, `A/JpegTurner.kt:19-35`, `A/ExifTurn.kt`, `A/CameraController.kt:781-782`; test `AT/ExifTurnLogicTest.kt:18-40`; real phone: pixels turned | `JpegTurner` has no test. `docs/phone-api.md:78` still says "the JPEG can carry this as its EXIF orientation" (against `:79`). The client still applies EXIF (`images.py:35`, `:113-115`); no effect with the new app. |
+| C14 | done | `docs/phone-api.md:82`, `:90` | – |
+| C15 | partly | `docs/boardview-json.md:62`, `board/model.py:264-266` (`side_ok`, used in `identity.py` and `board/tools.py`) | `pointer.py:168` and `board/marking.py:83` still use the side label alone. Case: in a "mixed" file, a part labelled bottom that is on top: `phone_point_to` says "on the other side" and draws no box; `board_match_marking(side="top")` does not list it. |
+
+New findings (overlay and contract):
+
+- **N8 (checked): `overlay_region` can be `null` while `preview_region` is not.** `A/Overlay.kt:366` returns `null` when the safe area has no size; test `AT/OverlayLogicTest.kt:288` locks this in. This breaks "Same `null` rule" (`docs/phone-api.md:101`). The client then uses `preview_region` (`phone_api.py:153-155`), so `phone_highlight` can say "fully visible" for a box that the app does not draw. Case: the label band covers the safe area in a small or split window.
+- **N9 (low): `A/JpegTurner.kt:23` sends the JPEG unchanged, with its EXIF turn, when the decode fails.** This breaks C13 with no error. The re-encode also drops the other EXIF tags. The dd-android report gives a snapshot time of about 2.3 s on the S22 (before: about 0.9 s).
+- **N10 (suspect, low): `overlay_region` right after a rotation change can use the label band of the old orientation** (`A/MainActivity.kt:107-113`, `A/CameraController.kt:616-625`). The server keeps that value (`server.py:981`); with `--no-ui`, no status poll corrects it.
+- Still open (no id): the page clamps an outside legend into the view, so it can cover the picture (`ui/static/app.js:1541-1546`).
+
+### 4. Real phone
+
+- Selected serial (`~/.local/state/debug-devices/ui-settings.json`, `adb_serial`): a Wi-Fi serial of the Samsung S22 (`SM_S901B`). `adb devices -l` listed only this device, in state `device`.
+- I used the adb binary of the running adb server (`android-tools-37.0.0` from the nix store), so the server did not restart.
+- Separate forward: `adb -s <selected serial> forward tcp:18790 tcp:8765`. Health: 200, `app_version` 0.1.0. Status: 200 (camera ready, `app_start_id` UUID v7, `in_sensor_zoom` `unsupported`, zoom range 0.6-10).
+- First run, `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18790 --strict`: 26/29. The 3 failures (`snapshot_keeps_torch`, `snapshot_rotation`, `preview_region_rotation`) were the QA tool fault above: the S22 reports `focus.state` `unknown` after a still.
+- Second run, after the fix: 29/29. Results on the S22:
+  - The snapshot is 3060x4080 at rotation 0 and 4080x3060 at 90 and 270: the app turns the pixels. EXIF `Orientation` is absent, or 1 at rotation 90. Both are allowed.
+  - `X-Rotation-Degrees` equals the locked rotation; `X-App-Start-Id` equals the status.
+  - `preview_region` at rotation 0 is `{0.192, 0, 0.615, 1}`; at 90 it is the same turned. Zoom and flips do not change it.
+  - `overlay_region` is `{0.192, 0.109, 0.615, 0.829}`. A vertical flip moves it to y 0.062. It is inside `preview_region`.
+  - The in-sensor zoom request gives `unsupported`, and `af_mode` `macro` gives `continuous` (no macro mode on this phone). Both are allowed.
+  - Tags, arrow tags, `visible` with boxes, the edge tolerance, the counts while hidden, the start zoom rule (not tested: no app start), concurrency, and the 405, 404, and content-type rules pass.
+- State after the runs: the first run left `in_sensor_zoom` `off`, because the checks end with `false`. The saved setting is `true`, so I sent `{"in_sensor_zoom": true}` again. Then the status was equal to the first status in every field except `focus`.
+- I removed the forward (`forward --remove tcp:18790`). The MCP server forward (18765) and the scrcpy forward did not change. No command went to another device.
+- Not tested on the phone: `--after-start` and `--expect starting-race` (they need an app restart during a live session).
+
+### Summary
+
+- Tests: all pass (pytest 859, boardview 13, Android 160, fake self-check, contract 30/30 on the fake and 29/29 on the S22, MCP stdio 16/16). prek: one failure in my report file, fixed.
+- Round 4 findings: the 6 safety findings (S1-S6) are fixed. Of the 40 other bug ids, 39 are fixed and 1 is partly fixed (B-E2). Some fixed ids have small open points in the "Remaining" column. Contract gaps: 12 of 18 are done; C6, C9, C11, C13, C15, and C16 are partly done (mostly text). The docs item of `board/tools.py:841` is partly done (`mcp/README.md:110`).
+- New findings: 2 safety (N5 AC voltage as residual check, N6 lost unsafe reading), 1 contract break (N8 `overlay_region` null rule), and 7 low (N2-N4, N7, N9, N10, and the page legend).
+
+### What to do next
+
+1. Safety: N5 (only DC voltage for the residual check), N6 (store the reading before a step error, or check the step first), and B-E2 (use the `signed_value` rule in `sign_key`). Also consider B-E3: one residual per point label lets a later safe reading at the same label replace an unsafe one.
+2. Contract: N8 (return the `preview_region` null rule, or change the contract), and the text of C6 and C9 in `docs/phone-api.md`, `docs/phone-api.md:78` (C13), `mcp/README.md:17` (C16), and `mcp/README.md:110`.
+3. C11 (a) and (b): forget the boxes of a secondary server and of an old app after the TTL.
+4. On the real phone: `--after-start` and `--expect starting-race` after an app restart, when the user allows a restart.

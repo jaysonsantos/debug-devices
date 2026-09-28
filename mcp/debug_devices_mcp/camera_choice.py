@@ -60,8 +60,7 @@ class InSensorZoomChoice:
         self._seen = enabled
         if self._store is not None:
             try:
-                saved = self._store.load()
-                self._store.save(saved.model_copy(update={"in_sensor_zoom": enabled}))
+                self._store.update(lambda saved: saved.model_copy(update={"in_sensor_zoom": enabled}))
             except OSError as exc:
                 logger.warning("cannot save the in-sensor zoom choice: %s", exc)
         for listener in self._listeners:
@@ -106,6 +105,7 @@ class InSensorZoomSync:
             self._unsupported = True
             logger.warning("%s", exc)
         except PhoneError as exc:
+            self._watch.failed()
             logger.info("in-sensor zoom choice not sent: %s", exc)
         return status
 
@@ -152,12 +152,15 @@ class AfModeChoice:
         self._seen = mode
         if self._store is not None:
             try:
-                saved = self._store.load()
-                self._store.save(saved.model_copy(update={"af_mode": mode}))
+                self._store.update(lambda saved: saved.model_copy(update={"af_mode": mode}))
             except OSError as exc:
                 logger.warning("cannot save the autofocus mode choice: %s", exc)
         for listener in self._listeners:
             listener(mode)
+
+
+class AfModeUnknownToAppError(PhoneError):
+    """The app answered 400 to `af_mode`: it is from before the autofocus mode."""
 
 
 class AfModeSync:
@@ -188,7 +191,7 @@ class AfModeSync:
             status = await self._phone.camera(CameraSettingsRequest(af_mode=self._choice.mode))
         except PhoneApiError as exc:
             if exc.status == HTTPStatus.BAD_REQUEST:
-                raise PhoneError(AF_MODE_UNKNOWN_TO_APP) from exc
+                raise AfModeUnknownToAppError(AF_MODE_UNKNOWN_TO_APP) from exc
             raise
         self._stopped = self.needs_send(status)
         return status
@@ -203,11 +206,13 @@ class AfModeSync:
             return status
         try:
             return await self.send()
-        except CameraSettingsNotSupportedError as exc:
+        except (CameraSettingsNotSupportedError, AfModeUnknownToAppError) as exc:
+            # The app cannot do it: stop until the next phone_connect.
             self._stopped = True
             logger.warning("%s", exc)
         except PhoneError as exc:
-            self._stopped = True
+            # Only this send failed (for example the camera was not ready): the next status reads try again.
+            self._watch.failed()
             logger.info("autofocus mode choice not sent: %s", exc)
         return status
 
@@ -253,8 +258,7 @@ class MarkingsChoice:
         self._seen = visible
         if self._store is not None:
             try:
-                saved = self._store.load()
-                self._store.save(saved.model_copy(update={"markings_visible": visible}))
+                self._store.update(lambda saved: saved.model_copy(update={"markings_visible": visible}))
             except OSError as exc:
                 logger.warning("cannot save the markings choice: %s", exc)
         for listener in self._listeners:
@@ -290,6 +294,7 @@ class MarkingsSync:
         try:
             return await self.send()
         except PhoneError as exc:
+            self._watch.failed()
             logger.info("markings visibility not sent: %s", exc)
         return status
 

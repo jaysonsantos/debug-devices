@@ -21,6 +21,12 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
     var scene: (width: Float, height: Float, arrowInset: Float, arrowLength: Float) -> OverlayScene =
         { _, _, _, _ -> OverlayScene.EMPTY }
 
+    /** The system bar and cutout insets of this view, in screen pixels (left, top, right, bottom as a rect). */
+    var insets: () -> PixelRect = { NO_INSETS }
+
+    /** The height of the app's status label band at the viewer's top, in pixels (the label turns with the viewer). */
+    var labelBand: () -> Float = { 0f }
+
     private val density = resources.displayMetrics.density
 
     // All sizes below are dp: the canvas is scaled by the density before drawing.
@@ -54,25 +60,30 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
         val current = scene(screenWidth, screenHeight, ARROW_INSET_PX, ARROW_LENGTH_PX)
         if (current.boxes.isEmpty() && current.arrows.isEmpty()) return
         val degrees = current.viewerDegrees
-        val sideways = Math.floorMod(degrees, 2 * Constants.Orientation.BUCKET_DEGREES) != 0
-        val frameWidth = (if (sideways) screenHeight else screenWidth) / density
-        val frameHeight = (if (sideways) screenWidth else screenHeight) / density
+        // The phone view: the safe area without the status label, in the viewer's frame (screen pixels).
+        val frame = OverlayLayout.phoneFrame(screenWidth, screenHeight, insets(), degrees, labelBand())
+        val frameWidth = (frame.right - frame.left) / density
+        val frameHeight = (frame.bottom - frame.top) / density
         val boxes = current.boxes.map { item ->
-            val r = OverlayLayout.toViewer(item.rect, degrees, screenWidth, screenHeight)
+            // A box outside the phone view keeps its place (tag, colour, legend row) but is not drawn.
+            val r = item.rect?.let { OverlayLayout.toViewer(it, degrees, screenWidth, screenHeight) }
+            val shown = r != null && OverlayLayout.inFrame(r, frame)
+            val rect = r ?: HIDDEN
             LayoutBoxInput(
-                r.left / density,
-                r.top / density,
-                (r.right - r.left) / density,
-                (r.bottom - r.top) / density,
+                (rect.left - frame.left) / density,
+                (rect.top - frame.top) / density,
+                (rect.right - rect.left) / density,
+                (rect.bottom - rect.top) / density,
                 item.tag,
-                item.label
+                item.label,
+                visible = shown
             )
         }
-        val arrows = current.arrows.map { (arrow, label) ->
+        val arrows = current.arrows.map { (arrow, tag, label) ->
             val tip = OverlayLayout.pointToViewer(arrow.tip, degrees, screenWidth, screenHeight)
             val tail = OverlayLayout.pointToViewer(arrow.tail, degrees, screenWidth, screenHeight)
             val angle = Math.toDegrees(atan2((tip.y - tail.y).toDouble(), (tip.x - tail.x).toDouble())).toFloat()
-            LayoutArrowInput(angle, null, label)
+            LayoutArrowInput(angle, tag, label)
         }
         val layout = OverlayLayout.layout(
             LayoutInput(frameWidth, frameHeight, MIN_BOX_DP, boxes, arrows, inset = false)
@@ -80,10 +91,11 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
 
         canvas.save()
         turnToViewer(canvas, degrees, screenWidth, screenHeight)
+        canvas.translate(frame.left, frame.top)
         canvas.scale(density, density)
         layout.boxes.forEachIndexed { i, box -> drawBox(canvas, box, layout.badges[i]) }
         layout.arrows.forEach { drawArrow(canvas, it) }
-        layout.legend?.let { drawLegend(canvas, it, frameWidth, frameHeight) }
+        layout.legend?.let { drawLegend(canvas, it) }
         canvas.restore()
     }
 
@@ -152,16 +164,16 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
 
     /**
      * Dark 85% panel with `tag: label` rows in the item colours. An outside legend (every corner covers a box) has
-     * no room below the phone screen, so it is drawn see-through in the first corner (rule 2, phone).
+     * no room below the phone screen: the phone draws it in the first corner of the sorted list, the whole legend at
+     * 50% opacity (`docs/overlay-layout.md`, legend corner).
      */
-    private fun drawLegend(canvas: Canvas, legend: LaidLegend, frameWidth: Float, frameHeight: Float) {
-        val size = PixelPoint(legend.rect.right - legend.rect.left, legend.rect.bottom - legend.rect.top)
-        val rect = if (legend.outside) OverlayLayout.cornerRects(frameWidth, frameHeight, size).first() else legend.rect
-        fill.color = if (legend.outside) LEGEND_SEE_THROUGH else LEGEND_BACKGROUND
+    private fun drawLegend(canvas: Canvas, legend: LaidLegend) {
+        val rect = if (legend.outside) legend.firstCorner else legend.rect
+        if (legend.outside) canvas.saveLayerAlpha(rect.left, rect.top, rect.right, rect.bottom, OUTSIDE_LEGEND_ALPHA)
+        fill.color = LEGEND_BACKGROUND
         canvas.drawRect(rect.left, rect.top, rect.right, rect.bottom, fill)
         legend.rows.forEachIndexed { i, row ->
             text.color = OverlayLayout.argb(row.colour)
-            text.alpha = if (legend.outside) SEE_THROUGH_TEXT_ALPHA else OPAQUE
             val top = rect.top + OverlayLayout.LEGEND_BASE / 2 + i * OverlayLayout.LEGEND_ROW
             canvas.drawText(
                 "${row.tag}: ${row.label}",
@@ -173,7 +185,7 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
                 text
             )
         }
-        text.alpha = OPAQUE
+        if (legend.outside) canvas.restore()
     }
 
     /** The text baseline that centres a line vertically between [top] and [bottom]. */
@@ -199,10 +211,15 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
         const val ARROW_INSET_PX = 0f
         const val ARROW_LENGTH_PX = 1f
         const val OPAQUE = 0xFF
-        const val SEE_THROUGH_TEXT_ALPHA = 0x99
+
+        /** 50% of 255: the opacity of an outside legend on the phone. */
+        const val OUTSIDE_LEGEND_ALPHA = 0x80
         val DARK_OUTLINE = Color.argb(0x99, 0, 0, 0)
         val LEGEND_BACKGROUND = Color.argb(0xD9, 0, 0, 0)
-        val LEGEND_SEE_THROUGH = Color.argb(0x66, 0, 0, 0)
+
+        /** A rectangle for a hidden box: only its tag and colour count, the layout does not place it. */
+        val HIDDEN = PixelRect(0f, 0f, 0f, 0f)
+        val NO_INSETS = PixelRect(0f, 0f, 0f, 0f)
         val BADGE_TEXT = Color.BLACK
     }
 }

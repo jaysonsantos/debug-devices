@@ -86,7 +86,7 @@ async def test_snapshot_returns_bytes() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
 
-    assert await client(httpx.MockTransport(handler)).snapshot() == JPEG
+    assert (await client(httpx.MockTransport(handler)).snapshot()).jpeg == JPEG
 
 
 async def test_error_without_api_error_body() -> None:

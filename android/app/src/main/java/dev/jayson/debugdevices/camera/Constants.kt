@@ -84,8 +84,12 @@ object Constants {
         const val MAX_BOXES = 8
         const val MAX_LABEL_LENGTH = 32
         const val MAX_ARROWS = 4
-        const val MIN_TAG_LENGTH = 1
-        const val MAX_TAG_LENGTH = 3
+
+        /** Space below the app's status label that the overlay layout leaves free (the phone view). */
+        const val LABEL_GAP_DP = 4f
+
+        /** C7: 1-3 ASCII letters or digits. */
+        const val TAG_PATTERN = "^[A-Za-z0-9]{1,3}$"
 
         /** Step in snapshot pixels to measure an arrow direction (any size works: the mapping is linear). */
         const val DIRECTION_STEP = 10f
@@ -123,6 +127,15 @@ object Constants {
         const val LABEL_REFRESH_MILLIS = 1_000L
     }
 
+    object Snapshot {
+        /** JPEG quality when the app must turn the pixels of a still (the phone wrote the turn as EXIF). */
+        const val JPEG_QUALITY = 95
+
+        /** Response headers of `/v1/snapshot` (C12 of the contract). */
+        const val HEADER_ROTATION_DEGREES = "X-Rotation-Degrees"
+        const val HEADER_APP_START_ID = "X-App-Start-Id"
+    }
+
     object Start {
         /** After an app start the torch is off. The zoom starts at 1x, or at the minimum when 1x is outside the range (see [ZoomLogic.startRatio]). */
         const val TORCH_ENABLED = false
@@ -144,7 +157,7 @@ object Constants {
         const val REBIND_FAILED = "In-sensor zoom rebind failed"
         const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
         const val CAMERA_SETTINGS_EMPTY = "Send at least one of 'in_sensor_zoom' and 'af_mode'"
-        const val OVERLAY_BAD_TAG = "A tag has 1 to 3 characters"
+        const val OVERLAY_BAD_TAG = "A tag is 1 to 3 ASCII letters or digits"
         const val OVERLAY_VISIBLE_ALONE = "Send 'visible' alone, without 'boxes' or 'arrows'"
         const val OVERLAY_NEEDS_BOXES = "Send 'boxes' (and optional 'arrows'), or 'visible' alone"
         const val OVERLAY_TOO_MANY = "At most 8 boxes"

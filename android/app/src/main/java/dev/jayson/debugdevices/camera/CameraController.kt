@@ -127,6 +127,9 @@ class CameraController(
     private var owner: LifecycleOwner? = null
     private var previewView: PreviewView? = null
 
+    /** The bound Preview use case: its stream aspect places the overlay and `preview_region`. Main thread only. */
+    private var previewUseCase: Preview? = null
+
     /** The one place of the overlay boxes, and the zoom when they came. Main thread only. */
     private var overlayBoxes: List<OverlayBox> = emptyList()
     private var overlayArrows: List<OverlayArrow> = emptyList()
@@ -230,6 +233,7 @@ class CameraController(
         if (vendorParams.isNotEmpty() && sessionType != null) setPreviewSessionType(previewBuilder, sessionType)
         focusSample = null
         val preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        previewUseCase = preview
         imageCapture = buildImageCapture(vendorParams)
         provider.unbindAll()
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
@@ -560,12 +564,10 @@ class CameraController(
         val geometry = previewGeometry(camera, view, viewWidth, viewHeight) ?: return OverlayScene.EMPTY
         val area = OverlayLogic.shownArea(geometry)
         return OverlayScene(
-            boxes = overlayBoxes.mapNotNull { box ->
-                OverlayLogic.boxToView(box, geometry)?.let { LayoutItem(it, box.tag, box.label) }
-            },
+            boxes = overlayBoxes.map { box -> LayoutItem(OverlayLogic.boxToView(box, geometry), box.tag, box.label) },
             arrows = overlayArrows.map { arrow ->
                 val direction = OverlayLogic.arrowDirection(arrow.angleDeg, geometry)
-                OverlayLogic.arrowAtEdge(direction, area, arrowInset, arrowLength) to arrow.label
+                SceneArrow(OverlayLogic.arrowAtEdge(direction, area, arrowInset, arrowLength), arrow.tag, arrow.label)
             },
             viewerDegrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
         )
@@ -578,7 +580,13 @@ class CameraController(
         viewWidth: Float,
         viewHeight: Float
     ): OverlayGeometry? {
-        val resolution = imageCapture.resolutionInfo?.resolution ?: return null
+        // Both sizes as sensor-oriented surfaces (long side first); the rotations turn them upright.
+        val capture = imageCapture.resolutionInfo?.resolution ?: return null
+        val stream = previewUseCase?.resolutionInfo?.resolution ?: return null
+        val captureLong = maxOf(capture.width, capture.height).toFloat()
+        val captureShort = minOf(capture.width, capture.height).toFloat()
+        val streamLong = maxOf(stream.width, stream.height).toFloat()
+        val streamShort = minOf(stream.width, stream.height).toFloat()
         val previewRotation = camera.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0)
         val snapshotRotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation)
         return OverlayGeometry(
@@ -586,16 +594,34 @@ class CameraController(
             zoomNow = camera.cameraInfo.zoomState.value?.zoomRatio ?: overlayZoomAtCall,
             snapshotRotation = snapshotRotation,
             previewRotation = previewRotation,
-            imageWidth = (if (isSideways(previewRotation)) resolution.height else resolution.width).toFloat(),
-            imageHeight = (if (isSideways(previewRotation)) resolution.width else resolution.height).toFloat(),
-            snapshotWidth = (if (isSideways(snapshotRotation)) resolution.height else resolution.width).toFloat(),
-            snapshotHeight = (if (isSideways(snapshotRotation)) resolution.width else resolution.height).toFloat(),
+            imageWidth = if (isSideways(previewRotation)) streamShort else streamLong,
+            imageHeight = if (isSideways(previewRotation)) streamLong else streamShort,
+            snapshotWidth = if (isSideways(snapshotRotation)) captureShort else captureLong,
+            snapshotHeight = if (isSideways(snapshotRotation)) captureLong else captureShort,
             viewWidth = viewWidth,
             viewHeight = viewHeight,
             fill = view.scaleType.name.startsWith(FILL_SCALE_PREFIX),
             mirroredX = view.scaleX < 0f,
             mirroredY = view.scaleY < 0f
         )
+    }
+
+    /** The system bar and cutout insets of the preview, in screen pixels (set by the activity). Main thread only. */
+    var safeInsets: () -> PixelRect = { PixelRect(0f, 0f, 0f, 0f) }
+
+    /** The status label band at the viewer's top, in pixels (set by the activity). Main thread only. */
+    var labelBand: () -> Float = { 0f }
+
+    /** `CameraStatus.overlay_region`: the phone view (the overlay's safe area) on the snapshot; the same null rule. */
+    private fun overlayRegion(camera: Camera): PreviewRegion? {
+        val view = previewView ?: return null
+        if (view.width <= 0 || view.height <= 0) return null
+        val width = view.width.toFloat()
+        val height = view.height.toFloat()
+        val geometry = previewGeometry(camera, view, width, height) ?: return null
+        val degrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
+        val frame = OverlayLayout.phoneFrame(width, height, safeInsets(), degrees, labelBand())
+        return OverlayLogic.overlayRegion(OverlayLayout.fromViewer(frame, degrees, width, height), geometry)
     }
 
     /** `CameraStatus.preview_region`: null before the camera and the preview view have a size. */
@@ -721,10 +747,13 @@ class CameraController(
         }
     }
 
-    override suspend fun capture(): ByteArray = captureLock.withLock {
-        withContext(Dispatchers.Main) {
+    override suspend fun capture(): Snapshot = captureLock.withLock {
+        // The rotation that this still uses, read next to the capture (C12: the header, not an older status).
+        var rotationDegrees = 0
+        val jpeg = withContext(Dispatchers.Main) {
             gate.checkReady()
             activeCamera()
+            rotationDegrees = rotation.effectiveDegrees
             val output = ByteArrayOutputStream()
             val options = ImageCapture.OutputFileOptions.Builder(output).build()
             suspendCancellableCoroutine { continuation ->
@@ -749,6 +778,8 @@ class CameraController(
                 )
             }
         }
+        // C13: upright pixels, EXIF Orientation 1 or absent. Off the main thread: it can decode and encode.
+        Snapshot(withContext(Dispatchers.Default) { JpegTurner.upright(jpeg) }, rotationDegrees, appStart.id)
     }
 
     private fun activeCamera(): Camera {
@@ -781,6 +812,7 @@ class CameraController(
             afMode = afModeActive,
             appStartId = appStart.id,
             previewRegion = previewRegion(camera),
+            overlayRegion = overlayRegion(camera),
             overlayVisible = overlayVisible
         )
     }

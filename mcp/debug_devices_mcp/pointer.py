@@ -152,7 +152,8 @@ def follow_boxes(boxes: list[PixelBox], matrix: Matrix, frame: ImageFrame) -> tu
         elif len(arrows) < phone.OVERLAY_MAX_ARROWS:
             angle = arrow_angle(center, middle, frame.orientation)
             label = (box.label or box.tag or "")[: phone.OVERLAY_MAX_LABEL]
-            arrows.append(OverlayArrow(angle_deg=round(angle, 1), label=label))
+            # The arrow keeps the box's tag (C3): the phone and the page give it the same tag and colour.
+            arrows.append(OverlayArrow(angle_deg=round(angle, 1), label=label, tag=box.tag))
     return shown, arrows
 
 

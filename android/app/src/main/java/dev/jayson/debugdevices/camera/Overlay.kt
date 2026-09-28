@@ -27,7 +27,9 @@ data class OverlayArrow(
     @SerialName("angle_deg")
     @Serializable(with = StrictFloatSerializer::class)
     val angleDeg: Float,
-    val label: String
+    val label: String,
+    /** The same rule as a box tag; without it, the arrow gets the next free letter. */
+    val tag: String? = null
 )
 
 /**
@@ -51,18 +53,21 @@ sealed interface OverlayCommand {
     data class SetVisible(val visible: Boolean) : OverlayCommand
 }
 
-/** A box of the scene in view pixels, with its optional tag and its label (the layout input before the dp conversion). */
-data class LayoutItem(val rect: PixelRect, val tag: String?, val label: String)
+/**
+ * A box of the scene in view pixels, with its optional tag and its label (the layout input before the dp conversion).
+ * [rect] is null when no part of the box is inside the view: the box keeps its place in the list, so its tag and
+ * colour stay the same as on the page.
+ */
+data class LayoutItem(val rect: PixelRect?, val tag: String?, val label: String)
 
 /** An arrow in view pixels: the tip near the preview edge and the tail towards the centre. */
 data class ViewArrow(val tip: PixelPoint, val tail: PixelPoint)
 
+/** An arrow of the scene in view pixels, with its optional tag and its label. */
+data class SceneArrow(val arrow: ViewArrow, val tag: String?, val label: String)
+
 /** What the overlay view draws: boxes and arrows in its pixels, and the viewer turn for upright labels. */
-data class OverlayScene(
-    val boxes: List<LayoutItem>,
-    val arrows: List<Pair<ViewArrow, String>>,
-    val viewerDegrees: Int
-) {
+data class OverlayScene(val boxes: List<LayoutItem>, val arrows: List<SceneArrow>, val viewerDegrees: Int) {
     companion object {
         val EMPTY = OverlayScene(emptyList(), emptyList(), 0)
     }
@@ -88,7 +93,10 @@ data class OverlayGeometry(
     val snapshotRotation: Int,
     /** Clockwise turn from the capture surface to the upright preview (portrait display). */
     val previewRotation: Int,
-    /** Width and height of the upright preview image (any unit, only the ratio counts). */
+    /**
+     * Width and height of the upright preview image: the Preview stream, not the still (any unit, only the ratio
+     * counts). With another aspect than the still, the preview is a centred crop of the still's field.
+     */
     val imageWidth: Float,
     val imageHeight: Float,
     /** Width and height of the snapshot in pixels: an arrow angle is a direction in these pixels. */
@@ -136,16 +144,21 @@ object OverlayLogic {
                 box.snapshotY + box.height <= MAX + Constants.Overlay.EDGE_TOLERANCE
             if (!inside) bad(Constants.Messages.OVERLAY_BAD_BOX)
             if (box.label.length > Constants.Overlay.MAX_LABEL_LENGTH) bad(Constants.Messages.OVERLAY_LABEL_TOO_LONG)
-            val tag = box.tag
-            if (tag != null && tag.length !in Constants.Overlay.MIN_TAG_LENGTH..Constants.Overlay.MAX_TAG_LENGTH) {
-                bad(Constants.Messages.OVERLAY_BAD_TAG)
-            }
+            checkTag(box.tag)
         }
         if (request.arrows.size > Constants.Overlay.MAX_ARROWS) bad(Constants.Messages.OVERLAY_TOO_MANY_ARROWS)
         for (arrow in request.arrows) {
             if (!arrow.angleDeg.isFinite()) bad(Constants.Messages.OVERLAY_BAD_ARROW)
             if (arrow.label.length > Constants.Overlay.MAX_LABEL_LENGTH) bad(Constants.Messages.OVERLAY_LABEL_TOO_LONG)
+            checkTag(arrow.tag)
         }
+    }
+
+    private val tagPattern = Regex(Constants.Overlay.TAG_PATTERN)
+
+    /** C7: a tag is 1-3 ASCII letters or digits (the same rule and count as the server). */
+    private fun checkTag(tag: String?) {
+        if (tag != null && !tagPattern.matches(tag)) bad(Constants.Messages.OVERLAY_BAD_TAG)
     }
 
     private fun bad(message: String): Nothing = throw ApiException(ErrorCode.BAD_REQUEST, message)
@@ -165,8 +178,50 @@ object OverlayLogic {
 
     /** A snapshot point (already rescaled) to preview view pixels. */
     fun snapshotToView(x: Float, y: Float, geometry: OverlayGeometry): Pair<Float, Float> {
-        val (surfaceX, surfaceY) = FocusTapLogic.snapshotToSurface(x, y, geometry.snapshotRotation)
+        val (captureX, captureY) = FocusTapLogic.snapshotToSurface(x, y, geometry.snapshotRotation)
+        val (surfaceX, surfaceY) = captureToPreview(captureX, captureY, geometry)
         val (imageX, imageY) = surfaceToImage(surfaceX, surfaceY, geometry.previewRotation)
+        return imageToView(imageX, imageY, geometry)
+    }
+
+    /** Width over height of the capture surface (the snapshot before its rotation). */
+    private fun captureAspect(g: OverlayGeometry): Float =
+        if (isSideways(g.snapshotRotation)) g.snapshotHeight / g.snapshotWidth else g.snapshotWidth / g.snapshotHeight
+
+    /** Width over height of the preview surface (the upright preview image before its rotation). */
+    private fun previewAspect(g: OverlayGeometry): Float =
+        if (isSideways(g.previewRotation)) g.imageHeight / g.imageWidth else g.imageWidth / g.imageHeight
+
+    private fun isSideways(degrees: Int): Boolean =
+        Math.floorMod(degrees, 2 * Constants.Orientation.BUCKET_DEGREES) != 0
+
+    /**
+     * A normalized capture-surface point to the preview surface. With another aspect the preview stream is the
+     * largest centred crop of the capture field (a wider preview loses the top and bottom, a narrower one the sides).
+     */
+    fun captureToPreview(x: Float, y: Float, geometry: OverlayGeometry): Pair<Float, Float> {
+        val capture = captureAspect(geometry)
+        val preview = previewAspect(geometry)
+        return when {
+            preview > capture -> (capture / preview).let { f -> x to (y - (MAX - f) / HALF) / f }
+            preview < capture -> (preview / capture).let { f -> (x - (MAX - f) / HALF) / f to y }
+            else -> x to y
+        }
+    }
+
+    /** The inverse of [captureToPreview]. */
+    fun previewToCapture(x: Float, y: Float, geometry: OverlayGeometry): Pair<Float, Float> {
+        val capture = captureAspect(geometry)
+        val preview = previewAspect(geometry)
+        return when {
+            preview > capture -> (capture / preview).let { f -> x to y * f + (MAX - f) / HALF }
+            preview < capture -> (preview / capture).let { f -> x * f + (MAX - f) / HALF to y }
+            else -> x to y
+        }
+    }
+
+    /** A normalized point of the upright preview image to view pixels: the FILL crop or FIT letterbox, then the flips. */
+    fun imageToView(imageX: Float, imageY: Float, geometry: OverlayGeometry): Pair<Float, Float> {
         val scaleX = geometry.viewWidth / geometry.imageWidth
         val scaleY = geometry.viewHeight / geometry.imageHeight
         val scale = if (geometry.fill) maxOf(scaleX, scaleY) else minOf(scaleX, scaleY)
@@ -200,12 +255,9 @@ object OverlayLogic {
 
     /** The shown preview image in view pixels: the whole view for FILL, the letterbox for FIT. */
     fun shownArea(geometry: OverlayGeometry): PixelRect {
-        val (left, top) = snapshotToViewUnflipped(MIN, MIN, geometry.copy(snapshotRotation = geometry.previewRotation))
-        val (right, bottom) = snapshotToViewUnflipped(
-            MAX,
-            MAX,
-            geometry.copy(snapshotRotation = geometry.previewRotation)
-        )
+        val unflipped = geometry.copy(mirroredX = false, mirroredY = false)
+        val (left, top) = imageToView(MIN, MIN, unflipped)
+        val (right, bottom) = imageToView(MAX, MAX, unflipped)
         return PixelRect(
             maxOf(minOf(left, right), 0f),
             maxOf(minOf(top, bottom), 0f),
@@ -213,9 +265,6 @@ object OverlayLogic {
             minOf(maxOf(top, bottom), geometry.viewHeight)
         )
     }
-
-    private fun snapshotToViewUnflipped(x: Float, y: Float, geometry: OverlayGeometry) =
-        snapshotToView(x, y, geometry.copy(mirroredX = false, mirroredY = false))
 
     /** The unit direction in view pixels of a snapshot angle, after rotation, aspect, and flips. */
     fun arrowDirection(angleDeg: Float, geometry: OverlayGeometry): PixelPoint {
@@ -262,7 +311,8 @@ object OverlayLogic {
 
     /**
      * The part of the snapshot that the preview view shows. Zoom and flips do not change it: the preview and the
-     * snapshot share the zoom crop, and a mirror maps the centred FILL crop onto itself. FIT shows the whole image.
+     * snapshot share the zoom crop, and a mirror maps the centred FILL crop onto itself. FIT shows the whole preview
+     * image, which is the whole snapshot only when the preview and the still have the same aspect.
      */
     fun previewRegion(geometry: OverlayGeometry): PreviewRegion {
         val scaleX = geometry.viewWidth / geometry.imageWidth
@@ -276,10 +326,44 @@ object OverlayLogic {
             CENTRE + visibleX / HALF to CENTRE + visibleY / HALF
         ).map { (x, y) ->
             val (surfaceX, surfaceY) = FocusTapLogic.snapshotToSurface(x, y, geometry.previewRotation)
-            surfaceToImage(surfaceX, surfaceY, geometry.snapshotRotation)
+            val (captureX, captureY) = previewToCapture(surfaceX, surfaceY, geometry)
+            surfaceToImage(captureX, captureY, geometry.snapshotRotation)
         }
         val left = corners.minOf { it.first }
         val top = corners.minOf { it.second }
         return PreviewRegion(left, top, corners.maxOf { it.first } - left, corners.maxOf { it.second } - top)
+    }
+
+    /** The inverse of [snapshotToView] at the current zoom: a view pixel to a normalized snapshot point. */
+    fun viewToSnapshot(viewX: Float, viewY: Float, geometry: OverlayGeometry): Pair<Float, Float> {
+        val x = if (geometry.mirroredX) geometry.viewWidth - viewX else viewX
+        val y = if (geometry.mirroredY) geometry.viewHeight - viewY else viewY
+        val scaleX = geometry.viewWidth / geometry.imageWidth
+        val scaleY = geometry.viewHeight / geometry.imageHeight
+        val scale = if (geometry.fill) maxOf(scaleX, scaleY) else minOf(scaleX, scaleY)
+        val shownWidth = geometry.imageWidth * scale
+        val shownHeight = geometry.imageHeight * scale
+        val imageX = (x - (geometry.viewWidth - shownWidth) / HALF) / shownWidth
+        val imageY = (y - (geometry.viewHeight - shownHeight) / HALF) / shownHeight
+        val (surfaceX, surfaceY) = FocusTapLogic.snapshotToSurface(imageX, imageY, geometry.previewRotation)
+        val (captureX, captureY) = previewToCapture(surfaceX, surfaceY, geometry)
+        return surfaceToImage(captureX, captureY, geometry.snapshotRotation)
+    }
+
+    /**
+     * `CameraStatus.overlay_region`: the part of the snapshot under [safeRect] (the phone view, in view pixels), inside
+     * [previewRegion]. Unlike `preview_region` it can change with the flips: the safe area is not symmetric (a status
+     * bar at the top, a navigation bar at the bottom). Null when nothing is left.
+     */
+    fun overlayRegion(safeRect: PixelRect, geometry: OverlayGeometry): PreviewRegion? {
+        val a = viewToSnapshot(safeRect.left, safeRect.top, geometry)
+        val b = viewToSnapshot(safeRect.right, safeRect.bottom, geometry)
+        val preview = previewRegion(geometry)
+        val left = maxOf(minOf(a.first, b.first), preview.snapshotX)
+        val top = maxOf(minOf(a.second, b.second), preview.snapshotY)
+        val right = minOf(maxOf(a.first, b.first), preview.snapshotX + preview.width)
+        val bottom = minOf(maxOf(a.second, b.second), preview.snapshotY + preview.height)
+        if (right <= left || bottom <= top) return null
+        return PreviewRegion(left, top, right - left, bottom - top)
     }
 }

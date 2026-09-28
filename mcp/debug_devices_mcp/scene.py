@@ -29,6 +29,16 @@ SCENE_CHANGED_MESSAGE = (
     "the board or the phone moved since your last phone_snapshot: take a fresh phone_snapshot and look again "
     "(the board may be rotated)"
 )
+# Without a scene watcher (--no-ui, --no-phone-screen, or no phone screen stream), a move cannot be seen: the photos
+# and registrations expire, and a change of the camera view makes them stale.
+UNWATCHED_EXPIRED_MESSAGE = (
+    "no scene watcher checks the phone screen (no stream), so the server cannot see a move: photos and registrations "
+    "expire {minutes:g} minutes after the last phone_snapshot. Take a fresh phone_snapshot"
+)
+UNWATCHED_VIEW_MESSAGE = (
+    "the camera view changed ({what}) while no scene watcher checks the phone screen: take a fresh phone_snapshot"
+)
+SECONDS_PER_MINUTE = 60
 
 type SceneListener = Callable[[datetime], Awaitable[None]]
 type FrameListener = Callable[[bytes], Awaitable[None]]
@@ -66,6 +76,13 @@ class SceneOptions:
     settle: timedelta = timedelta(milliseconds=1500)
     # How often the frame feed checks if it must switch between the page fallback decoder and its own one.
     switch_check: timedelta = timedelta(seconds=1)
+    # The watcher counts as running when it got a frame this recently.
+    watch_timeout: timedelta = timedelta(seconds=5)
+    # Without a running watcher, photos and registrations expire this long after the last phone_snapshot (or after
+    # the watcher stopped, when that is later).
+    unwatched_max_age: timedelta = timedelta(minutes=5)
+    # How often the server checks that expiry (expiry_loop).
+    expiry_check: timedelta = timedelta(seconds=1)
 
 
 DEFAULT_OPTIONS = SceneOptions()
@@ -84,6 +101,11 @@ class SceneState:
         self._clock = clock
         self._options = options
         self.changed_at: datetime | None = None
+        # Why the scene counts as changed (the message for the tools); None while it is not changed.
+        self.change_reason: str | None = None
+        # Clock times: the last phone_snapshot, and the last frame that the scene watcher got.
+        self.snapshot_at: float | None = None
+        self.watched_at: float | None = None
         # True: the watcher takes the next frame after `settle_until` as its new reference.
         self.reference_wanted = False
         self.settle_until = 0.0
@@ -118,6 +140,8 @@ class SceneState:
     def snapshot_taken(self) -> None:
         """A new phone_snapshot: the scene is the one in this photo. The next frame is the new reference."""
         self.changed_at = None
+        self.change_reason = None
+        self.snapshot_at = self._clock()
         self.reference_wanted = True
         self.settle_until = 0.0
         self.generation += 1
@@ -132,10 +156,50 @@ class SceneState:
 
     def guard(self) -> None:
         if self.changed:
-            raise ToolError(SCENE_CHANGED_MESSAGE)
+            raise ToolError(self.change_reason or SCENE_CHANGED_MESSAGE)
 
-    async def mark_changed(self) -> None:
+    # region: no scene watcher
+
+    def watcher_alive(self) -> None:
+        """The scene watcher got a frame now."""
+        self.watched_at = self._clock()
+
+    @property
+    def watching(self) -> bool:
+        watched = self.watched_at
+        return watched is not None and self._clock() - watched <= self._options.watch_timeout.total_seconds()
+
+    async def expire_unwatched(self) -> bool:
+        """Without a running watcher: mark the scene changed when the last phone_snapshot (or the last watched frame,
+        when later) is older than `unwatched_max_age`. True when it marked it."""
+        if self.snapshot_at is None or self.changed or self.watching:
+            return False
+        since = max(self.snapshot_at, self.watched_at or self.snapshot_at)
+        max_age = self._options.unwatched_max_age.total_seconds()
+        if self._clock() - since <= max_age:
+            return False
+        await self.mark_changed(UNWATCHED_EXPIRED_MESSAGE.format(minutes=max_age / SECONDS_PER_MINUTE))
+        return True
+
+    async def unwatched_view_change(self, what: str) -> bool:
+        """Our command changed the camera view (zoom, rotation, flips, sensor zoom). With a running watcher it takes
+        a new reference; without one, the old photos and registrations become stale. True when it marked it."""
+        if self.snapshot_at is None or self.changed or self.watching:
+            return False
+        await self.mark_changed(UNWATCHED_VIEW_MESSAGE.format(what=what))
+        return True
+
+    async def expiry_loop(self) -> None:
+        """Run while the server runs: expire the scene when no watcher runs (see expire_unwatched)."""
+        while True:
+            await asyncio.sleep(self._options.expiry_check.total_seconds())
+            await self.expire_unwatched()
+
+    # endregion: no scene watcher
+
+    async def mark_changed(self, reason: str = SCENE_CHANGED_MESSAGE) -> None:
         self.changed_at = datetime.now(UTC)
+        self.change_reason = reason
         self.reference_wanted = False
         for listener in self._listeners:
             try:
@@ -264,6 +328,7 @@ class SceneWatcher:
     async def check(self, jpeg: bytes) -> None:
         """Compare one frame (the loop calls this about twice per second)."""
         state = self.state
+        state.watcher_alive()
         if state.generation != self._generation:
             self._generation = state.generation
             self._reference = None

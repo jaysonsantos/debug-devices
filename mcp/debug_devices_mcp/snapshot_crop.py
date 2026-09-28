@@ -64,6 +64,16 @@ class CropOutsideError(ValueError):
     """The crop area is not on the image."""
 
 
+def precheck_crop(request: SnapshotCrop, max_side: int) -> None:
+    """Before the still: refuse an area that cannot be on the image (the image is at most `max_side` px; 0: no
+    limit). The exact check needs the image and comes after it (crop_snapshot)."""
+    area = request.area()
+    if area.x + area.width <= 0 or area.y + area.height <= 0:
+        raise CropOutsideError("the crop area is left of or above the image (negative pixels)")
+    if max_side > 0 and (area.x >= max_side or area.y >= max_side):
+        raise CropOutsideError(f"the crop area starts outside the image (the image is at most {max_side} px)")
+
+
 def crop_snapshot(full_jpeg: bytes, shown_size: tuple[int, int], request: SnapshotCrop) -> tuple[bytes, CropInfo]:
     """Cut the area from the full-resolution still (already turned and flipped), enlarge it, and encode it."""
     with PilImage.open(io.BytesIO(full_jpeg)) as opened:

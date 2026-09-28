@@ -57,6 +57,8 @@ def test_parse_controls() -> None:
 def test_exposure_turns_the_automatic_exposure_off_first() -> None:
     assert WebcamControls(exposure=800).settings() == {"auto_exposure": 1, "exposure_time_absolute": 800}
     assert WebcamControls(auto_exposure=True).settings() == {"auto_exposure": 3}
+    # Saved with auto exposure on: the fixed time is left out (the camera refuses it in auto mode).
+    assert WebcamControls(auto_exposure=True, exposure=300).settings() == {"auto_exposure": 3}
     assert WebcamControls(brightness=20, contrast=40).settings() == {"brightness": 20, "contrast": 40}
 
 
@@ -67,7 +69,8 @@ async def test_update_sets_checks_and_persists(tmp_path: Path) -> None:
 
     report = await controls.update(WebcamControls(brightness=30, exposure=900))
 
-    assert set_calls(runner) == ["brightness=30,auto_exposure=1,exposure_time_absolute=900"]
+    # The exposure mode goes first, in its own call (B-F10 of QA round 4).
+    assert set_calls(runner) == ["auto_exposure=1", "brightness=30,exposure_time_absolute=900"]
     assert all(command[:3] == ["v4l2-ctl", "-d", str(DEVICE)] for command in runner.calls)
     assert report.saved.brightness == 30
     assert WebcamControlStore(tmp_path / "webcam-controls.json").load().exposure == 900

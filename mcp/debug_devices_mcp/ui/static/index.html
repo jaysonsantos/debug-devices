@@ -131,12 +131,19 @@
         <summary>Devices <small id="devices-selected"></small></summary>
         <div class="row">
           <button id="devices-refresh" type="button">Refresh</button>
-          <button id="devices-clear" type="button" title="Go back to --adb-serial / DEBUG_DEVICES_ADB_SERIAL">Clear selection</button>
+          <button id="devices-clear" type="button" title="Stop the phone (screen stream, adb forward) and go back to --adb-serial / DEBUG_DEVICES_ADB_SERIAL. Works also when the phone is gone.">Disconnect</button>
         </div>
         <table id="devices-table">
           <thead><tr><th>Serial</th><th>Link</th><th>State</th><th>Model</th><th>Camera app</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
+        <div id="devices-network" hidden>
+          <p class="hint">Found on the network (wireless debugging). Nothing connects by itself: you choose.</p>
+          <table id="devices-network-table">
+            <thead><tr><th>Name</th><th>Model</th><th>Address</th><th>Kind</th><th>In adb</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
         <p id="devices-mdns" class="hint"></p>
         <form id="devices-connect" class="row">
           <input id="connect-address" type="text" placeholder="IP:port (tcpip mode)" autocomplete="off" spellcheck="false" aria-label="Address to connect">

@@ -34,7 +34,7 @@ This plan tests the phone app (`android/`), the MCP server (`mcp/`), and the con
 | `--physical-rotation N` | The phone orientation (0, 90, 180, 270). The auto rotation follows it. |
 | `--internal-error` | All camera endpoints return 500 `internal_error` |
 | `--start-delay S` | For `S` seconds, the camera endpoints return 503 `camera_not_ready`. Then the start state applies. |
-| `--snapshot FILE` | Serve `FILE` as the snapshot, for example a real webcam frame |
+| `--snapshot FILE` | Serve `FILE` as the sensor image, for example a real webcam frame. The fake turns it with the rotation only when Pillow is installed (a note says so otherwise). |
 | `--self-check` | Start the server in each mode and run `qa_contract.py` against it |
 
 ## 1. Contract tests
@@ -54,7 +54,7 @@ Expected result: `self-check PASSED`. This proves that the checks and the fake a
 | Check | What it checks |
 |---|---|
 | `health` | 200, `ok` is `true`, `app_version` is a string that is not empty |
-| `status` | 200, `application/json`, exactly the 5 `CameraStatus` keys with the correct types, `0 < min <= zoom <= max` |
+| `status` | 200, `application/json`, exactly the `CameraStatus` keys of the contract with the correct types (`focus`, `optics`, `preview_region`, `app_start_id` UUID v7), `0 < min <= zoom <= max`. `app_start_id` does not change between two reads. |
 | `zoom_ratio` | `ratio` = min, middle, max gives that ratio. `GET /v1/status` shows the same value. |
 | `zoom_clamp` | `ratio` above max gives max. `ratio` below min, 0, or negative gives min. |
 | `zoom_step` | `in` from min gives `min * 1.5` (clamped). `out` divides by 1.5. `out` at min stays at min. |
@@ -62,12 +62,16 @@ Expected result: `self-check PASSED`. This proves that the checks and the fake a
 | `zoom_bad_request` | Bad bodies give 400 `bad_request`, and the zoom does not change |
 | `torch` | With a flash unit: on, then off, and `GET /v1/status` agrees. Without one: 409 `no_flash_unit`. |
 | `torch_bad_request` | Missing or non-bool `enabled` gives 400 `bad_request` |
-| `snapshot` | 200, `image/jpeg`, SOI and EOI markers, a SOF segment. It prints the width and height. |
+| `snapshot` | 200, `image/jpeg`, SOI and EOI markers, a SOF segment. EXIF `Orientation` is 1 or absent (the app turns the pixels). The headers `X-Rotation-Degrees` (0, 90, 180, 270; equal to the status) and `X-App-Start-Id` (equal to the status) are present. |
 | `snapshot_keeps_torch` | With a flash unit: torch on, snapshot, torch still on. Then the same with the torch off. |
 | `rotation` | Lock 0, 90, 180, 270: each gives that `rotation_degrees` with `rotation_locked: true`, and `GET /v1/status` agrees. `{"auto": true}` gives `rotation_locked: false`. |
 | `rotation_bad_request` | Bad rotation bodies give 400 `bad_request`: 45, `"90"`, `true`, 90.5, `auto: false`, `auto: "true"`, both fields, neither |
-| `post_needs_json_content_type` | A POST to zoom, torch, or rotation without `Content-Type: application/json` (none, or `text/plain`) gives 400, and nothing changes |
-| `snapshot_rotation` | Lock each rotation and take a snapshot. The displayed size (pixel size turned by the EXIF orientation) of 90 and 270 is the size of 0 and 180 with width and height swapped. |
+| `post_needs_json_content_type` | A POST to zoom, torch, rotation, preview, camera, focus, or overlay without `Content-Type: application/json` (none, or `text/plain`) gives 400, and nothing changes |
+| `preview`, `camera`, `af_mode`, `focus` | Each setting follows the POST and the status; bad bodies give 400 |
+| `overlay` | 5 boxes (one with tag `U1`; one at the right edge and one at the bottom edge inside the 0.0001 tolerance), 8 boxes, then 400 for bad bodies: more than 8, size 0, outside the image, beyond the tolerance at the right or bottom edge, `x` or `y` of -0.00005 (0 is strict), label over 32, tags that do not match `^[A-Za-z0-9]{1,3}$` (4 characters, empty, `A-B`, `A B`, `É`, two emojis, a number). A refused body keeps the boxes. |
+| `overlay_arrows` | 3 arrows (one with tag `A1`); 400 for more than 4, a string angle, a long label, an unknown field, arrows without `boxes`, and bad arrow tags; a body without `arrows` removes them |
+| `overlay_visible` | Hide and show: the kept boxes and arrows stay in `overlay_boxes` and `overlay_arrows` while hidden; 400 for `visible` together with `boxes` or `arrows` |
+| `snapshot_rotation` | Lock each rotation and take a snapshot. The pixel size of 90 and 270 is the size of 0 and 180 with width and height swapped (clients do not read EXIF). `X-Rotation-Degrees` is the locked value; EXIF `Orientation` is 1 or absent. |
 | `concurrent_zoom` | 8 zoom requests at the same time. Each gets 200 with its own ratio. No request cancels another. |
 | `method_not_allowed` | A known path with a wrong method gives 405 `method_not_allowed`: `GET /v1/zoom`, `GET /v1/torch`, `POST /v1/status`, `POST /v1/health`, `POST /v1/snapshot` |
 | `not_found` | Unknown path gives 404 `not_found` for `GET` and `POST` |
@@ -81,6 +85,10 @@ The script restores the zoom ratio and the torch state that it found at the star
 - A zoom body with `"ratio": 1e400` (overflow) or `"step": "IN"` (wrong case) gives 400 `bad_request`.
 - `PUT /v1/zoom` and `DELETE /v1/status` give 405 `method_not_allowed`.
 - Rotation bodies `-90`, `360`, `"degrees": null`, and `"auto": null` give 400 `bad_request`.
+- `preview_region` at rotation 90 is the region at rotation 0 turned: width and height swap (2 % tolerance). A zoom to max and both preview flips do not change it.
+- `overlay_region` is inside `preview_region` (2 % tolerance), with no flip and with a vertical flip, and a vertical preview flip moves it (by more than 0.001). Every status also checks that `overlay_region` has the format of a region and is `null` exactly when `preview_region` is `null`.
+- One `POST /v1/camera` body with both `in_sensor_zoom` and `af_mode` gives 200 and sets both.
+- A preview flip does not change the snapshot: the same displayed size and the same EXIF orientation.
 - `POST /v1/focus` on the screen edges (`screen_x` 0.5, `screen_y` 0 and 1): 200 when the preview covers the edge, else 400 `bad_request` with a message that contains "outside the preview". The app layout decides which one, so the script notes a 200.
 
 `--expect starting` is for a run right after `am start`. It polls `/v1/status`. Every answer must be 503 `camera_not_ready` until the first 200. The first 200 must show the start state. Then the normal checks run.
@@ -91,7 +99,11 @@ The start state now also has `rotation_locked: false` (auto). `--after-start` an
 
 `--expect starting-race` is also for a run right after `am start`. It sends `POST /v1/zoom {"ratio": 3}` until it gets 200. Every earlier answer must be 503 `camera_not_ready`. Then the app must answer health and status for 3 s. A connection error in this time means a crash. This is the check for bug 1 of round 1.
 
-`--after-start` adds one check before the others: the torch is off and the zoom is at min. Use it only right after an app start.
+`--after-start` adds one check before the others: the start state (torch off, zoom 1.0 when 1.0 is inside `[min, max]` else min, rotation auto, no preview flip, in-sensor zoom off, af_mode continuous, no boxes or arrows, overlay visible). Use it only right after an app start.
+
+`--expect not-ready` and `--expect background` also check 503 on `/v1/preview`, `/v1/camera`, `/v1/focus`, and `/v1/overlay`. The content-type check covers these four routes too.
+
+The self-check has an `ultrawide` mode (`min_zoom_ratio` 0.6): the start zoom must be 1.0, not 0.6.
 
 `--expect not-ready` checks a camera that is not bound: health 200, and 503 `camera_not_ready` on the other endpoints.
 
@@ -153,8 +165,14 @@ export FAKE_ADB_LOG=/tmp/dd-qa/fake_adb.log
 ### 2.2 Automatic run
 
 ```sh
-uv run python scripts/qa_mcp_stdio.py --snapshot /tmp/dd-qa/frame_1080p.jpg --real-adb-several-devices
+uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <scratch dir>
 ```
+
+- Each run uses a fresh `XDG_STATE_HOME` in the scratch directory. The MCP server then does not read or write the user's saved phone selection, board session, or page settings (`~/.local/state/debug-devices/`).
+- `--skip-webcam` skips the cases that need a webcam frame (`webcam_snapshot` and the mock `multimeter_read` cases).
+- The `fire-tv` group uses `FAKE_ADB_STATE` with a Fire TV in state `device`, the phone `unauthorized`, and no selection. `phone_connect` must refuse and send no command to the Fire TV (AGENTS.md: adb only to the selected serial).
+- `phone_snapshot` compares image sizes, not bytes: the server turns and flips the still like the monitor preview (`turn_degrees` in the text part).
+- `--real-adb-several-devices` uses the real adb with no selection: `phone_connect` must answer "no phone is selected" and run only `adb devices -l`. It uses the real adb. Use it only when the adb client and the running adb server have the same version (a mismatch restarts the server and drops the phone).
 
 The script starts the MCP with `--no-ui` (no monitor window, no scrcpy, no shared webcam stream). The webcam must be free: another MCP process with its UI on holds `/dev/video0`. The script starts the fake phone, the mock OpenRouter, and one MCP server process for each group of cases. It replaces `OPENROUTER_API_KEY` with a dummy value. It never sends a request to OpenRouter. `--real-adb-several-devices` runs `phone_connect` with the real adb and no serial. Only `adb devices -l` runs, and the server must refuse.
 

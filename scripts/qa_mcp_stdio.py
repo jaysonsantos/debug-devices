@@ -22,6 +22,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_adb
 import fake_phone
+import qa_contract
 
 # region: constants
 
@@ -54,6 +56,7 @@ MISSING_WEBCAM = "/dev/video99"
 SHORT_TIMEOUT_SECONDS = "3"
 TOOL_TIMEOUT_SECONDS = 60.0
 ZOOM_STEP_FACTOR = 1.5
+HALF_TURN = 180
 # phone_snapshot and webcam_snapshot downscale the long side to this by default. 0 means full size.
 DEFAULT_MAX_SIDE = 1568
 FULL_SIZE = 0
@@ -265,9 +268,21 @@ class World:
     snapshot: bytes
 
 
-def served_snapshot(world: World) -> bytes:
-    """The fake phone adds an EXIF orientation segment for the current rotation (auto, upright: 0 degrees)."""
-    return fake_phone.with_exif_orientation(world.snapshot, fake_phone.DEGREES_TO_EXIF_ORIENTATION[0])
+def snapshot_turn(result: CallToolResult) -> int:
+    """The final clockwise turn that the server applied (`turn_degrees` in the JSON text part, 0 when absent)."""
+    texts = [block.text for block in result.content if isinstance(block, TextContent)]
+    try:
+        info = json.loads(texts[0]) if texts else {}
+    except json.JSONDecodeError:
+        return 0
+    return int(info.get("turn_degrees", 0)) if isinstance(info, dict) else 0
+
+
+def shown_size(world: World, turn_degrees: int) -> tuple[int, int]:
+    """The size of the still that the fake serves now (its EXIF orientation applied), after the server's turn."""
+    served = world.phone.RequestHandlerClass.camera.snapshot()
+    width, height = qa_contract.displayed_size(served)
+    return (height, width) if turn_degrees % HALF_TURN else (width, height)
 
 
 def fake_cases(world: World, with_webcam: bool) -> list[tuple[str, Case]]:  # noqa: PLR0915 (one closure per case)
@@ -314,17 +329,26 @@ def fake_cases(world: World, with_webcam: bool) -> list[tuple[str, Case]]:  # no
     async def snapshot(session: ClientSession) -> str:
         width, height, size = expect_image(await call(session, "phone_snapshot"))
         expect(max(width, height) <= DEFAULT_MAX_SIDE, f"default snapshot is {width}x{height}, over {DEFAULT_MAX_SIDE}")
-        _, _, full_size = expect_image(await call(session, "phone_snapshot", max_side=FULL_SIZE))
-        served = served_snapshot(world)
-        expect(full_size == len(served), f"max_side=0: size {full_size} != served {len(served)}")
-        return f"default {width}x{height} {size} bytes, max_side=0 {full_size} bytes"
+        # The server turns and flips the still like the monitor preview, so compare sizes, not bytes.
+        result = await call(session, "phone_snapshot", max_side=FULL_SIZE)
+        full_width, full_height, _ = expect_image(result)
+        wanted = shown_size(world, snapshot_turn(result))
+        info = text_of(result)[:300]
+        expect(
+            (full_width, full_height) == wanted, f"max_side=0: {full_width}x{full_height}, expected {wanted}: {info}"
+        )
+        return f"default {width}x{height} {size} bytes, max_side=0 {full_width}x{full_height}"
 
     async def snapshot_save(session: ClientSession) -> str:
         target = world.adb_log.parent / "mcp_phone_snapshot.jpg"
         target.unlink(missing_ok=True)
-        expect_image(await call(session, "phone_snapshot", save_path=str(target)))
-        expect(target.read_bytes() == served_snapshot(world), "saved file differs from the snapshot")
-        return str(target)
+        result = await call(session, "phone_snapshot", save_path=str(target))
+        expect_image(result)
+        saved = target.read_bytes()
+        expect(saved.startswith(JPEG_SOI), "the saved file is not a JPEG")
+        wanted = shown_size(world, snapshot_turn(result))
+        expect(jpeg_size(saved) == wanted, f"saved file is {jpeg_size(saved)}, expected the full size {wanted}")
+        return f"{target} {jpeg_size(saved)}"
 
     def phone_error_case(config: fake_phone.FakeConfig, tool: str, code: str, **arguments: Any) -> Case:
         async def case(session: ClientSession) -> str:
@@ -432,9 +456,38 @@ def missing_webcam_cases() -> list[tuple[str, Case]]:
 
 def several_devices_cases() -> list[tuple[str, Case]]:
     async def several(session: ClientSession) -> str:
-        return expect_tool_error(await call(session, "phone_connect"), "several adb devices")[:200]
+        # With no selection, the server refuses and runs only `adb devices -l` (AGENTS.md, QA round 4 S1).
+        return expect_tool_error(await call(session, "phone_connect"), "no phone is selected")[:200]
 
     return [("adb_several_devices_no_serial", several)]
+
+
+# A Fire TV in state "device" and the phone not authorized: only one device is ready, but it is not the phone.
+FIRE_TV_SERIAL = "192.0.2.50:5555"
+FIRE_TV_ONLY_STATE: dict[str, Any] = {
+    "devices": [
+        {"serial": FIRE_TV_SERIAL, "state": "device", "model": "AFTR", "product": "raven", "app": False},
+        {"serial": "R5CT0000001", "state": "unauthorized"},
+    ]
+}
+
+
+def read_text_or_empty(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
+
+
+def fire_tv_cases(adb_log: Path) -> list[tuple[str, Case]]:
+    """AGENTS.md: adb only to the serial that the user selected. With no selection, nothing goes to a device."""
+
+    async def no_command_to_unselected(session: ClientSession) -> str:
+        result = await call(session, "phone_connect")
+        log = await asyncio.to_thread(read_text_or_empty, adb_log)
+        sent = [line for line in log.splitlines() if f"-s {FIRE_TV_SERIAL}" in line]
+        expect(not sent, f"phone_connect sent {len(sent)} command(s) to the unselected Fire TV: {sent[:2]}")
+        expect(result.is_error, f"phone_connect did not refuse: {text_of(result)[:200]}")
+        return text_of(result)[:160]
+
+    return [("no_selection_fire_tv_only", no_command_to_unselected)]
 
 
 # endregion: cases
@@ -484,7 +537,7 @@ def check_stdout_is_jsonrpc(env: dict[str, str]) -> CaseResult:
 # endregion: stdout hygiene
 
 
-async def main_async(args: argparse.Namespace, adb_log: Path, snapshot: bytes) -> int:
+async def main_async(args: argparse.Namespace, adb_log: Path, snapshot: bytes, state_home: Path) -> int:
 
     phone = start(fake_phone.make_server(HOST, EPHEMERAL_PORT, fake_phone.FakeConfig(snapshot=snapshot), quiet=True))
     openrouter = MockOpenRouter()
@@ -498,6 +551,8 @@ async def main_async(args: argparse.Namespace, adb_log: Path, snapshot: bytes) -
         "DEBUG_DEVICES_VISION_MODEL": DEFAULT_MODEL,
         "OPENROUTER_API_KEY": DUMMY_API_KEY,
         "FAKE_ADB_LOG": str(adb_log),
+        # Never read or write the user's saved phone selection, board session, or page settings.
+        "XDG_STATE_HOME": str(state_home),
     }
     world = World(phone, openrouter, adb_log, snapshot)
 
@@ -507,6 +562,17 @@ async def main_async(args: argparse.Namespace, adb_log: Path, snapshot: bytes) -
     results += await run_session(
         "no-webcam", {**base_env, "DEBUG_DEVICES_WEBCAM": MISSING_WEBCAM}, missing_webcam_cases()
     )
+    fire_tv_log = SCRATCH / "fake_adb_fire_tv.log"
+    fire_tv_log.unlink(missing_ok=True)
+    fire_tv_state = SCRATCH / "fake_adb_fire_tv.json"
+    fire_tv_state.write_text(json.dumps(FIRE_TV_ONLY_STATE))
+    fire_tv_env = {
+        **base_env,
+        "DEBUG_DEVICES_ADB_SERIAL": "",
+        "FAKE_ADB_STATE": str(fire_tv_state),
+        "FAKE_ADB_LOG": str(fire_tv_log),
+    }
+    results += await run_session("fire-tv", fire_tv_env, fire_tv_cases(fire_tv_log))
     if args.real_adb_several_devices:
         # Real adb, empty serial: the server must refuse before it sends any command to a device.
         env = {**base_env, "DEBUG_DEVICES_ADB_PATH": "adb", "DEBUG_DEVICES_ADB_SERIAL": ""}
@@ -538,7 +604,9 @@ def main() -> int:
     adb_log = scratch / "fake_adb.log"
     adb_log.unlink(missing_ok=True)
     snapshot = Path(args.snapshot).read_bytes() if args.snapshot else fake_phone.TEST_JPEG
-    return asyncio.run(main_async(args, adb_log, snapshot))
+    # A fresh state directory per run: no saved selection or board session from the user or an earlier run.
+    state_home = Path(tempfile.mkdtemp(prefix="state-", dir=scratch))
+    return asyncio.run(main_async(args, adb_log, snapshot, state_home))
 
 
 if __name__ == "__main__":
