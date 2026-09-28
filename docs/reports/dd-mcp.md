@@ -990,3 +990,80 @@ Result: "93.2 V" with 6000 counts, or at a low confidence, is now "disputed" wit
 ### Checks
 
 - `uv run pytest`: 909 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## QA round 8 follow-up (last round): N13 to N17, and the three B-E3 rule 2 cases
+
+### What I did
+
+- N13 (fail safe, `bench_state.py`): every voltage reading above 0.5 V closes the gate, also when it is "uncertain" or "disputed".
+  - `result_voltage` takes the number from the LCD text of the result and of each frame, and it uses the highest one. The unit prefix counts. An unreadable unit in a voltage mode counts as volts. An overload counts as above every limit.
+  - `multimeter_read` and `bench_measure` call `note_meter_reading` in `read_meter` (`server.py`). The reading becomes an unsafe "unknown point <capture id>", and the result has the new field `bench_notice`.
+  - `bench_record_measurement` puts the event at the named point, or at the unknown point when the name is refused. It saves the record, then refuses an unconfirmed result.
+  - When the agent records the same capture with a point name, the unknown point moves to that point.
+  - An unconfirmed safe reading never opens the gate.
+  - One exception: a diode-mode reading is not a voltage reading for the gate, because the meter shows its own test voltage (a diode drop is about 0.6 V). Without this exception, every diode test would close the gate. A diode reading above 3 V is already "uncertain" (item D).
+- B-E3 rule 2, the three cases:
+  - (a) and N15: an unsafe reading is a point in any power state, also before the current confirmation. It needs a newer safe DC reading at the same point, or a user clearance.
+  - (b): a refused name keeps the unsafe reading as an unknown point, so a new confirmation and a safe reading at another point do not open the gate. A later record of that capture with a point name moves the event to that point.
+  - (c): `set_point` keeps the newer entry. An older reading never replaces a newer one, and at the same time the unsafe one stays.
+- N14: `label_conflict` refuses a capture id that is already recorded for another point ("capture ... is already recorded for 'VBUS': one reading belongs to one point"). Other spellings of the same point are the same point.
+- N16 (`bench_points.py`): `GROUND_NET_PATTERNS` ("*GND*", "*VSS*", "0V", "EARTH*", "CHASSIS*") is the one named list. A ground net, or a pin on a ground net (checked against the open board), is refused as a point name. So it is never a point and never the safe reading.
+- N17:
+  - The step result is decided before the reading changes the gate.
+  - The open power checks follow the gate, also when the step is refused.
+  - A re-record of the same capture with a step completes that step and sets the step on the measurement.
+  - The refusal no longer says "do not record it again". It says: "To attach it to a step, record the same capture_id again with that step_id and the same label."
+- Safe confirmed DC readings at a named point now update that point in any power state (latest reading per point). The gate still needs one safe DC reading after the confirmation.
+- Docs: the module docstring, the `bench_record_measurement` and `multimeter_read` descriptions, rule 10 in `instructions.py`, and the "Bench state" bullet in `mcp/README.md`.
+- `server.py`: a small edit only: one import, and two lines in `read_meter` after `combine`.
+
+### Tests (`mcp/tests/test_bench_state.py`, "QA round 8")
+
+- N13:
+  - An uncertain 5.10 V closes an open gate, and it is saved at "VBUS".
+  - An uncertain 0.01 V opens nothing.
+  - Through `multimeter_read` and through `bench_measure`: a disputed read ("5.10" and "51.0") closes the gate at an unknown point, with `bench_notice`. A later `bench_record_measurement` with "VBUS" moves the point, and the result is still refused.
+- (a): the confirmation comes again before the unsafe capture is recorded.
+- (b): the generic-label test, with a new confirmation before the safe reading.
+- (c): 0.01 V at t1 and 5.10 V at t2, recorded in the order t2, t1.
+- N15: 12.00 V with the power on is a point after the isolation.
+- N14: a capture for "VBUS" cannot become "C12.1", but " vbus " is the same point.
+- N16: GND, AGND, PGND, VSS_IO, and DVSS are refused without a board, and "C8850.2" (GND net) and "GND" are refused with the fixture board. A GND reading does not open the gate.
+- N17: a refused step with a safe reading completes the open power check, and a re-record attaches the step.
+- Changed tests: a safe reading before the confirmation is now a point; the fixture pin for the part-pin case is "L501.2", because "C8850.2" is on GND.
+
+### Checks
+
+- `uv run pytest`: 934 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+### Open (for the orchestrator)
+
+- Workflow cost of N13 and N15: each voltage reading above 0.5 V with the power on (a normal rail test) becomes a point. Before a resistance, continuity, or diode step, each of these points needs a newer safe DC reading after the isolation, or a user clearance. A `multimeter_read` that the agent does not record keeps an unknown point. The user must then clear it, or the agent must record the capture with its point name.
+- Every recorded voltage reading now needs a point name (part.pin or net when a board is open). Descriptive labels such as "3V3 rail" are refused with a board open.
+
+## Bulk clear of all residual points (default for the user's decision D7)
+
+### What I did (`mcp/debug_devices_mcp/bench_state.py`)
+
+- `bench_state_update` has two new fields: `clear_all_residual_points: true` and `user_words`. `clear_all_points` clears all unsafe residual points at once, also unknown points.
+- `user_words` is required and must not be empty. It is stored as given (not trimmed), with the time, in one `residual_clearances` entry: `point` "all", `reason` = the user's words, `cleared_points` = the cleared keys. Each cleared point also keeps the words in `user_reason`.
+- The bulk clear needs a user isolation confirmation and a safe DC reading at a point that is not a ground net, after that confirmation. The anchor is the newest such reading.
+- It refuses, with the reason, in these cases:
+  - no confirmation;
+  - no safe reading after the confirmation;
+  - no unsafe point is older than the anchor;
+  - every unsafe point is newer than the anchor ("every unsafe point ('C12.1') is newer than the safe reading at 'VBUS'; measure those points again").
+- A point whose unsafe reading is newer than the anchor stays unsafe. `notice` lists what was cleared and what was kept.
+- A cleared point has no `source_id`, so a clearance never counts as "the safe DC reading after the confirmation". After a new confirmation, the gate needs a new safe reading. The last unsafe time does not change, so after an unsafe reading the gate still needs a newer confirmation.
+- The tool description says: `user_words` must quote the user's own sentence exactly; never invent, shorten, or paraphrase it. Rule 10 in `instructions.py` and the "Bench state" bullet in `mcp/README.md` say the same.
+
+### Tests (`mcp/tests/test_bench_state.py`, "bulk clear")
+
+- Refusals: no words, an empty string, only spaces; no confirmation; a safe reading only before the confirmation; every unsafe point newer than the anchor; a GND point (from an old record) as the only safe reading.
+- Cleared and kept: 12 V at PP12V and 5.10 V at C12.1 with the power on, then an isolation, VBUS 0.01 V, and L1.1 5.10 V. The bulk clear clears PP12V and C12.1, keeps L1.1, stores the words as given, and the gate stays closed.
+- The gate opens after a bulk clear. After a new confirmation, it needs a new safe reading again.
+- The unknown point of a `multimeter_read` is cleared too.
+
+### Checks
+
+- `uv run pytest`: 943 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

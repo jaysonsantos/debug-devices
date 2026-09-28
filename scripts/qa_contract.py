@@ -309,6 +309,8 @@ def expect_status(resp: Response) -> CameraStatus:
         data["preview_region"] is not None or data["overlay_region"] is None,
         f"overlay_region {data['overlay_region']!r} is set, but preview_region is null",
     )
+    if data["overlay_region"] is not None and is_empty_region(data["overlay_region"]):
+        expect_centred(data["overlay_region"], data["preview_region"])
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -456,6 +458,19 @@ def expect_preview_region(region: Any, name: str = "preview_region", allow_empty
 
 def is_empty_region(region: dict[str, float]) -> bool:
     return region["width"] == 0 or region["height"] == 0
+
+
+def region_centre(region: dict[str, float]) -> tuple[float, float]:
+    return region["snapshot_x"] + region["width"] / 2, region["snapshot_y"] + region["height"] / 2
+
+
+def expect_centred(empty: dict[str, float], preview: dict[str, float]) -> None:
+    """An empty overlay_region sits at the centre of preview_region (docs/phone-api.md), not at a corner."""
+    (ex, ey), (px, py) = region_centre(empty), region_centre(preview)
+    centred = math.isclose(ex, px, abs_tol=REGION_COMPARE_TOLERANCE) and math.isclose(
+        ey, py, abs_tol=REGION_COMPARE_TOLERANCE
+    )
+    expect(centred, f"empty overlay_region {empty} is not at the centre {px:.4f}, {py:.4f} of preview_region")
 
 
 def expect_app_start_id(value: Any) -> None:

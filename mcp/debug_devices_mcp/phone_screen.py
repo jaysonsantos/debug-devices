@@ -186,7 +186,10 @@ class PhoneScreen:
         return self._serial
 
     def ensure_running(self, serial: str) -> bool:
-        """Start the stream for `serial` in the background. Return True when this call started it."""
+        """Start the stream for `serial` in the background. Return True when this call started it. An empty serial is
+        refused: `adb -s ""` could reach any device (N2 rest of QA round 8)."""
+        if not serial:
+            raise ScreenError("no ADB serial for the phone screen: select the phone first")
         if self._task is not None and not self._task.done() and self._serial == serial:
             return False
         if self._task is not None:

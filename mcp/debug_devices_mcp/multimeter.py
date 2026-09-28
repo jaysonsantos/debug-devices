@@ -451,6 +451,9 @@ class MeterResult(BaseModel):
     stable: bool | None = None
     value_min: float | None = None
     value_max: float | None = None
+    # Why this reading closed the bench safety gate (bench_state.note_meter_reading): a voltage above the safe
+    # residual limit, confirmed or not. None: no change to the gate.
+    bench_notice: str | None = None
 
 
 def check_reading(

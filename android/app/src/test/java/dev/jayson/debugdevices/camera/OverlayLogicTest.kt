@@ -285,10 +285,18 @@ class OverlayLogicTest {
         assertEquals(0.85f, flipped.height, delta)
         // The whole view is the preview region.
         assertEquals(OverlayLogic.previewRegion(tall), OverlayLogic.overlayRegion(PixelRect(0f, 0f, 900f, 2000f), tall))
-        // Nothing left (the label band covers the safe area): a zero-size region, not null (N8).
+        // Nothing left (the label band covers the safe area): a zero-size region, not null (N8), at the centre of
+        // preview_region (N12: x 0.2-0.8, y 0-1 -> 0.5, 0.5).
         val empty = OverlayLogic.overlayRegion(PixelRect(0f, 500f, 900f, 500f), tall)
         assertEquals(0f, empty.width, delta)
         assertEquals(0f, empty.height, delta)
+        assertEquals(0.5f, empty.snapshotX, delta)
+        assertEquals(0.5f, empty.snapshotY, delta)
+        // A landscape still: the centre of its preview band (y 0.2-0.8).
+        val sideways = tall.copy(snapshotRotation = 0, snapshotWidth = 4080f, snapshotHeight = 3060f)
+        val emptySideways = OverlayLogic.overlayRegion(PixelRect(0f, 500f, 900f, 500f), sideways)
+        assertEquals(0.5f, emptySideways.snapshotX, delta)
+        assertEquals(0.5f, emptySideways.snapshotY, delta)
     }
 
     @Test

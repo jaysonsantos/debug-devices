@@ -741,7 +741,15 @@ class CameraController(
     override suspend fun setRotation(lockedRotation: Int?): CameraStatus = gate.control {
         withContext(Dispatchers.Main) {
             val camera = activeCamera()
+            val measuredBefore = phoneFrameInput() != null
             rotation.lock(lockedRotation)
+            // N11: a turn between portrait and sideways lays the overlay out again. Wait for that layout pass, so the
+            // response has the overlay_region of the new orientation (null only when it really is not measured).
+            if (measuredBefore) {
+                awaitCondition(Constants.Overlay.LAYOUT_WAIT_MILLIS, Constants.Overlay.LAYOUT_POLL_MILLIS) {
+                    phoneFrameInput() != null
+                }
+            }
             readStatus(camera)
         }
     }

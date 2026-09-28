@@ -95,7 +95,6 @@ class MainActivity : ComponentActivity() {
             }
         )
         overlayView.scene = { width, height, inset, length -> camera.overlayScene(width, height, inset, length) }
-        // The phone view of the overlay layout: the safe-area padding (system bars and cutouts) and the status label.
         // The phone view of the overlay and of CameraStatus.overlay_region: the safe-area padding (system bars and
         // cutouts) and the status label band, measured for the current orientation (null until then).
         val labelGap = TypedValue.applyDimension(
@@ -108,6 +107,8 @@ class MainActivity : ComponentActivity() {
             val safeHeight = safeArea.height - safeArea.paddingTop - safeArea.paddingBottom
             val degrees = OrientationLogic.surfaceDegrees(camera.effectiveRotation)
             OverlayLayout.labelBand(
+                safeArea.width,
+                safeArea.height,
                 overlay.width,
                 safeWidth,
                 safeHeight,

@@ -535,6 +535,29 @@ Brief: `docs/briefs/qa-round6-followup.md`, dd-android-2. Contract: `docs/phone-
 - New unit tests: `JpegTurnerTest` (4: a turn through the pixel turner; no turn = the same bytes and no decode; a failed decode and out of memory = 500 "could not turn the still"), `OverlayLayoutTest` +1 (`labelBand`: portrait, 180, sideways, old-orientation width, no size), `OverlayLogicTest` (an empty frame is a zero-size region). `ExifInterface` needs Android classes (its static init fails on the JVM), so the tests inject the EXIF reader; the real reader and bitmap turner are covered by the S22 check. 165 tests, all pass. ktlint and `prek run --files` pass (a first prek run reported a ktlint failure that did not come back on two reruns; I could not see its cause). `--no-daemon`.
 - Check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked): portrait still 200, 3060 x 4080, no EXIF Orientation, 2.3 s. `overlay_region` read at once and every 50 ms after `{"degrees":90}` and after `{"auto":true}`: always the value of the new orientation (the same as the settled value; the layout pass ended inside the HTTP round trip, so the `null` window did not show). A box in the middle is drawn with its badge and the legend above the navigation bar (screenshot). N8 (a window smaller than the label band) cannot be made on this phone without a split window; the unit tests cover it. No crash. End state: no boxes, zoom 1x, torch off, flips false, rotation auto; the forward is removed.
 
+### Round: QA round 8 follow-up (N11, N12)
+
+Brief: `docs/briefs/qa-round8-followup.md`, dd-android-2. Contract: `docs/phone-api.md` (`overlay_region`).
+
+- **N11 (rotation response after the layout pass):** `setRotation` locks the rotation on the main thread. If the phone view was measured before the change, it then waits for the layout pass of the new orientation: `awaitCondition` (new `Waits.kt`) checks `phoneFrameInput()` every `Constants.Overlay.LAYOUT_POLL_MILLIS` (16 ms), at most `LAYOUT_WAIT_MILLIS` (500 ms). The `delay` lets the main thread run the layout pass. Then the response reads the status. If the view was not measured before (or the wait ends without a layout pass), `overlay_region` stays `null` and a later status has it.
+- **N12 (empty region at the centre):** a measured but empty `overlay_region` has width 0 and height 0 at the centre of `preview_region`, not at its top-left corner.
+- **N8 edge (window with no room):** `OverlayLayout.labelBand` now gets the window size. A window with no size gives `null` (not measured). A window with a size, where the insets use all of it, gives band 0: a zero-size region, not `null`. `phoneFrame` does not invert the safe rect when the insets are larger than the screen: the rect collapses to zero size.
+- `MainActivity`: I removed the duplicate comment line above the label band.
+- New unit tests: `WaitsTest` (3, virtual time: the condition holds at once; true after two polls at 32 ms; false after the timeout), `OverlayLayoutTest` (`labelBand` with the window size: no size = `null`, insets use all of it = 0; +1 test: insets larger than the screen give an empty frame, portrait and sideways), `OverlayLogicTest` (the empty region is at 0.5, 0.5 for a portrait and a landscape still). 169 tests, all pass. `--no-daemon`. ktlint passes on the changed files. `prek run --files` reported "files were modified by this hook" for ktlint, but the hook runs `ktlint --relative` without `--format`, and my files have the same hashes before and after. Other agents edited files in the same tree at that time.
+- Check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked). I installed the APK and started the app. I sent `{"degrees":90}`, `{"degrees":0}`, `{"degrees":270}`, `{"degrees":180}`, `{"degrees":0}`, and `{"auto":true}`. For each, I read the status again 1.5 s later:
+
+| Request | Response time | `overlay_region` in the response (x, y, w, h) | Same as the settled status |
+|---|---|---|---|
+| `{"degrees":90}` | 105 ms | 0.0346, 0.2681, 0.9038, 0.5396 | yes |
+| `{"degrees":0}` | 89 ms | 0.1923, 0.1094, 0.6154, 0.8291 | yes |
+| `{"degrees":270}` | 140 ms | 0.0615, 0.2681, 0.9038, 0.5396 | yes |
+| `{"degrees":180}` | 142 ms | 0.1923, 0.1363, 0.6154, 0.8291 | yes |
+| `{"degrees":0}` | 70 ms | 0.1923, 0.1094, 0.6154, 0.8291 | yes |
+| `{"auto":true}` | 42 ms | 0.1923, 0.1094, 0.6154, 0.8291 | yes |
+
+  No response had `null`. No crash. End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` stays.
+- Note (not changed): `overlay_region` also follows the height of the status label. If the label text changes its line count (for example the "≈ NN cm" part), the label band and `overlay_region` change. Clients read `overlay_region` again before they place boxes.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

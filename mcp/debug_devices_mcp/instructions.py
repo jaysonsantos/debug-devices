@@ -89,9 +89,11 @@ EVIDENCE_RULES = "\n".join(
         "10. Bench state: keep the local record current (bench_state, bench_state_update, bench_record_measurement). "
         "Only a confirmed meter result enters it. Before every resistance, continuity, or diode step, call "
         "bench_begin_step: it needs the power isolated, the user's confirmation, and a safe DC residual voltage at "
-        "every measured point. Name each residual point as a part pin or a net (C12.1, PP3V3_S5), never "
-        "'residual'. An unsafe point stays until a newer safe reading at that point, or until the user clears it "
-        "with a reason. After a probe short, call "
+        "every measured point. Name each voltage point as a part pin or a net (C12.1, PP3V3_S5), never "
+        "'residual' or a ground net. Any voltage above 0.5 V, also uncertain or with the power on, closes the gate "
+        "at its point; it stays until a newer safe DC reading at that point, or until the user clears it with a "
+        "reason (one point, or all points with the user's own words: quote them, never invent them). After a probe "
+        "short, call "
         "bench_probe_short and go back to the power check.",
     )
 )

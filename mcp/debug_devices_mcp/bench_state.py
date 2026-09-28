@@ -3,13 +3,15 @@
 It holds the power state, the meter mode, the probe contact, the confirmed measurements, the part candidates, the
 photo ids, and the steps. Only a "confirmed" multimeter_read result can enter the measurements. A safety gate
 guards resistance, continuity, and diode steps: power isolated, confirmed by the user, and a safe DC residual voltage
-measured after that confirmation. A probe short sends the record back to the power check.
+measured after that confirmation, with no unsafe point left. Every voltage reading above the safe limit closes the
+gate, also when it is not confirmed (fail safe). A probe short sends the record back to the power check.
 
 The record holds only what the agent passes (a few part names), never data copied from a board file.
 """
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 import uuid
@@ -22,11 +24,20 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
-from debug_devices_mcp.bench_points import PointName, PointNameError, point_name, text_key
+from debug_devices_mcp.bench_points import PointName, PointNameError, is_ground, point_name, text_key
 from debug_devices_mcp.board.model import Board
 from debug_devices_mcp.evidence import CaptureLog
 from debug_devices_mcp.meter_frames import PREFIX_FACTORS
-from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, UnitFamily, unit_parts
+from debug_devices_mcp.multimeter import (
+    MeterMode,
+    MeterResult,
+    MeterStatus,
+    UnitFamily,
+    is_overload,
+    signature,
+    signed_value,
+    unit_parts,
+)
 
 STATE_VERSION = 1
 # A residual voltage at or below this is safe for a resistance, continuity, or diode test (a board without power).
@@ -53,6 +64,10 @@ UNSAFE_AFTER_CONFIRMATION = (
     "battery or bench supply are off, then confirms the isolation again (a confirmation does not discharge a "
     "capacitor: each unsafe point still needs a newer safe DC reading)"
 )
+# The `point` of a bulk clearance (bench_state_update clear_all_residual_points).
+ALL_POINTS = "all"
+# The point of an unsafe reading without a point name (multimeter_read, or a refused name). Its key has the capture id.
+UNKNOWN_POINT = "unknown point"
 POWER_CHECK_TEXT = (
     "Power check: the user disconnects the charger and the battery or bench supply and confirms it; then measure the "
     "residual voltage with the meter in DC voltage mode."
@@ -154,12 +169,14 @@ class ResidualPoint(BaseModel):
 
 
 class ResidualClearance(BaseModel):
-    """A user action: the user cleared one point (for example after a discharge with a resistor)."""
+    """A user action: the user cleared one point (for example after a discharge with a resistor), or all points at
+    once (`point` ALL_POINTS, the user's own words in `reason`, and the cleared points in `cleared_points`)."""
 
     point: str
     label: str
     reason: str
     cleared_at: AwareDatetime
+    cleared_points: list[str] = Field(default_factory=list)
 
 
 class MeterModeRecord(BaseModel):
@@ -234,6 +251,48 @@ def reading_text(reading: Measurement | MeterResult) -> str:
     return f"{reading.display_text} {reading.unit}".strip()
 
 
+class LcdVoltage(BaseModel):
+    volts: float
+    # The LCD text and the unit, for the notes ("5.10 V").
+    text: str
+
+
+def lcd_voltage(display_text: str, unit: str, mode: MeterMode) -> LcdVoltage | None:
+    """The number on the LCD in volts, for the safety gate. It needs no confirmed value (fail safe): the unit prefix
+    counts, an unreadable unit in a voltage mode counts as volts, and an overload is above every limit.
+
+    None: not a voltage reading (another unit, a diode test that shows the meter's own test voltage, or no digits).
+    """
+    family, prefix = unit_parts(unit)
+    if mode is MeterMode.DIODE:
+        return None
+    if family is UnitFamily.VOLTAGE:
+        factor = PREFIX_FACTORS.get(prefix, 1.0)
+    elif family is UnitFamily.UNKNOWN and mode in VOLTAGE_MODES:
+        factor = 1.0
+    else:
+        return None
+    text = f"{display_text} {unit}".strip()
+    if is_overload(display_text):
+        return LcdVoltage(volts=math.inf, text=text)
+    digits, point = signature(display_text)
+    if not digits:
+        return None
+    return LcdVoltage(volts=signed_value(display_text, digits, point) * factor, text=text)
+
+
+def result_voltage(result: MeterResult) -> LcdVoltage | None:
+    """The highest voltage on the LCD of the result and of each frame (one frame can show a misread point)."""
+    readings = [lcd_voltage(result.display_text, result.unit, result.mode)]
+    readings += [lcd_voltage(frame.display_text, frame.unit, result.mode) for frame in result.frames]
+    found = [reading for reading in readings if reading is not None]
+    return max(found, key=lambda reading: abs(reading.volts)) if found else None
+
+
+def unknown_key(capture_id: str) -> str:
+    return f"{UNKNOWN_POINT} {capture_id}"
+
+
 def unsafe_text(reading: str, label: str) -> str:
     return (
         f"the residual voltage {reading} at {label!r} is not safe (limit {SAFE_RESIDUAL_VOLTS} V): stop, let the board "
@@ -243,19 +302,39 @@ def unsafe_text(reading: str, label: str) -> str:
     )
 
 
+def point_problem(point: ResidualPoint) -> str:
+    if point.label != UNKNOWN_POINT:
+        return unsafe_text(point.reading, point.label)
+    return (
+        f"the voltage {point.reading} of capture {point.source_id} is not safe (limit {SAFE_RESIDUAL_VOLTS} V) and has "
+        "no point name: record that capture with its point name (bench_record_measurement), then measure that point "
+        f"again in DC V; or the user clears it (clear_residual_point {point.point!r})"
+    )
+
+
 def note_unsafe(state: BenchState, at: datetime) -> None:
     state.last_unsafe_at = at if state.last_unsafe_at is None else max(state.last_unsafe_at, at)
 
 
-def set_point(state: BenchState, point: ResidualPoint) -> None:
-    """The newest reading or clearance of a point replaces only the earlier one of the same point."""
+def set_point(state: BenchState, point: ResidualPoint) -> bool:
+    """The newer reading or clearance of a point replaces the older one; an older one never replaces a newer one (at
+    the same time, the unsafe one stays). False when the point keeps its newer entry."""
+    existing = next((item for item in state.residual_points if item.point == point.point), None)
+    if existing is not None and (existing.at > point.at or (existing.at == point.at and not existing.safe)):
+        return False
     state.residual_points = [*(item for item in state.residual_points if item.point != point.point), point]
+    return True
+
+
+def after_confirmation(state: BenchState, at: datetime) -> bool:
+    power = state.power
+    return power.user_confirmed_isolation and power.confirmed_at is not None and at >= power.confirmed_at
 
 
 def gate(state: BenchState) -> GateReport:
     """What a resistance, continuity, or diode step needs, and what is missing.
 
-    The gate opens only when the isolation confirmation is newer than the last unsafe residual reading, every point
+    The gate opens only when the isolation confirmation is newer than the last unsafe voltage reading, every point
     whose latest reading was unsafe has a newer safe DC reading (or the user cleared it), and at least one safe DC
     reading exists after the confirmation.
     """
@@ -268,7 +347,7 @@ def gate(state: BenchState) -> GateReport:
         missing.append("the user has not confirmed that the charger and the battery or bench supply are off")
     elif state.last_unsafe_at is not None and state.last_unsafe_at >= confirmed_at:
         missing.append(UNSAFE_AFTER_CONFIRMATION)
-    missing.extend(unsafe_text(point.reading, point.label) for point in state.residual_points if not point.safe)
+    missing.extend(point_problem(point) for point in state.residual_points if not point.safe)
     measured_after = confirmed_at is not None and any(
         point.safe and point.source_id is not None and point.at >= confirmed_at for point in state.residual_points
     )
@@ -334,11 +413,11 @@ def find_step(state: BenchState, step_id: str) -> Step:
     raise ToolError(f"no step {step_id!r} in the bench state")
 
 
-def power_check_problem(state: BenchState, measurement: Measurement, residual: bool) -> str | None:
+def power_check_problem(state: BenchState, measurement: Measurement) -> str | None:
     """A power check completes only with a safe DC residual reading after the user's isolation confirmation."""
     if measurement.mode is not RESIDUAL_MODE:
         return AC_RESIDUAL_NOTE
-    if not residual:
+    if not after_confirmation(state, measurement.measured_at):
         return (
             "a power check needs a DC voltage reading after the user confirmed the isolation (bench_state_update "
             "power isolated, user_confirmed_isolation true)"
@@ -350,13 +429,13 @@ def power_check_problem(state: BenchState, measurement: Measurement, residual: b
 
 
 class ResidualKeptError(ToolError):
-    """The step was refused, but the reading changed the safety gate: the tool saves the record, then refuses."""
+    """The measurement was refused, but the reading changed the safety gate: the tool saves the record, then refuses."""
 
 
 def step_refusal(
     state: BenchState, result: MeterResult, step_id: str | None, step: Step | None, done_before_gate: str | None
 ) -> str | None:
-    """Why the measurement cannot complete this step, or None."""
+    """Why the measurement cannot complete this step, or None. Decided before the reading changes the gate."""
     if step_id and step is None:
         return f"no step {step_id!r} in the bench state"
     if step is None:
@@ -372,19 +451,130 @@ def step_refusal(
     return None
 
 
-def checked_point(state: BenchState, result: MeterResult, label: str, board: Board | None) -> PointName:
-    """The point name of a residual reading. A name that does not name one point is refused; an unsafe reading still
-    closes the gate (the last unsafe time needs a newer isolation confirmation), and the tool saves that."""
+class GateEvent(BaseModel):
+    """What one meter reading did to the safety gate."""
+
+    notes: list[str] = Field(default_factory=list)
+    # The reading changed the residual points (the tool saves the record, also when it refuses).
+    changed: bool = False
+    # A safe, confirmed DC reading at a named point: it can open the gate and complete the power checks.
+    counted: bool = False
+    # Why the point name was refused (bench_points.py), or None.
+    name_error: str | None = None
+
+
+def gate_event(state: BenchState, result: MeterResult, label: str | None, board: Board | None) -> GateEvent:
+    """Apply one reading to the safety gate.
+
+    Every voltage reading above the safe limit closes the gate: confirmed or not, in any power state (a misread only
+    costs a new reading). Without a valid point name it goes to an unknown point of its capture id. A safe reading
+    counts only when it is confirmed, DC, and at a named point; an unconfirmed safe reading never opens the gate.
+    """
+    voltage = result_voltage(result)
+    if voltage is None or result.capture_id is None or result.captured_at is None:
+        return GateEvent()
+    name, name_error = None, None
+    if label is not None:
+        try:
+            name = point_name(label, board)
+        except PointNameError as exc:
+            name_error = str(exc)
+    if abs(voltage.volts) > SAFE_RESIDUAL_VOLTS:
+        return unsafe_event(state, result, voltage, label if name is not None else None, name, name_error)
+    notes = (
+        [AC_RESIDUAL_NOTE]
+        if result.mode is MeterMode.AC_VOLTAGE and after_confirmation(state, result.captured_at)
+        else []
+    )
+    confirmed_dc = (
+        result.status is MeterStatus.CONFIRMED
+        and result.mode is RESIDUAL_MODE
+        and result.unit_family is UnitFamily.VOLTAGE
+    )
+    if not confirmed_dc:
+        return GateEvent(notes=notes)
+    if name is None or label is None:
+        return GateEvent(notes=notes, name_error=name_error)
+    point = ResidualPoint(
+        point=name.key,
+        label=label,
+        at=result.captured_at,
+        safe=True,
+        reading=voltage.text,
+        source_id=result.capture_id,
+    )
+    changed = set_point(state, point)
+    return GateEvent(notes=[*notes, *filter(None, [name.warning])], changed=changed, counted=changed)
+
+
+def unsafe_event(
+    state: BenchState,
+    result: MeterResult,
+    voltage: LcdVoltage,
+    label: str | None,
+    name: PointName | None,
+    name_error: str | None,
+) -> GateEvent:
+    """An unsafe reading: the named point (the unknown point of its capture moves there), or the unknown point."""
+    if result.capture_id is None or result.captured_at is None:
+        return GateEvent()
+    unknown = unknown_key(result.capture_id)
+    if name is None or label is None:
+        point = ResidualPoint(
+            point=unknown, label=UNKNOWN_POINT, at=result.captured_at, safe=False, reading=voltage.text
+        )
+        where = f"an unknown point ({unknown}) until it has a point name"
+    else:
+        state.residual_points = [item for item in state.residual_points if item.point != unknown]
+        point = ResidualPoint(point=name.key, label=label, at=result.captured_at, safe=False, reading=voltage.text)
+        where = repr(label)
+    point.source_id = result.capture_id
+    set_point(state, point)
+    note_unsafe(state, result.captured_at)
+    notes = [
+        f"{voltage.text} is above the safe residual limit of {SAFE_RESIDUAL_VOLTS} V (this result is "
+        f"{result.status}): the bench safety gate is closed at {where}; it needs a newer safe DC reading there, or "
+        "the user clears it"
+    ]
+    if name is not None and name.warning is not None:
+        notes.append(name.warning)
+    return GateEvent(notes=notes, changed=True, name_error=name_error)
+
+
+def point_key_of(label: str, board: Board | None) -> str:
     try:
-        return point_name(label, board)
-    except PointNameError as exc:
-        if result.captured_at is not None and not is_safe(result):
-            note_unsafe(state, result.captured_at)
-            raise ResidualKeptError(
-                f"{exc}. This unsafe reading closed the safety gate until the user confirms the isolation again: "
-                "record it again with the point name."
-            ) from exc
-        raise ToolError(str(exc)) from exc
+        return point_name(label, board).key
+    except PointNameError:
+        return text_key(label)
+
+
+def label_conflict(state: BenchState, capture_id: str, label: str, board: Board | None) -> str | None:
+    """One reading belongs to one point: a capture id recorded for one label cannot get another label."""
+    key = point_key_of(label, board)
+    earlier = [item.label for item in state.measurements if item.source_id == capture_id]
+    earlier += [
+        item.label for item in state.residual_points if item.source_id == capture_id and item.label != UNKNOWN_POINT
+    ]
+    other = next((name for name in earlier if point_key_of(name, board) != key), None)
+    if other is None:
+        return None
+    return (
+        f"capture {capture_id} is already recorded for {other!r}: one reading belongs to one point. Read the meter "
+        f"again at {label!r}."
+    )
+
+
+def refuse_unconfirmed(state: BenchState, result: MeterResult, label: str, board: Board | None) -> None:
+    """A result that is not confirmed is no measurement. An unsafe voltage in it still closes the gate (saved)."""
+    text = (
+        f"this meter result is {result.status}, not confirmed: it cannot enter the confirmed measurements. "
+        f"{result.request or ''}"
+    ).strip()
+    event = gate_event(state, result, label, board)
+    if event.changed:
+        extra = [*event.notes, *filter(None, [event.name_error])]
+        raise ResidualKeptError(f"{text} " + " ".join(extra))
+    raise ToolError(text)
 
 
 def record_measurement(
@@ -401,69 +591,77 @@ def record_measurement(
     before the gate was complete (for example with the power off, before the residual-voltage check). The flag stays
     on the measurement; bench_begin_step stays strict for new steps.
 
-    A residual reading (DC V after the isolation confirmation, or an unsafe AC reading) needs a point name that names
-    one point (bench_points.py, checked against `board` when one is open). It sets the latest reading of that point.
+    Every voltage reading goes to the safety gate (gate_event) and needs a point name that names one point
+    (bench_points.py, checked against `board` when one is open). An unsafe voltage closes the gate, also when the
+    result is not confirmed or the name is refused (ResidualKeptError: the tool saves the record, then refuses).
 
-    The second value is the notice: why a step stays open (a power-check step completes only with a safe DC residual
-    reading after the user's confirmation), an AC reading that does not count, or a point name without a board.
-    A voltage reading after the confirmation is never lost: when the step is refused, it enters the record without the
-    step, and ResidualKeptError tells the tool to save the record before it refuses. The same capture id enters once.
+    The step result is decided before the reading changes the gate. When the step is refused, a reading that changed
+    the gate stays in the record without the step, and the open power checks still follow the gate.
+    The second value is the notice: why a step stays open, an AC reading that does not count, an unsafe reading, or a
+    point name without a board. The same capture id enters once, and only for one point.
     """
-    if result.status is not MeterStatus.CONFIRMED or result.capture_id is None or result.captured_at is None:
-        raise ToolError(
-            f"this meter result is {result.status}, not confirmed: it cannot enter the confirmed measurements. "
-            f"{result.request or ''}".strip()
-        )
+    if result.capture_id is None or result.captured_at is None:
+        raise ToolError("this meter result has no capture id: read the meter again")
+    conflict = label_conflict(state, result.capture_id, label, board)
+    if conflict is not None:
+        raise ToolError(conflict)
+    if result.status is not MeterStatus.CONFIRMED:
+        refuse_unconfirmed(state, result, label, board)
     step = next((item for item in state.steps if item.step_id == step_id), None) if step_id else None
-    power = state.power
-    after_confirmation = power.confirmed_at is not None and result.captured_at >= power.confirmed_at
-    voltage = result.mode in VOLTAGE_MODES and result.unit_family is UnitFamily.VOLTAGE and after_confirmation
-    residual = voltage and result.mode is RESIDUAL_MODE
-    # Only DC V is the residual check. An unsafe AC reading still blocks the gate: the board is not without power.
-    for_gate = residual or (voltage and not is_safe(result))
-    name = checked_point(state, result, label, board) if for_gate else None
-    measurement, new = add_measurement(state, result, label, step_id, done_before_gate)
+    refusal = step_refusal(state, result, step_id, step, done_before_gate)
+    event = gate_event(state, result, label, board)
+    if event.name_error is not None:
+        if event.changed:
+            raise ResidualKeptError(f"{event.name_error}. " + " ".join(event.notes))
+        raise ToolError(event.name_error)
+    measurement, new = add_measurement(state, result, label, None if refusal else step_id, done_before_gate)
     # A reading does not replace a recent mode that the user confirmed on the dial: multimeter_read uses it.
     if not is_recent_user_mode(state.meter_mode):
         state.meter_mode = MeterModeRecord(mode=result.mode, source=READING_SOURCE, recorded_at=result.captured_at)
-    if name is not None:
-        point = ResidualPoint(
-            point=name.key,
-            label=label,
-            at=result.captured_at,
-            safe=is_safe(result),
-            reading=reading_text(result),
-            source_id=result.capture_id,
-        )
-        set_point(state, point)
-        if not point.safe:
-            note_unsafe(state, result.captured_at)
-    refusal = step_refusal(state, result, step_id, step, done_before_gate)
+    # The open power checks follow the gate, also when the step is refused.
+    if event.counted and gate(state).unpowered_tests_allowed:
+        complete_power_checks(state, measurement.source_id)
     if refusal is not None:
-        if for_gate:
-            measurement.step_id = None if new else measurement.step_id
+        if event.changed:
             raise ResidualKeptError(
-                f"{refusal}. The voltage reading is recorded without the step, because it counts for the safety gate: "
-                "do not record it again."
+                f"{refusal}. The voltage reading is recorded without the step, because it counts for the safety gate. "
+                "To attach it to a step, record the same capture_id again with that step_id and the same label."
             )
         if new:
             state.measurements.remove(measurement)
         raise ToolError(refusal)
-    notes = [AC_RESIDUAL_NOTE] if voltage and not residual else []
-    if step is not None:
-        problem = power_check_problem(state, measurement, residual) if step.kind is StepKind.POWER_CHECK else None
-        if problem is None:
-            step.done, step.done_at, step.evidence_id = True, now(), measurement.source_id
-            step.completed_by = EVIDENCE
-            step.reason = done_before_gate
-        else:
-            notes = [f"step {step.step_id} stays open: {problem}"]
-    if name is not None and name.warning is not None:
-        notes.append(name.warning)
-    # A safe DC residual voltage (and no unsafe point) completes the open power checks.
-    if residual and gate(state).unpowered_tests_allowed:
-        complete_power_checks(state, measurement.source_id)
+    notes = event.notes if step is None else finish_step(state, step, measurement, done_before_gate, event.notes)
     return measurement, "; ".join(notes) or None
+
+
+def finish_step(
+    state: BenchState, step: Step, measurement: Measurement, done_before_gate: str | None, notes: list[str]
+) -> list[str]:
+    """Complete the step with the measurement, or leave a power check open. The notes of the call."""
+    problem = power_check_problem(state, measurement) if step.kind is StepKind.POWER_CHECK else None
+    if problem is not None:
+        return [f"step {step.step_id} stays open: {problem}", *(note for note in notes if note not in problem)]
+    step.done, step.done_at, step.evidence_id = True, now(), measurement.source_id
+    step.completed_by = EVIDENCE
+    step.reason = done_before_gate
+    measurement.step_id = step.step_id
+    return notes
+
+
+def note_meter_reading(store: BenchStateStore, result: MeterResult) -> str | None:
+    """multimeter_read and bench_measure: an unsafe voltage closes the safety gate at once (an unknown point until the
+    agent records the capture with its point name). The notice, or None when the gate did not change."""
+    voltage = result_voltage(result)
+    if voltage is None or abs(voltage.volts) <= SAFE_RESIDUAL_VOLTS:
+        return None
+    try:
+        state = store.load()
+    except ToolError as exc:
+        return f"{voltage.text} is above the safe residual limit, but the bench state cannot record it: {exc}"
+    event = gate_event(state, result, None, None)
+    if event.changed:
+        store.save(state)
+    return "; ".join(event.notes) or None
 
 
 def clear_point(state: BenchState, label: str, reason: str | None, board: Board | None) -> None:
@@ -478,7 +676,7 @@ def clear_point(state: BenchState, label: str, reason: str | None, board: Board 
         keys.add(point_name(label, board).key)
     point = next((item for item in state.residual_points if item.point in keys), None)
     if point is None:
-        names = ", ".join(repr(item.label) for item in state.residual_points) or "none"
+        names = ", ".join(repr(item.point) for item in state.residual_points) or "none"
         raise ToolError(f"no residual point {label!r} in the bench state (points: {names})")
     cleared_at = now()
     state.residual_clearances.append(
@@ -495,6 +693,73 @@ def clear_point(state: BenchState, label: str, reason: str | None, board: Board 
             user_reason=reason.strip(),
         ),
     )
+
+
+def clear_all_points(state: BenchState, user_words: str | None) -> str:
+    """The user cleared all residual points at once, in their own words (stored as given). The notice.
+
+    Only after a safe DC reading (not a ground net) that comes after the latest isolation confirmation: the newest
+    such reading is the anchor. A point whose unsafe reading is newer than the anchor stays unsafe.
+    """
+    if user_words is None or not user_words.strip():
+        raise ToolError(
+            "clearing all residual points needs `user_words`: the user's own sentence, quoted exactly (never write it "
+            "yourself)"
+        )
+    power = state.power
+    confirmed_at = power.confirmed_at if power.user_confirmed_isolation else None
+    if confirmed_at is None:
+        raise ToolError(
+            "cannot clear all residual points: the user has not confirmed the isolation (bench_state_update power "
+            "isolated, user_confirmed_isolation true)"
+        )
+    safe_after = [
+        point
+        for point in state.residual_points
+        if point.safe and point.source_id is not None and point.at >= confirmed_at and not is_ground(point.point)
+    ]
+    if not safe_after:
+        raise ToolError(
+            "cannot clear all residual points: no safe DC reading after the latest isolation confirmation. Measure one "
+            "supply point in DC V first (bench_record_measurement with its point name)"
+        )
+    anchor = max(safe_after, key=lambda point: point.at)
+    unsafe = [point for point in state.residual_points if not point.safe]
+    cleared = [point for point in unsafe if point.at <= anchor.at]
+    kept = [point for point in unsafe if point.at > anchor.at]
+    kept_text = ", ".join(repr(point.label) for point in kept)
+    if not cleared:
+        raise ToolError(
+            "cannot clear all residual points: "
+            + (f"every unsafe point ({kept_text}) is newer than" if kept else "no unsafe point is older than")
+            + f" the safe reading at {anchor.label!r}; measure those points again"
+        )
+    cleared_at = now()
+    for point in cleared:
+        set_point(
+            state,
+            point.model_copy(
+                # A clearance is no reading: it never counts as the safe reading after the confirmation.
+                update={
+                    "at": cleared_at,
+                    "safe": True,
+                    "reading": "cleared by the user",
+                    "source_id": None,
+                    "user_reason": user_words,
+                }
+            ),
+        )
+    state.residual_clearances.append(
+        ResidualClearance(
+            point=ALL_POINTS,
+            label="all residual points",
+            reason=user_words,
+            cleared_at=cleared_at,
+            cleared_points=[point.point for point in cleared],
+        )
+    )
+    notice = f"cleared {len(cleared)} residual points (older than the safe reading at {anchor.label!r})"
+    return f"{notice}; kept {len(kept)} with a newer unsafe reading: {kept_text}" if kept else notice
 
 
 def add_measurement(
@@ -632,6 +897,8 @@ def register_bench_state_tools(
         step_reason: str | None = None,
         clear_residual_point: str | None = None,
         clear_residual_reason: str | None = None,
+        clear_all_residual_points: bool = False,
+        user_words: str | None = None,
     ) -> BenchStateView:
         """Update the bench record. Every field is optional.
 
@@ -640,6 +907,11 @@ def register_bench_state_tools(
         `clear_residual_point` (a point name) with `clear_residual_reason` records that the user made that one point
         safe (for example "capacitor discharged with a resistor"): it counts as a safe reading for that point. Use it
         only when the user says so.
+        `clear_all_residual_points: true` with `user_words` clears all residual points at once, when the user says
+        that the board is safe. `user_words` must quote the user's own sentence exactly; never invent, shorten, or
+        paraphrase it. It is stored as given, with the time. It needs a safe DC reading (not a ground net) after the
+        latest isolation confirmation, and it never clears a point whose unsafe reading is newer than that reading;
+        otherwise it refuses and says why. `notice` lists what it cleared and what it kept.
         `probe_contact` (where the probes touch) and `complete_step` (a visual step) need `photo_id`: a current
         phone_snapshot capture id that shows it. Measurement steps complete through bench_record_measurement.
         `part_candidates` are boardview estimates, kept apart from the measurements.
@@ -666,7 +938,8 @@ def register_bench_state_tools(
         change_step(state, complete_step, skip_step, step_reason, photo_id)
         if clear_residual_point is not None:
             clear_point(state, clear_residual_point, clear_residual_reason, await open_board())
-        return store.view(store.save(state))
+        notice = clear_all_points(state, user_words) if clear_all_residual_points else None
+        return store.view(store.save(state), notice)
 
     @server.tool()
     async def bench_record_measurement(
@@ -676,18 +949,20 @@ def register_bench_state_tools(
 
         Only a "confirmed" result can enter; an uncertain, disputed, or unreadable one is refused. With `step_id`,
         the measurement completes that step (its kind must fit the meter mode; resistance, continuity, and diode
-        steps need the safety gate). A confirmed DC voltage reading after the user confirmed the isolation is the
-        residual-voltage check of the gate. An AC reading is recorded but does not count ("residual check needs DC
-        V"); an unsafe AC reading still blocks the gate. Each measurement keeps the power state and the user's
-        confirmation. For a residual reading, `label` names one point: a part pin ("C12.1", "C12 pin 1") or a net
-        ("PP3V3_S5"), checked against the open board; a generic name ("residual", "test", "point") is refused. Each
-        point keeps its latest residual reading. An unsafe point blocks the gate until a newer safe DC reading at the
-        same point, or until the user clears it (bench_state_update clear_residual_point); a new isolation
-        confirmation does not clear it, and after an unsafe reading the gate also needs a newer confirmation. A
-        power-check step completes only with a safe DC residual reading after the user's confirmation; otherwise
-        `notice` tells why it stays open. When the step is refused, a voltage reading that counts for the gate is
-        still recorded (without the step): do not record it again. A second call with the same capture_id does not
-        add it again.
+        steps need the safety gate). Each measurement keeps the power state and the user's confirmation.
+        Every voltage reading goes to the safety gate, and its `label` names one point: a part pin ("C12.1", "C12 pin
+        1") or a net ("PP3V3_S5"), checked against the open board. A generic name ("residual", "test", "point") and a
+        ground net (GND, AGND, VSS, or a pin on one) are refused. A voltage above 0.5 V closes the gate at that point:
+        confirmed or not, with the power on or off, also when the name is refused (then at an unknown point of the
+        capture; record the capture again with its point name). Each point keeps its latest reading (an older reading
+        never replaces a newer one). An unsafe point blocks the gate until a newer safe DC reading at the same point,
+        or until the user clears it (bench_state_update clear_residual_point); a new isolation confirmation does not
+        clear it, and after an unsafe reading the gate also needs a newer confirmation. Only a confirmed DC reading
+        can be the safe reading after the confirmation; an AC reading does not count ("residual check needs DC V").
+        A power-check step completes only with a safe DC residual reading after the user's confirmation; otherwise
+        `notice` tells why it stays open. When the step is refused, a voltage reading that changed the gate stays in
+        the record without the step; to attach it, record the same capture_id again with the step and the same label.
+        One capture_id enters once and only for one point.
         `done_before_gate`: the user's reason when a resistance, continuity, or diode test was already done before the
         gate was complete (for example with the power off, before the residual check); the measurement keeps it.
         """

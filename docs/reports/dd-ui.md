@@ -1790,3 +1790,24 @@ I read `docs/phone-api.md` again first (C6, C9, C13/N9, N8; and the orchestrator
 ### Notes
 
 - One run of the full suite had one failure in `test_bench_state.py` during dd-mcp's work on N5/N6; alone it passed (38 passed), and the next full runs passed.
+
+## Round 44: last round of the follow-up check (QA round 8, dd-ui part)
+
+I read `docs/phone-api.md` again first: an empty `overlay_region` sits at the centre of `preview_region`.
+
+### What I did
+
+- **N2 rest, an empty serial**: the ingest screen-start route refuses every request when nothing is selected (also `{"serial": ""}`), with 403 and a log line. Before, an empty selection matched an empty serial. `PhoneScreen.ensure_running("")` raises `ScreenError` ("no ADB serial for the phone screen"), like `scrcpy.py`, so `adb -s ""` never runs.
+- **N19, the app run of the overlay call**: `Services.seen_status` now tells its status listeners about every phone status that the server reads (tools, the page poll, overlay calls). The monitor (`status_seen`) keeps the page status up to date with it and checks the app run of the remote boxes. So a secondary sends the app run of the status of its overlay call with its boxes, not an older one.
+- **N20, two flip changes at the same time**: `FlipChange` does the read-modify-write inside the settings file lock. The given flips go onto the flips that are in the file at that moment, so two changes (the page's Flip H and an agent's flip_vertical) both apply. `OrientationState.update` and `save` use it.
+- **N12, the client arrow math**: nothing to change. With an empty region at the centre, the view centre is the preview centre: each part gets an arrow from there, with the distance from there. A zero-size view gives no division by zero (`edge_point` skips the zero axis and gives the centre). New tests pin it.
+- `mcp/README.md`: an empty region is at the centre of `preview_region`.
+
+### Tests
+
+- New `mcp/tests/test_qa_round8.py` (8 tests):
+  - an empty or other serial with nothing selected (2 cases), and `PhoneScreen` with an empty serial (no adb call);
+  - a secondary without a status poll: after an app restart, its boxes go out with the new app run;
+  - two flip changes at the same time (two states on one file), and a sync update of an old state keeps the other flip;
+  - the arrows of an empty region at the centre (J4 right, U2 up, "~3 cm" each), and a plain box becomes an arrow with its tag. Both run under `np.errstate(all="raise")`, so a division by zero would fail them.
+- `uv run pytest`: 917 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

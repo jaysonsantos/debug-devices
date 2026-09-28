@@ -25,6 +25,7 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     services.add_overlay_listener(monitor.overlay_changed)
     services.pointing.add_listener(monitor.tracking_changed)
     services.add_restart_listener(monitor.app_restarted)
+    services.add_status_listener(monitor.status_seen)
     monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
     monitor.device_panel = DevicePanel(services, monitor)
     monitor.phone_selection = services.selection

@@ -449,17 +449,22 @@ object OverlayLayout {
         viewerDegrees: Int,
         labelBand: Float
     ): PixelRect {
-        val safe = PixelRect(insets.left, insets.top, screenWidth - insets.right, screenHeight - insets.bottom)
+        // Insets that use all of the screen give an empty (not an inverted) safe rectangle.
+        val right = maxOf(insets.left, screenWidth - insets.right)
+        val bottom = maxOf(insets.top, screenHeight - insets.bottom)
+        val safe = PixelRect(insets.left, insets.top, right, bottom)
         val viewer = toViewer(safe, viewerDegrees, screenWidth, screenHeight)
         return viewer.copy(top = minOf(viewer.top + labelBand, viewer.bottom))
     }
 
     /**
      * The status label band for the phone view, or null while it is not measured for the current orientation:
-     * the safe area has no size yet (N8), or the turned overlay container is still laid out for the old orientation
+     * the window has no size yet (N8), or the turned overlay container is still laid out for the old orientation
      * ([laidOutWidth] is not the viewer-frame width of the safe area for [viewerDegrees], N10). All values in pixels.
      */
     fun labelBand(
+        windowWidth: Int,
+        windowHeight: Int,
         laidOutWidth: Int,
         safeWidth: Int,
         safeHeight: Int,
@@ -467,7 +472,9 @@ object OverlayLayout {
         labelBottom: Int,
         gap: Float
     ): Float? {
-        if (safeWidth <= 0 || safeHeight <= 0) return null
+        // The window has no size: not measured (null). The insets use all of it: measured, no room (an empty frame).
+        if (windowWidth <= 0 || windowHeight <= 0) return null
+        if (safeWidth <= 0 || safeHeight <= 0) return 0f
         val sideways = Math.floorMod(viewerDegrees, 2 * Constants.Orientation.BUCKET_DEGREES) != 0
         val expectedWidth = if (sideways) safeHeight else safeWidth
         if (laidOutWidth != expectedWidth) return null

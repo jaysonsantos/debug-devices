@@ -85,6 +85,10 @@ object Constants {
         const val MAX_LABEL_LENGTH = 32
         const val MAX_ARROWS = 4
 
+        /** How long a rotation response waits for the layout pass of the new orientation (N11), and how often it checks. */
+        const val LAYOUT_WAIT_MILLIS = 500L
+        const val LAYOUT_POLL_MILLIS = 16L
+
         /** Space below the app's status label that the overlay layout leaves free (the phone view). */
         const val LABEL_GAP_DP = 4f
 

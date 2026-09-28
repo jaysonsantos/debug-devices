@@ -21,7 +21,11 @@ from debug_devices_mcp.bench_state import (
     BenchState,
     BenchStateStore,
     Measurement,
+    PowerRecord,
+    PowerState,
+    ResidualPoint,
     StepKind,
+    clear_all_points,
     gate,
     is_safe,
     recent_user_mode,
@@ -139,7 +143,8 @@ async def test_residual_before_the_confirmation_does_not_count(bench: Bench) -> 
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         state = await call(client, "bench_record_measurement", capture_id=early, label="C12.1")
 
-    assert state["state"]["residual_points"] == []
+    # The point keeps the reading, but the gate needs a safe reading after the confirmation.
+    assert [point["safe"] for point in state["state"]["residual_points"]] == [True]
     assert state["gate"]["unpowered_tests_allowed"] is False
 
 
@@ -614,7 +619,7 @@ def identity_board() -> Board:
 
 @pytest.mark.parametrize(
     ("label", "key"),
-    [("C8850.1", "c8850.1"), ("c8850 pin 2", "c8850.2"), ("C8850:1", "c8850.1"), ("pp_syn_1v0", "pp_syn_1v0")],
+    [("C8850.1", "c8850.1"), ("l501 pin 2", "l501.2"), ("C8850:1", "c8850.1"), ("pp_syn_1v0", "pp_syn_1v0")],
 )
 def test_a_board_point_name_is_a_part_pin_or_a_net(label: str, key: str) -> None:
     name = point_name(label, identity_board())
@@ -659,20 +664,318 @@ async def test_the_same_generic_label_at_two_points_cannot_open_the_gate(bench: 
         refusal = await refused(client, "bench_record_measurement", capture_id=unsafe, label="residual")
         safe = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
         generic_safe = await refused(client, "bench_record_measurement", capture_id=safe, label="residual")
+        await isolate(client)
         named = await call(client, "bench_record_measurement", capture_id=safe, label="C8850 pin 1")
-        named_unsafe = await call(client, "bench_record_measurement", capture_id=unsafe, label="C8850.1")
+        named_unsafe = await call(client, "bench_record_measurement", capture_id=unsafe, label="L501.2")
 
     assert "name the point: part.pin or net" in refusal
-    assert "closed the safety gate until the user confirms the isolation again" in refusal
-    assert "closed the safety gate" not in generic_safe
-    # The refused unsafe reading still counts: the confirmation is older than it.
-    assert named["notice"] is None
-    assert named["gate"]["missing"] == [UNSAFE_AFTER_CONFIRMATION]
-    assert [item["label"] for item in named["state"]["measurements"]] == ["C8850 pin 1"]
-    # Both spellings are one point: the newer unsafe reading replaces the safe one.
+    assert "the bench safety gate is closed at an unknown point" in refusal
+    assert "safety gate" not in generic_safe
+    # The refused unsafe reading stays as an unknown point: a safe reading elsewhere does not open the gate.
+    assert named["gate"]["unpowered_tests_allowed"] is False
+    assert any(f"capture {unsafe} is not safe" in item for item in named["gate"]["missing"])
+    # Recorded with its point name, the unknown point moves to that point.
     assert [(point["point"], point["safe"]) for point in named_unsafe["state"]["residual_points"]] == [
-        ("c8850.1", False)
+        ("c8850.1", True),
+        ("l501.2", False),
     ]
+
+
+# endregion
+
+
+# region: QA round 8 (N13 to N17, and the three B-E3 rule 2 cases)
+
+
+async def open_gate(client: Client, bench: Bench) -> dict[str, Any]:
+    await isolate(client)
+    opened = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12.1")
+    assert opened["gate"]["unpowered_tests_allowed"] is True
+    return opened
+
+
+async def test_an_unconfirmed_unsafe_reading_closes_the_gate(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await open_gate(client, bench)
+        uncertain = bench.add_meter(meter("dc_voltage", "V", 5.1, "5.10", confidence=0.3))
+        refusal = await refused(client, "bench_record_measurement", capture_id=uncertain, label="VBUS")
+        state = await call(client, "bench_state")
+
+    assert "uncertain, not confirmed" in refusal
+    assert "the bench safety gate is closed at 'VBUS'" in refusal
+    assert state["gate"]["unpowered_tests_allowed"] is False
+    assert state["state"]["measurements"][-1]["label"] == "C12.1"
+    assert [(point["point"], point["safe"]) for point in state["state"]["residual_points"]][-1] == ("vbus", False)
+
+
+async def test_an_unconfirmed_safe_reading_never_opens_the_gate(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        uncertain = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01", confidence=0.3))
+        refusal = await refused(client, "bench_record_measurement", capture_id=uncertain, label="VBUS")
+        state = await call(client, "bench_state")
+
+    assert "safety gate" not in refusal
+    assert state["state"]["residual_points"] == []
+    assert state["gate"]["unpowered_tests_allowed"] is False
+
+
+@pytest.mark.parametrize("tool", ["multimeter_read", "bench_measure"])
+async def test_a_disputed_unsafe_read_closes_the_gate_at_once(settings: Settings, tool: str) -> None:
+    good = {**READING, "display_text": "5.10", "value": 5.10}
+    moved = {**READING, "display_text": "51.0", "value": 51.0}
+    services = make_services(settings, FakePhone(), answers(good, moved))
+    safe = meter("dc_voltage", "V", 0.01, "0.01")
+    assert safe.capture_id is not None
+    services.captures.meter_results[safe.capture_id] = safe
+    async with Client(build_server(services)) as client:
+        await isolate(client)
+        await call(client, "bench_record_measurement", capture_id=safe.capture_id, label="C12.1")
+        read = await call(client, tool)
+        meter_result = read if tool == "multimeter_read" else read["meter"]
+        state = await call(client, "bench_state")
+        named = await refused(client, "bench_record_measurement", capture_id=meter_result["capture_id"], label="VBUS")
+        after = await call(client, "bench_state")
+
+    assert meter_result["status"] == "disputed"
+    assert "51.0 V is above the safe residual limit" in meter_result["bench_notice"]
+    assert state["gate"]["unpowered_tests_allowed"] is False
+    unknown = f"unknown point {meter_result['capture_id']}"
+    assert unknown in [point["point"] for point in state["state"]["residual_points"]]
+    # Recorded with its point name, the unknown point moves to "VBUS" (the result is still refused).
+    assert "disputed, not confirmed" in named
+    assert [point["point"] for point in after["state"]["residual_points"]] == ["c12.1", "vbus"]
+
+
+async def test_a_reading_before_the_newest_confirmation_is_still_a_point(bench: Bench) -> None:
+    # Case (a): the unsafe capture comes after the first confirmation; the user confirms again before it is recorded.
+    async with Client(bench.server) as client:
+        await isolate(client)
+        unsafe = meter("dc_voltage", "V", 5.1, "5.10")
+        await isolate(client)
+        late = await measure(client, bench, unsafe, "C12.1")
+        other = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+
+    assert late["state"]["residual_points"][0]["safe"] is False
+    assert other["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_an_older_reading_never_replaces_a_newer_one(bench: Bench) -> None:
+    # Case (c): 0.01 V at t1 and 5.10 V at t2 at one point, recorded in the order t2, t1.
+    older_safe = meter("dc_voltage", "V", 0.01, "0.01")
+    newer_unsafe = meter("dc_voltage", "V", 5.1, "5.10")
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, newer_unsafe, "C12.1")
+        state = await measure(client, bench, older_safe, "C12.1")
+        await isolate(client)
+        other = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+
+    assert [(point["point"], point["safe"]) for point in state["state"]["residual_points"]] == [("c12.1", False)]
+    assert other["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_an_unsafe_reading_with_the_power_on_is_a_point(bench: Bench) -> None:
+    # N15: power unknown, 12.00 V at C12.1, then isolation, a confirmation, and a safe reading elsewhere.
+    async with Client(bench.server) as client:
+        powered = await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "C12.1")
+        await isolate(client)
+        elsewhere = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        same_point = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12.1")
+
+    assert powered["state"]["power"]["state"] == "unknown"
+    assert powered["state"]["residual_points"][0]["safe"] is False
+    assert elsewhere["gate"]["unpowered_tests_allowed"] is False
+    assert same_point["gate"]["unpowered_tests_allowed"] is True
+
+
+async def test_one_capture_belongs_to_one_point(bench: Bench) -> None:
+    # N14: a safe capture recorded for VBUS cannot clear C12.1.
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        await isolate(client)
+        safe = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
+        await call(client, "bench_record_measurement", capture_id=safe, label="VBUS")
+        refusal = await refused(client, "bench_record_measurement", capture_id=safe, label="C12.1")
+        same = await call(client, "bench_record_measurement", capture_id=safe, label=" vbus ")
+
+    assert f"capture {safe} is already recorded for 'VBUS'" in refusal
+    assert same["gate"]["unpowered_tests_allowed"] is False
+    assert [item["label"] for item in same["state"]["measurements"]] == ["C12.1", "VBUS"]
+
+
+@pytest.mark.parametrize("label", ["GND", "agnd", "PGND", "VSS_IO", "dvss"])
+def test_a_ground_net_is_not_a_residual_point(label: str) -> None:
+    with pytest.raises(PointNameError, match="ground net"):
+        point_name(label, None)
+
+
+@pytest.mark.parametrize("label", ["C8850.2", "GND"])
+def test_a_pin_on_a_ground_net_is_not_a_residual_point(label: str) -> None:
+    with pytest.raises(PointNameError, match="on the ground net GND"):
+        point_name(label, identity_board())
+
+
+async def test_a_ground_reading_does_not_open_the_gate(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        ground = bench.add_meter(meter("dc_voltage", "V", 0.0, "0.00"))
+        refusal = await refused(client, "bench_record_measurement", capture_id=ground, label="GND")
+        state = await call(client, "bench_state")
+
+    assert "ground net" in refusal
+    assert state["state"]["residual_points"] == []
+    assert state["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_a_refused_step_leaves_the_power_check_consistent(bench: Bench) -> None:
+    # N17: a safe residual reading with a wrong step opens the gate; the open power check follows the gate.
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_probe_short")
+        check_id = state["next_step"]["step_id"]
+        state = await call(client, "bench_state_update", add_steps=[{"text": "Rail voltage", "kind": "voltage"}])
+        voltage_id = state["state"]["steps"][1]["step_id"]
+        await isolate(client)
+        safe = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
+        refusal = await refused(client, "bench_record_measurement", capture_id=safe, label="C12.1", step_id="nope")
+        after_refusal = await call(client, "bench_state")
+        attached = await call(client, "bench_record_measurement", capture_id=safe, label="C12.1", step_id=voltage_id)
+
+    assert "recorded without the step" in refusal
+    assert "do not record it again" not in refusal
+    assert "record the same capture_id again with that step_id" in refusal
+    assert after_refusal["gate"]["unpowered_tests_allowed"] is True
+    power_check = next(step for step in after_refusal["state"]["steps"] if step["step_id"] == check_id)
+    assert power_check["done"] is True
+    assert attached["state"]["measurements"][-1]["step_id"] == voltage_id
+    assert attached["next_step"] is None
+
+
+# endregion
+
+
+# region: bulk clear of all residual points (the default of the user's decision D7)
+
+USER_WORDS = "  I discharged every capacitor with the 1 kOhm resistor, it is safe now. "
+
+
+async def bulk_clear(client: Client, words: str | None = USER_WORDS) -> dict[str, Any]:
+    return await call(client, "bench_state_update", clear_all_residual_points=True, user_words=words)
+
+
+async def refused_bulk_clear(client: Client, words: str | None = USER_WORDS) -> str:
+    return await refused(client, "bench_state_update", clear_all_residual_points=True, user_words=words)
+
+
+@pytest.mark.parametrize("words", [None, "", "   "])
+async def test_a_bulk_clear_needs_the_users_words(bench: Bench, words: str | None) -> None:
+    async with Client(bench.server) as client:
+        message = await refused_bulk_clear(client, words)
+
+    assert "needs `user_words`: the user's own sentence, quoted exactly" in message
+
+
+async def test_a_bulk_clear_needs_a_safe_reading_after_the_latest_confirmation(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "PP12V")
+        not_confirmed = await refused_bulk_clear(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        await isolate(client)
+        before_the_confirmation = await refused_bulk_clear(client)
+        state = await call(client, "bench_state")
+
+    assert "the user has not confirmed the isolation" in not_confirmed
+    # The safe VBUS reading is older than the confirmation.
+    assert "no safe DC reading after the latest isolation confirmation" in before_the_confirmation
+    assert state["state"]["residual_clearances"] == []
+    assert [point["safe"] for point in state["state"]["residual_points"]] == [False, True]
+
+
+async def test_a_bulk_clear_clears_the_older_points_and_keeps_a_newer_unsafe_one(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "PP12V")
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "L1.1")
+        cleared = await bulk_clear(client)
+
+    points = {point["point"]: point for point in cleared["state"]["residual_points"]}
+    assert (points["pp12v"]["safe"], points["c12.1"]["safe"], points["l1.1"]["safe"]) == (True, True, False)
+    assert (points["pp12v"]["source_id"], points["pp12v"]["user_reason"]) == (None, USER_WORDS)
+    record = cleared["state"]["residual_clearances"][-1]
+    # The user's words are stored as given, with the time.
+    assert (record["point"], record["reason"], record["cleared_points"]) == ("all", USER_WORDS, ["pp12v", "c12.1"])
+    assert record["cleared_at"]
+    assert cleared["notice"] == (
+        "cleared 2 residual points (older than the safe reading at 'VBUS'); kept 1 with a newer unsafe reading: 'L1.1'"
+    )
+    assert cleared["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_a_bulk_clear_opens_the_gate_after_a_safe_reading(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "PP12V")
+        await measure(client, bench, meter("dc_voltage", "V", 19.5, "19.50"), "VBUS")
+        await isolate(client)
+        closed = await measure(client, bench, meter("dc_voltage", "V", 0.02, "0.02"), "C12.1")
+        opened = await bulk_clear(client)
+        await isolate(client)
+        new_confirmation = await call(client, "bench_state")
+
+    assert closed["gate"]["unpowered_tests_allowed"] is False
+    assert opened["gate"]["unpowered_tests_allowed"] is True
+    # A clearance is no reading: after a new confirmation, the gate needs a new safe reading.
+    assert new_confirmation["gate"]["missing"] == [
+        "no safe residual-voltage measurement (multimeter_read in DC voltage mode) after the confirmation"
+    ]
+
+
+async def test_a_bulk_clear_refuses_when_every_unsafe_point_is_newer(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        message = await refused_bulk_clear(client)
+
+    assert "every unsafe point ('C12.1') is newer than the safe reading at 'VBUS'" in message
+
+
+async def test_a_bulk_clear_also_clears_an_unknown_point(settings: Settings) -> None:
+    services = make_services(settings, FakePhone(), answers({**READING, "display_text": "12.00", "value": 12.0}))
+    async with Client(build_server(services)) as client:
+        read = await call(client, "multimeter_read")
+        await isolate(client)
+        safe = meter("dc_voltage", "V", 0.01, "0.01")
+        assert safe.capture_id is not None
+        services.captures.meter_results[safe.capture_id] = safe
+        await call(client, "bench_record_measurement", capture_id=safe.capture_id, label="VBUS")
+        cleared = await bulk_clear(client)
+
+    assert cleared["state"]["residual_clearances"][-1]["cleared_points"] == [f"unknown point {read['capture_id']}"]
+    assert cleared["gate"]["unpowered_tests_allowed"] is True
+
+
+def test_a_ground_point_is_never_the_safe_reading_of_a_bulk_clear() -> None:
+    # A record from before the ground rule can hold a GND point.
+    confirmed = datetime.now(UTC)
+    state = BenchState(
+        power=PowerRecord(state=PowerState.ISOLATED, user_confirmed_isolation=True, confirmed_at=confirmed),
+        residual_points=[
+            ResidualPoint(point="c12.1", label="C12.1", at=confirmed, safe=False, reading="5.10 V", source_id="a"),
+            ResidualPoint(
+                point="gnd",
+                label="GND",
+                at=confirmed + timedelta(seconds=1),
+                safe=True,
+                reading="0.00 V",
+                source_id="b",
+            ),
+        ],
+    )
+    with pytest.raises(ToolError, match="no safe DC reading after the latest isolation confirmation"):
+        clear_all_points(state, USER_WORDS)
 
 
 # endregion

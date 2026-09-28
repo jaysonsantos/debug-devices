@@ -558,6 +558,13 @@ class Monitor:
     async def tracking_changed(self, state: str) -> None:
         self.bus.update_phone(tracking=str(state))
 
+    def status_seen(self, status: CameraStatus) -> None:
+        """Listener for every phone status that the MCP server reads: the page status is the newest one, so a
+        secondary sends the app run of its overlay call with its boxes (N19 of QA round 8)."""
+        if status != self.bus.phone.status:
+            self.bus.update_phone(status=status)
+        self.remote_overlays.app_run(status.app_start_id)
+
     async def app_restarted(self, notice: RestartNotice | None) -> None:
         self.bus.update_phone(restart_notice=notice)
         if notice is not None:

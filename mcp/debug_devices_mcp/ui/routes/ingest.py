@@ -96,7 +96,8 @@ async def post_screen_start(request: Request) -> Response:
     monitor = monitor_of(request)
     # adb commands go only to the phone that the user selected (N2 of QA round 6), also for a secondary's request.
     selected = monitor.selected_serial() if monitor.selected_serial is not None else ""
-    if data.serial != selected:
+    # Nothing selected: nothing passes, also not an empty serial (N2 rest of QA round 8).
+    if not selected or data.serial != selected:
         logger.warning(
             "a secondary server asked to stream %s, but the selected phone is %s: refused",
             data.serial,

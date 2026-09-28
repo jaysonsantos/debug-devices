@@ -926,3 +926,128 @@ New findings (server and page):
 2. N2: refuse the ingest screen start when nothing is selected, and guard `PhoneScreen` against an empty serial.
 3. Contract text: C9 (one null sentence), N11 (the rotation response can have `null`, or answer after the layout pass), N12 (where an empty region is), and whether `overlay_region` follows the label text.
 4. When the user allows an app restart: `--after-start` and `--expect starting-race` on the S22.
+
+## Round 9: N12 in the fake and the checks
+
+Task: `docs/briefs/qa-round8-followup.md`, N12 (my part). I changed only `scripts/fake_phone.py`, `scripts/qa_contract.py`, and `docs/qa.md`. Not committed.
+
+- Contract: an empty `overlay_region` (`width` 0 or `height` 0) is at the centre of `preview_region`, so that directions from it stay meaningful.
+- `qa_contract.py`: every status with an empty `overlay_region` checks that its centre equals the centre of `preview_region` (2 % tolerance). A centred point and a centred band both pass.
+- `fake_phone.py`: `--safe-area-empty` now gives a point of size 0 at the centre of `preview_region` (`{0.5, 0.5, 0, 0}` at rotation 0), not `{0.2, 0.94, 0.6, 0}`.
+- `python3 scripts/fake_phone.py --self-check`: PASSED in 13 modes. ruff is clean.
+- Proof: the committed fake (`598ff0a`) with `--safe-area-empty`, then `qa_contract.py --strict`: every check fails with "empty overlay_region … is not at the centre 0.5000, 0.5000 of preview_region".
+- The app still returns the top-left corner of `preview_region` (`A/Overlay.kt:367`, `PreviewRegion(preview.snapshotX, preview.snapshotY, 0f, 0f)`); the brief gives this to dd-android. The strict run on the phone will show it when the safe area is empty.
+- I wait for the check request.
+
+## Round 10: last-round check
+
+Date: 2026-09-28. Scope: `docs/briefs/qa-round8-followup.md` (all sections), the D7 default (bulk clear), and the contract changes (C9 duplicate removed; an empty `overlay_region` at the centre of `preview_region`). The working tree at `598ff0a` with the uncommitted fixes. All other agents had stopped editing. I did not change product code or my scripts, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 943 passed, 1 skipped |
+| `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass. No hook changed a file in the copy. |
+| The same in the real tree, with `sha256sum` of every file (`git ls-files -co --exclude-standard`, 292 files) and `git status --porcelain` before and after | All 15 hooks pass (also ktlint). The hashes and the git status are unchanged: prek leaves the tree unchanged now. |
+| `(cd android && nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest)` | BUILD SUCCESSFUL (`UP-TO-DATE`). Forced `testDebugUnitTest --rerun`: BUILD SUCCESSFUL, 169 tests in 16 suites, 0 failures. |
+
+### 2. QA scripts
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 13 modes (with "safe area empty": a point at the centre of `preview_region`) |
+| `python3 scripts/fake_phone.py --port 18894`, then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18894 --strict --after-start` | 30/30 |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` (server with `--no-ui`) | 15/15, with `fire-tv` ("no phone is selected", no command to the fake Fire TV) |
+
+### 3. Re-check of the last-round items
+
+Three read-only agents re-checked every item against the code and the contract text, and ran the bench cases in memory. I checked the main findings in the code myself ("checked"). All fixes are in uncommitted files. Paths are in `mcp/debug_devices_mcp/` unless they start with another directory; `A/` and `AT/` are the Android source and test directories.
+
+#### Bench safety (N13, B-E3 rule 2, N14-N17, D7)
+
+`uv run pytest -q mcp/tests/test_bench_state.py mcp/tests/test_meter_frames.py mcp/tests/test_qa_round8.py`: 132 passed. The reviewer ran every case in memory against `bench_state.py` (state files in a temporary directory).
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N13 | **partly (checked)** | `bench_state.py:258-289` (the LCD voltage of the result and of each frame, no confirmed value needed), `:466-541`, `:567-577` (save, then refuse), `:651-664`, `server.py:866` (`multimeter_read` and `bench_measure` also note the reading); tests `test_bench_state.py:697`, `:711`, `:724` | Pass: "DC -5.10" + "DC 5.10" (disputed) and "5.10" + "5.12" (uncertain) close the gate; an unconfirmed 0.01 V opens nothing; unsafe AC, `OL`, 600 mV, and V with no unit close the gate. Gaps: (1) `:265-266`: a diode-mode reading never counts, with no upper limit. The model reads mode "diode" with "5.10 V" in both frames; `combine` says "the dial is probably on DC V" (uncertain), but the gate stays open. (2) `:287`: the frames use `result.mode` (the first frame), not their own mode. Frames "0.60" diode + "5.10" DC V give a disputed result, and the gate stays open. (3) Low: mode "other", no unit, "5.10": the gate stays open. |
+| B-E3 rule 2 (a) | fixed | `bench_state.py:482-483`, `:510-533`; test `test_bench_state.py:750` | – |
+| B-E3 rule 2 (b) | fixed | `bench_state.py:476-483`, `:522-528`; test `test_bench_state.py:659` | – |
+| B-E3 rule 2 (c) | fixed | `set_point` `bench_state.py:319-326`; test `test_bench_state.py:763` | At the same time stamp, the unsafe reading wins in both orders. |
+| N15 | fixed | `bench_state.py:482`; test `test_bench_state.py:778` | – |
+| N14 | fixed | `label_conflict` `bench_state.py:551-564`, `:605-607`; test `test_bench_state.py:792` | – |
+| N16 | fixed, low gap | `bench_points.py:25` (`GROUND_NET_PATTERNS`), `:45-46`, `:72-73`, `:86-87`, `:101-102`, `bench_state.py:719`; tests `test_bench_state.py:809-820`, `:960` | Refused as ground: gnd, GND1, PGND_2, VSS_IO, DGND, AGND, VSS, 0V, EARTH, CHASSIS_GND, and a board pin on a ground net. Accepted (gap): "GROUND", "Ground", "GRND", "0 V" (also a board net named GROUND, `:86`). `gate()` (`bench_state.py:351-353`) does not filter ground points (only old records). |
+| N17 | fixed, low wording | `step_refusal` `bench_state.py:435-451`, `:612`, `:621-632`; test `test_bench_state.py:832` | For a mode mismatch (DC V with a resistance step), the text says "record the same capture_id again with that step_id", which is refused again every time. It must say "with a step that fits". |
+| D7 bulk clear | **partly** | `clear_all_points` `bench_state.py:698-762`, tool `:900-901`, `:941`; tests `test_bench_state.py:872-981` | Pass: empty or missing `user_words` refused; no confirmation, or power on: refused; no safe DC reading after the confirmation: refused; AC or a single clear cannot be the anchor; the words are stored with `cleared_at` and `cleared_points`; an unsafe reading after the confirmation still needs a new confirmation and a new safe reading. It opens the gate by itself only when every unsafe reading came before the confirmation (by design). See N24. |
+
+New findings (bench):
+
+- **N24 (safety, medium): a point that the bulk clear kept is lost when its capture gets a name.** `bench_state.py:528` removes the unknown point without a condition, then `set_point` (`:532`) refuses because the named point was cleared (`:744` gives a cleared point the clear time). Case: "C12.1" 12 V with power on, confirm, "VBUS" 0.01 V (the anchor); then `multimeter_read` 5.10 V at C12.1 (kept as an unknown point); the bulk clear clears C12.1 and keeps the unknown point; `record_measurement` of that capture as "C12.1" returns "ok" and says the gate is "closed at 'C12.1'", but the unknown point is gone and C12.1 stays cleared. After a new confirmation and "VBUS" 0.01 V, the gate is open, although the 5.10 V came after the anchor.
+- **N25 (safety, low): a parallel write can lose the unsafe point that `multimeter_read` adds.** No bench-state tool locks the file from load to save, and `note_meter_reading` (`server.py:866`) is a new writer. `bench_record_measurement` loads, then awaits `open_board()` (`bench_state.py:972-973`), then saves; `bench_measure` runs `add_photo` in a thread (`server.py:806`) during the meter read. Simulated with a slow `open_board`: the notice said "above the safe residual limit", but the saved state had no unsafe point and the gate was open.
+- N26 (low): a later unsafe reading closes the gate but does not reopen a power-check step that is done (`complete_power_checks`, `bench_state.py:793-797`, only closes steps). The gate still blocks; only the next step is wrong.
+- Note (D7 design): the bulk clear also clears unsafe readings taken after the isolation, when they are older than the anchor. The gate then still needs a new confirmation.
+- Low: `user_words` without `clear_all_residual_points: true` is ignored with no message (`bench_state.py:941`).
+
+#### Server and page (N2, N19, N20, N12 client)
+
+`uv run pytest -q` on 13 test files of this area: 46 + 86 passed.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N2 rest | fixed | `ui/routes/ingest.py:97-106` (`not selected or data.serial != selected`: 403 and a log line), `phone_screen.py:188-192` (refuses an empty serial before any adb call); other guards `adb.py:151-155`, `scrcpy.py:68-70`, `devices.py:146-153`; tests `test_qa_round8.py:42-60` | The test does not check the log line. Cosmetic: the log line says "asked to stream , but the selected phone is none" for an empty serial. |
+| N19 | fixed | `server.py:380-390` (the status of the overlay POST updates the app run first), `server.py:468-478`, `ui/setup.py:28`, `ui/monitor.py:496-500`, `:561-566`; test `test_qa_round8.py:76-94` | – |
+| N20 | fixed | `orientation.py:208-247` (the flips merge inside the locked update), `ui/settings.py:126-133`; tests `test_qa_round8.py:102-117` | 100 concurrent pairs in memory lost no flip. See N29 for another writer. |
+| N12 client | fixed, one edge | `phone_api.py:158-161`, `server.py:470-473`, `:562-563`, `highlight.py:103-114` (empty region: not visible, warning), `pointing.py:438-447`, `:499-501` (no fallback), `pointer.py:128-132`, `:150`, `:177`; tests `test_qa_round8.py:125-145`, `test_overlay_region.py:116-143` | See N27 and N28. |
+
+New findings (server and page):
+
+- **N27 (low): `edge_point` raises `ValueError` when a target is exactly at the centre of an empty view** (`pointer.py:87-96`, called at `:195`): the direction is (0, 0), so `min()` gets an empty list. `pointing.py:353-357` catches only `ToolError`, so the error reaches `phone_point_to` or the live tracking refresh. Unlikely with real homographies. The dd-ui report says that this case gives the centre; it does not. Fix: return the centre when there is no direction.
+- **N28 (low): the arrow distance is wrong for a centred band** (width > 0, height 0; the contract allows it, the app sends only a point). `pointer.py:195-197` measures from the band end. Case: band `(200, 400, 600, 0)` px, a part 0.5 cm left of the centre: the label says "~2 cm".
+- **N29 (low): `delete_crop` builds the new settings from an old in-memory copy** (`ui/routes/settings.py:46-50`). A `screen_rotation` change and a crop delete at the same time can undo the rotation change. Only the page does this.
+- **N30 (adb rule, low, code from before this round): a secondary server's own screen stream keeps using the old serial after the user selects another phone.** `phone_screen.py:260-271`: `_run` restarts the session with the same serial and never checks the selection again. Case: the primary has `--no-phone-screen` (or cannot be reached), so the secondary streams itself (`ui/monitor.py:620-624`); the user selects another phone in the primary page; the primary stops only its own stream (`ui/monitor.py:919-930`); the secondary sends `adb -s <old serial>` push, forward, and shell again after each restart delay. This breaks the AGENTS.md rule "adb only to the selected serial".
+
+#### Android and contract (N11, N12, C9)
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N11 | fixed in the app (confirmed on the S22); contract text partly | `A/CameraController.kt:744-753` (the rotation POST waits for the layout pass of the new orientation), `A/Waits.kt:10-14`, `A/Constants.kt:89-90` (500 ms limit, 16 ms steps, named); test `AT/WaitsTest.kt:15-33` (the helper only). S22: each rotation response has the region of the new orientation (section 4). | (1) `docs/phone-api.md:101` allows `null` only "while the safe area is not measured yet (the window has no size)". The app still gives `null` with a sized window in three short cases: (a) the rotation response after the 500 ms limit (`CameraController.kt:749` ignores the result); (b) a `GET /v1/status` during the rotation wait or after a physical turn in auto mode (`status()` does not wait, `CameraController.kt:526-529`, `OverlayLayout.kt:480`); (c) no wait when a layout is already pending before the POST (`measuredBefore` false, `:744`). The contract text must name these cases, or the app must avoid them. (2) No test of the `setRotation` wiring (`AT/ApiServerTest.kt:98` uses a fake camera). |
+| N12 | fixed | `A/Overlay.kt:367-374` (size 0 at the centre of `preview_region`; the only place that makes an empty region), caller `A/CameraController.kt:614-624`; tests `AT/OverlayLogicTest.kt:288-299`, `AT/OverlayLayoutTest.kt:229-239`. The fake and the contract agree. | Low test gap: both test geometries have `preview_region` centred at (0.5, 0.5), so a constant (0.5, 0.5) also passes. No real effect: the app crop is always centred. |
+| C9 | fixed | `docs/phone-api.md:100`: the null rule once, and "zoom and the preview flips do not change it" agrees with `OverlayLogic.previewRegion` (test `AT/OverlayLogicTest.kt:208-216`) | – |
+| `overlay_region` and the label text | not fixed (open since round 8) | `A/MainActivity.kt:116`, `:147-153`, `A/OverlayLayout.kt:481` | The region follows the height of the status label, and the label is drawn again every 1 s with the focus distance. On the S22 (round 8), y was 0.109 and 0.091 a few seconds apart at the same rotation and flips. `docs/phone-api.md:101` says to read it again only "after a flip or rotation change". Also: while `overlay_region` is `null`, the app draws no boxes (`A/OverlayView.kt:63`), but the contract tells clients to use `preview_region` then. |
+
+New findings (Android):
+
+- Threading: no deadlock. Ktor CIO runs the handler (`A/ApiServer.kt:25`, `:81`); `setRotation` suspends on Main (`CameraController.kt:742`), and the wait uses `delay` (`Waits.kt:12`), so the layout pass runs between the checks. The control mutex is held for at most 500 ms (`A/ControlGate.kt:28-31`); status reads do not wait for it.
+- N21 (low): `onDestroy` stops the server on Main (`A/MainActivity.kt:206`) and waits up to 500 ms (`A/Constants.kt:9`) for running requests. A rotation request in its wait needs Main to resume, so Main stays blocked for the full 500 ms. It has a limit; it is not a deadlock.
+- N22 (low): after the wait, `readStatus` (`CameraController.kt:753`) does not check the foreground again: if the app pauses during the wait, the response is 200 with a status, not 503 `camera_not_ready`. Other `runControl` endpoints have the same pattern.
+- N23 (low): a timeout of the rotation wait writes no log line (`CameraController.kt:749`), so a `null` in a response cannot be traced on the phone.
+
+### 4. Real phone
+
+- Selected serial (`~/.local/state/debug-devices/ui-settings.json`, `adb_serial`): the Wi-Fi serial of the Samsung S22 (`SM_S901B`). `adb devices -l` listed only this device, in state `device`. I used the adb binary of the running adb server (`android-tools-37.0.0`).
+- Separate forward `tcp:18792 tcp:8765` on the selected serial only. Health 200. Status 200: the app is in the foreground, so the phone is unlocked. The `app_start_id` is new since round 8 (the new APK).
+- `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18792 --strict`: 29/29. Turned pixels (3060x4080 at 0, 4080x3060 at 90 and 270), `preview_region` turned at 90, `overlay_region` `{0.192, 0.109, 0.615, 0.829}` moves with a vertical flip. The safe area was not empty, so the N12 centre rule did not apply on the phone.
+- N11 on the phone: `POST /v1/rotation` with `{"degrees": 90}`, `{"degrees": 0}`, `{"degrees": 270}`, and `{"auto": true}`. Each response has the `overlay_region` of the new orientation (for example 90: `{0.035, 0.268, 0.904, 0.540}`; 270: `{0.062, 0.268, 0.904, 0.540}`), in about 55-80 ms. In round 8, the responses at 90 and 0 were `null`.
+- After the run I sent `{"in_sensor_zoom": true}` again (the saved setting) and the rotation is auto. 3 s later, every field (except `focus`) equalled the first status.
+- I removed the forward. Only the MCP server forward (18765) remains. No command went to another device.
+- Not tested: `--after-start` and `--expect starting-race` (they need an app restart).
+
+### Summary
+
+- Tests: all pass (pytest 943, boardview 13, Android 169, fake self-check 13 modes, contract 30/30 on the fake and 29/29 on the S22, MCP stdio 15/15). prek passes and leaves the tree unchanged (292 file hashes and the git status equal before and after).
+- Fixed: B-E3 rule 2 cases (a), (b), (c), N2 rest, N12 (app and client), N14, N15, N19, N20, and C9. N11 is fixed in the app (confirmed on the S22). N16 and N17 are fixed with small gaps.
+- Not fully fixed:
+  - **N13 (safety, checked):** a diode-mode reading never counts for the gate, with no upper limit ("5.10 V" in diode mode leaves the gate open, `bench_state.py:265-266`); the frames use the mode of the first frame (`:287`).
+  - **D7 bulk clear (safety):** N24, a kept point is lost when its capture gets a name (`bench_state.py:528`, `:532`, `:744`).
+  - N11 contract text: `docs/phone-api.md:101` does not name the short `null` cases with a sized window.
+  - `overlay_region` and the label text (open since round 8).
+- New: N24 (safety, medium), N25 (safety, low, parallel writes), N30 (adb rule, low, secondary stream after a phone switch), and low N21-N23, N26-N29.
+
+### What to do next
+
+1. Safety: N13 gaps (a diode reading above a named limit, for example the meter's diode test voltage, counts as a voltage; use each frame's own mode), N24, then N25 (one lock from load to save for the bench state).
+2. N30: the secondary stream checks the selection before each restart.
+3. Contract text: the N11 `null` cases, and whether `overlay_region` follows the label text.
+4. Low: N27 (centre target), N28 (band distance), N17 wording, N16 names ("GROUND", "GRND", "0 V").
+5. When the user allows an app restart: `--after-start` and `--expect starting-race` on the S22.

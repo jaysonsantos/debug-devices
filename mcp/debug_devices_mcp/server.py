@@ -37,6 +37,7 @@ from debug_devices_mcp.bench_state import (
     BenchStateStore,
     add_photo,
     current_step_text,
+    note_meter_reading,
     recent_user_mode,
     register_bench_state_tools,
 )
@@ -170,6 +171,7 @@ logger = logging.getLogger(__name__)
 
 type OverlayListener = Callable[[list[OverlayBox], list[OverlayArrow]], Awaitable[None]]
 type RestartListener = Callable[[RestartNotice | None], Awaitable[None]]
+type StatusListener = Callable[[CameraStatus], None]
 
 type MaxSide = Annotated[int, Field(ge=0, description="Long edge in pixels of the returned image. 0 = full size.")]
 
@@ -298,6 +300,7 @@ class Services:
     # Forgets the boxes and arrows OVERLAY_TTL after the last overlay call, like the app.
     _overlay_ttl: asyncio.TimerHandle | None = None
     _restart_listeners: list[RestartListener] = field(default_factory=list)
+    _status_listeners: list[StatusListener] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.preview_sync = PreviewSync(self.phone, self.orientation)
@@ -329,6 +332,10 @@ class Services:
 
     def add_restart_listener(self, listener: RestartListener) -> None:
         self._restart_listeners.append(listener)
+
+    def add_status_listener(self, listener: StatusListener) -> None:
+        """Called with every phone status that the server reads (tools, the page poll, overlay calls)."""
+        self._status_listeners.append(listener)
 
     async def check_app_start(self, status: CameraStatus) -> None:
         """A new app_start_id: the app is back at its defaults. Clear what belongs to the old camera view."""
@@ -465,6 +472,10 @@ class Services:
         if region is not None:
             self.overlay_region = region
         self.app_hides_markings = status.overlay_visible is not None
+        # The page (and, on a secondary, the app run that goes with its boxes) gets the status of this call, not an
+        # older one (N19 of QA round 8).
+        for listener in self._status_listeners:
+            listener(status)
 
     async def _overlay_changed(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
         self.highlights, self.arrows = boxes, arrows
@@ -851,6 +862,8 @@ async def read_meter(
         for reading, (_, capture) in zip(readings, captured, strict=True)
     ]
     result = combine(results, limits, user_mode, expected_value=expected_value, counts=settings.meter_counts)
+    # An unsafe voltage closes the bench safety gate at once, confirmed or not (fail safe).
+    result.bench_notice = note_meter_reading(services.bench, result)
     for _, capture in captured:
         services.captures.meter_results[capture.capture_id] = result
     return result, captured
@@ -1224,6 +1237,9 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         Known limit: a decimal point shift that keeps the digit count and stays below the bench limit (for example
         "14.15" for 1.415 V) can pass as "confirmed". For a value that decides a repair step, give `expected_value`,
         or ask the user to confirm the LCD.
+        Safety: a voltage above 0.5 V on the LCD (any frame, any status) closes the bench safety gate at once, at an
+        unknown point of this capture; `bench_notice` says so. Record the capture with its point name
+        (bench_record_measurement) so that a later safe reading at that point can clear it.
         `source` "webcam" (default) uses the PC webcam with its crop. "phone" uses a phone snapshot (call
         phone_connect first). The image goes to the vision model, so use "phone" only when the phone points at the
         meter, never when it points at the board. `include_image` also returns the exact images that the model saw.

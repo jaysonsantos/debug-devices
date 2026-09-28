@@ -280,7 +280,8 @@ def overlay_region(
 ) -> dict[str, float] | None:
     """The safe area of the screen, mapped into preview_region on the still. null when preview_region is null.
 
-    `safe_top` = 1 - SAFE_BOTTOM gives a measured but empty safe area (the label covers it): height 0, not null.
+    `safe_top` = 1 - SAFE_BOTTOM gives a measured but empty safe area (the label covers it): not null, but a region of
+    size 0 at the centre of preview_region (docs/phone-api.md), so that directions from it stay meaningful.
     """
     if preview is None:
         return None
@@ -288,6 +289,11 @@ def overlay_region(
     points = [still_point(u, v, rotation_degrees, flip_horizontal, flip_vertical) for u, v in corners]
     left, right = sorted(x for x, _ in points)
     top, bottom = sorted(y for _, y in points)
+    if right <= left or bottom <= top:
+        centre_x = preview["snapshot_x"] + preview["width"] / 2
+        centre_y = preview["snapshot_y"] + preview["height"] / 2
+        empty = {"snapshot_x": centre_x, "snapshot_y": centre_y, "width": 0.0, "height": 0.0}
+        return {name: round(value, REGION_DIGITS) for name, value in empty.items()}
     region = {
         "snapshot_x": preview["snapshot_x"] + left * preview["width"],
         "snapshot_y": preview["snapshot_y"] + top * preview["height"],

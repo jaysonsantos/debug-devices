@@ -364,7 +364,15 @@ object OverlayLogic {
         val top = maxOf(minOf(a.second, b.second), preview.snapshotY)
         val right = minOf(maxOf(a.first, b.first), preview.snapshotX + preview.width)
         val bottom = minOf(maxOf(a.second, b.second), preview.snapshotY + preview.height)
-        if (right <= left || bottom <= top) return PreviewRegion(preview.snapshotX, preview.snapshotY, 0f, 0f)
+        if (right <= left || bottom <= top) {
+            // N12: an empty region sits at the centre of preview_region, so directions from it stay meaningful.
+            return PreviewRegion(
+                preview.snapshotX + preview.width / HALF,
+                preview.snapshotY + preview.height / HALF,
+                0f,
+                0f
+            )
+        }
         return PreviewRegion(left, top, right - left, bottom - top)
     }
 }

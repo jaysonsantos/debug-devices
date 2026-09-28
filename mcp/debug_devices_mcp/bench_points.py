@@ -2,9 +2,11 @@
 
 The safety gate keeps the latest residual reading of each point, so one name must not stand for two points. With a
 board open, the name must be a part pin ("C12.1", "C12 pin 1") or a net of that board. Without a board, a free name
-is accepted with a warning. A generic name ("residual", "test", "point", empty) is always refused.
+is accepted with a warning. A generic name ("residual", "test", "point", empty) and a ground net (GND, AGND, VSS, and
+the other GROUND_NET_PATTERNS, also a pin on such a net) are always refused.
 """
 
+import fnmatch
 import re
 
 from pydantic import BaseModel
@@ -19,6 +21,8 @@ GENERIC_WORDS = frozenset(
 PART_PIN = re.compile(r"^(?P<part>[^\s.:]+)\s*(?:[.:]|\s+pin\s+)\s*(?P<pin>[^\s.:]+)$", re.IGNORECASE)
 MAX_LISTED_PINS = 6
 NAME_THE_POINT = "name the point: part.pin or net (for example C12.1 or PP3V3_S5)"
+# Ground nets: a reading there is always about 0 V, so it is not a residual point (and never "the safe reading").
+GROUND_NET_PATTERNS = ("*GND*", "*VSS*", "0V", "EARTH*", "CHASSIS*")
 
 
 class PointName(BaseModel):
@@ -38,6 +42,17 @@ def words(label: str) -> list[str]:
     return label.casefold().replace("_", " ").replace("-", " ").split()
 
 
+def is_ground(name: str) -> bool:
+    return any(fnmatch.fnmatchcase(name.casefold(), pattern.casefold()) for pattern in GROUND_NET_PATTERNS)
+
+
+def ground_error(label: str, net: str) -> PointNameError:
+    return PointNameError(
+        f"{NAME_THE_POINT}: {label!r} is on the ground net {net}; a reading there is always about 0 V, so it is not a "
+        "residual point"
+    )
+
+
 def is_generic(label: str) -> bool:
     return all(word in GENERIC_WORDS or word.isdigit() for word in words(label))
 
@@ -54,6 +69,8 @@ def point_name(label: str, board: Board | None) -> PointName:
     text = " ".join(label.split())
     if is_generic(text):
         raise PointNameError(f"{NAME_THE_POINT}, not {label!r}")
+    if is_ground(text):
+        raise ground_error(label, text)
     if board is None:
         return PointName(
             key=text_key(text),
@@ -66,6 +83,8 @@ def point_name(label: str, board: Board | None) -> PointName:
         raise PointNameError(f"{NAME_THE_POINT}: {label!r} is a pattern, not one point")
     nets = board.net_names(text)
     if nets:
+        if is_ground(nets[0]):
+            raise ground_error(label, nets[0])
         return PointName(key=nets[0].casefold())
     match = PART_PIN.match(text)
     part = board.part(match["part"] if match else text)
@@ -79,4 +98,6 @@ def point_name(label: str, board: Board | None) -> PointName:
     pin = next((pin for pin in pins if wanted in {pin.number.casefold(), pin.name.casefold()}), None)
     if pin is None:
         raise PointNameError(f"{NAME_THE_POINT}: {part.name} has no pin {match['pin']!r}")
+    if is_ground(pin.net):
+        raise ground_error(label, pin.net)
     return PointName(key=f"{part.name}.{pin.number}".casefold())

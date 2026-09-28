@@ -25,7 +25,7 @@ from debug_devices_mcp.phone_api import (
     PreviewFlipRequest,
     PreviewNotSupportedError,
 )
-from debug_devices_mcp.ui.settings import SettingsStore
+from debug_devices_mcp.ui.settings import SettingsStore, UiSettings
 
 logger = logging.getLogger(__name__)
 
@@ -208,23 +208,43 @@ class OrientationState:
     def update(self, flip_horizontal: bool | None = None, flip_vertical: bool | None = None) -> SnapshotOrientation:
         """Change the given flips (None keeps a flip), save, and tell the listeners. For code without an event loop;
         on the event loop, `save`."""
-        updated = self._updated(flip_horizontal, flip_vertical)
-        if self._store is not None:
-            try:
-                self._store.update(lambda saved: saved.model_copy(update={"snapshot_orientation": updated}))
-            except OSError as exc:
-                logger.warning("cannot save the snapshot orientation: %s", exc)
-        return self._tell(updated)
+        if self._store is None:
+            return self._tell(self._updated(flip_horizontal, flip_vertical))
+        change = FlipChange(flip_horizontal, flip_vertical)
+        try:
+            self._store.update(change)
+        except OSError as exc:
+            logger.warning("cannot save the snapshot orientation: %s", exc)
+        return self._tell(change.result or self._updated(flip_horizontal, flip_vertical))
 
     async def save(self, flip_horizontal: bool | None = None, flip_vertical: bool | None = None) -> SnapshotOrientation:
         """`update` for code on the event loop: the file lock wait runs in a worker thread (N3 of QA round 6)."""
-        updated = self._updated(flip_horizontal, flip_vertical)
-        if self._store is not None:
-            try:
-                await self._store.update_async(lambda saved: saved.model_copy(update={"snapshot_orientation": updated}))
-            except OSError as exc:
-                logger.warning("cannot save the snapshot orientation: %s", exc)
-        return self._tell(updated)
+        if self._store is None:
+            return self._tell(self._updated(flip_horizontal, flip_vertical))
+        change = FlipChange(flip_horizontal, flip_vertical)
+        try:
+            await self._store.update_async(change)
+        except OSError as exc:
+            logger.warning("cannot save the snapshot orientation: %s", exc)
+        return self._tell(change.result or self._updated(flip_horizontal, flip_vertical))
+
+
+class FlipChange:
+    """The read-modify-write of the flips inside the settings file lock: the given flips go onto the flips in the file
+    at that moment, so two changes at the same time both apply (N20 of QA round 8). `result`: the saved flips."""
+
+    def __init__(self, flip_horizontal: bool | None, flip_vertical: bool | None) -> None:
+        self._horizontal = flip_horizontal
+        self._vertical = flip_vertical
+        self.result: SnapshotOrientation | None = None
+
+    def __call__(self, saved: UiSettings) -> UiSettings:
+        before = saved.snapshot_orientation or SnapshotOrientation()
+        self.result = SnapshotOrientation(
+            flip_horizontal=before.flip_horizontal if self._horizontal is None else self._horizontal,
+            flip_vertical=before.flip_vertical if self._vertical is None else self._vertical,
+        )
+        return saved.model_copy(update={"snapshot_orientation": self.result})
 
 
 class PreviewSync:
