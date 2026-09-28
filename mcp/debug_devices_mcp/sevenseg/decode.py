@@ -378,20 +378,37 @@ def decode_lcd(lcd: Gray, layout: LcdLayout) -> DecodedFrame:
     )
 
 
-def decode_image(image: NDArray[np.uint8], profile: MeterProfile) -> DecodedFrame:
-    """Decode a webcam crop (BGR or gray) with the profile."""
-    started = time.perf_counter()
+def frame_matches(image: NDArray[np.uint8], profile: MeterProfile) -> bool:
+    """The frame has the size of the calibrated crop. Another size means that the webcam crop changed."""
     height, width = image.shape[:2]
-    if (width, height) != (profile.image_width, profile.image_height):
+    return (width, height) == (profile.image_width, profile.image_height)
+
+
+def decode_with_lcd(image: NDArray[np.uint8], profile: MeterProfile) -> tuple[DecodedFrame, Gray | None]:
+    """Decode a webcam crop (BGR or gray), and return the warped LCD too (None when the frame does not match)."""
+    started = time.perf_counter()
+    if not frame_matches(image, profile):
+        height, width = image.shape[:2]
         problem = (
             f"the frame is {width}x{height}, the profile is for {profile.image_width}x{profile.image_height}: the "
             "webcam crop changed; calibrate again"
         )
-        return DecodedFrame(
-            reading=unreadable(problem), chars=[], regions=[], elapsed=timedelta(seconds=time.perf_counter() - started)
-        )
-    decoded = decode_lcd(warp_lcd(to_gray(image), profile), profile.layout)
-    return decoded.model_copy(update={"elapsed": timedelta(seconds=time.perf_counter() - started)})
+        elapsed = timedelta(seconds=time.perf_counter() - started)
+        return DecodedFrame(reading=unreadable(problem), chars=[], regions=[], elapsed=elapsed), None
+    lcd = warp_lcd(to_gray(image), profile)
+    decoded = decode_lcd(lcd, profile.layout)
+    return decoded.model_copy(update={"elapsed": timedelta(seconds=time.perf_counter() - started)}), lcd
+
+
+def decode_image(image: NDArray[np.uint8], profile: MeterProfile) -> DecodedFrame:
+    """Decode a webcam crop (BGR or gray) with the profile."""
+    return decode_with_lcd(image, profile)[0]
+
+
+def fit_lcd(lcd: Gray, layout: LcdLayout) -> Gray:
+    """A saved LCD image at the warp size of the layout (the aspect of a new profile can differ)."""
+    size = warp_size(layout)
+    return lcd if (lcd.shape[1], lcd.shape[0]) == size else cv2.resize(lcd, size, interpolation=cv2.INTER_LINEAR)
 
 
 class ImageDecodeError(Exception):

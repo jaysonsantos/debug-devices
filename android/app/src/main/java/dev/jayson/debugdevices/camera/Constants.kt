@@ -10,6 +10,9 @@ object Constants {
 
         /** The one thread that starts and stops the server, in call order (N21). */
         const val LIFECYCLE_THREAD = "api-server-lifecycle"
+
+        /** A failed server start (for example another app holds the port) runs again after this time. */
+        const val START_RETRY_MILLIS = 2_000L
     }
 
     object Log {
@@ -144,6 +147,9 @@ object Constants {
         /** Response headers of `/v1/snapshot` (C12 of the contract). */
         const val HEADER_ROTATION_DEGREES = "X-Rotation-Degrees"
         const val HEADER_APP_START_ID = "X-App-Start-Id"
+
+        /** How long a snapshot waits for a running camera change (N44, `SNAPSHOT_READY_WAIT` in the contract). */
+        const val SNAPSHOT_READY_WAIT_MILLIS = 5_000L
     }
 
     object Start {
@@ -180,7 +186,11 @@ object Constants {
         const val FOCUS_OUT_OF_RANGE = "Focus coordinates must be numbers in [0, 1]"
         const val FOCUS_OUTSIDE_PREVIEW = "outside the preview"
         const val START_STATE_PENDING = "Camera start state is not set yet"
+        const val CAMERA_CHANGE_RUNNING = "camera change still running"
         const val ROTATION_CHANGED = "Snapshot rotation degrees: "
+        const val SERVER_START_FAILED = "API server start failed; trying again, every ms: "
+        const val SERVER_STARTED_AFTER_RETRY = "API server started; failed tries before: "
+        const val SERVER_STOP_FAILED = "API server stop failed"
         const val ROTATION_LAYOUT_TIMEOUT = "Rotation response without overlay_region: no layout pass in ms: "
         const val START_STATE_FAILED = "Camera bind or start state failed"
         const val EXPECTED_NUMBER = "Expected a JSON number"

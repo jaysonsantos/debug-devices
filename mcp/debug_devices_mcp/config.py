@@ -112,7 +112,8 @@ class Settings(BaseSettings):
         default=LocalDecoderMode.OFF,
         description="off: no local code runs. compare: the local 7-segment decoder (debug-devices-sevenseg) also "
         "reads the webcam frames of multimeter_read and bench_measure; local_reading and local_agrees go next to "
-        "the vision result, which stays the measurement. It saves the frames to a local dataset.",
+        "the vision result, which stays the measurement. Its local dataset keeps only the LCD area, and only with a "
+        "webcam crop.",
     )
     meter_model: str = Field(
         default="",

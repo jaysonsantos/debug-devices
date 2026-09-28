@@ -2,9 +2,11 @@ package dev.jayson.debugdevices.camera
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Runs camera changes (zoom, torch, start state) one at a time, and refuses them until the start state is set.
+ * Runs camera changes (zoom, torch, start state, new binds) and snapshots one at a time, and refuses them until the
+ * start state is set.
  *
  * CameraX cancels a pending zoom or torch call when a new one arrives. One lock for all changes means a request
  * never cancels another one. Pure Kotlin, so JVM unit tests cover it.
@@ -27,6 +29,23 @@ class ControlGate {
         return lock.withLock {
             checkReady()
             block()
+        }
+    }
+
+    /**
+     * Runs a snapshot under the same lock as the camera changes (N44): a change waits for a running snapshot, and a
+     * snapshot waits for a running change (for example a new bind) at most [waitMillis], then gets 503
+     * "camera change still running". The wait never cancels the change. Refuses at once while the start state runs.
+     */
+    suspend fun <T> snapshot(waitMillis: Long, block: suspend () -> T): T {
+        checkReady()
+        withTimeoutOrNull(waitMillis) { lock.lock() }
+            ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_CHANGE_RUNNING)
+        try {
+            checkReady()
+            return block()
+        } finally {
+            lock.unlock()
         }
     }
 

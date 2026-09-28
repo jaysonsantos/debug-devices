@@ -763,32 +763,34 @@ class CameraController(
     override suspend fun capture(): Snapshot = captureLock.withLock {
         // The rotation that this still uses, read next to the capture (C12: the header, not an older status).
         var rotationDegrees = 0
-        val jpeg = withContext(Dispatchers.Main) {
-            gate.checkReady()
-            activeCamera()
-            rotationDegrees = rotation.effectiveDegrees
-            val output = ByteArrayOutputStream()
-            val options = ImageCapture.OutputFileOptions.Builder(output).build()
-            suspendCancellableCoroutine { continuation ->
-                imageCapture.takePicture(
-                    options,
-                    ContextCompat.getMainExecutor(context),
-                    object : ImageCapture.OnImageSavedCallback {
-                        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                            continuation.resume(output.toByteArray())
-                        }
+        // N44: one at a time with the camera changes, so a new bind never makes the still fail.
+        val jpeg = gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) {
+            withContext(Dispatchers.Main) {
+                activeCamera()
+                rotationDegrees = rotation.effectiveDegrees
+                val output = ByteArrayOutputStream()
+                val options = ImageCapture.OutputFileOptions.Builder(output).build()
+                suspendCancellableCoroutine { continuation ->
+                    imageCapture.takePicture(
+                        options,
+                        ContextCompat.getMainExecutor(context),
+                        object : ImageCapture.OnImageSavedCallback {
+                            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                continuation.resume(output.toByteArray())
+                            }
 
-                        override fun onError(exception: ImageCaptureException) {
-                            continuation.resumeWithException(
-                                ApiException(
-                                    ErrorCode.CAPTURE_FAILED,
-                                    exception.message ?: Constants.Messages.CAPTURE_FAILED,
-                                    exception
+                            override fun onError(exception: ImageCaptureException) {
+                                continuation.resumeWithException(
+                                    ApiException(
+                                        ErrorCode.CAPTURE_FAILED,
+                                        exception.message ?: Constants.Messages.CAPTURE_FAILED,
+                                        exception
+                                    )
                                 )
-                            )
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
         }
         // C13: upright pixels, EXIF Orientation 1 or absent. Off the main thread: it can decode and encode.

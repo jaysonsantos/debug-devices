@@ -12,11 +12,12 @@ class LocalStatus(StrEnum):
     READ = "read"
     # A region is unclear, a digit pattern is unknown, two points are on, or the unit symbol is missing.
     UNCERTAIN = "uncertain"
-    # The frames do not agree on the digits, the point, the sign, or the unit.
+    # The readable frames do not agree on the digits, the point, the sign, the unit, or the mode.
     UNSTABLE = "unstable"
-    # The LCD contrast is too low, or the frame does not fit the profile (the crop changed).
+    # The LCD contrast is too low, the frame does not fit the profile (the crop changed), too few frames are
+    # readable, or the local decoder failed.
     UNREADABLE = "unreadable"
-    # No calibrated profile: run `debug-devices-sevenseg calibrate`.
+    # No valid profile (missing, or a file that does not validate): run `debug-devices-sevenseg calibrate`.
     NO_PROFILE = "no_profile"
 
 

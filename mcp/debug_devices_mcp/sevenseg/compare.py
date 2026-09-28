@@ -25,7 +25,14 @@ from debug_devices_mcp.multimeter import (
 )
 from debug_devices_mcp.sevenseg.constants import DATASET_DIR_NAME, PROFILE_FILE_NAME
 from debug_devices_mcp.sevenseg.dataset import Dataset, VisionFields, new_entry
-from debug_devices_mcp.sevenseg.decode import OVERLOAD_TEXT, DecodedFrame, decode_jpeg, unreadable
+from debug_devices_mcp.sevenseg.decode import (
+    OVERLOAD_TEXT,
+    DecodedFrame,
+    Gray,
+    decode_with_lcd,
+    read_image,
+    unreadable,
+)
 from debug_devices_mcp.sevenseg.profile import MeterProfile, ProfileError, default_dir, load_profile
 from debug_devices_mcp.sevenseg.reading import LocalReading, LocalStatus
 from debug_devices_mcp.sevenseg.stability import combine_readings
@@ -104,10 +111,27 @@ class Comparison(BaseModel):
     log_line: str
 
 
-def log_line(local: LocalReading, differ: list[Field], elapsed_seconds: float) -> str:
-    shown = f"{local.display_text or '-'} {local.unit} {local.mode}" if local.readable else "unreadable"
-    verdict = "agrees" if not differ else "differs in " + ", ".join(differ)
+NOT_COMPARED = "not compared"
+UNREADABLE_TEXT = "unreadable"
+FAILED_PROBLEM = "the local decoder failed: {error}"
+# One meter frame: the JPEG that the vision model read, and its reading.
+type MeterFrame = tuple[bytes, MultimeterReading]
+# Why a dataset entry has no image. The dataset never keeps a webcam frame.
+NO_CROP_NOTE = "no image saved: no webcam crop is set, so the frame can show more than the meter"
+MISMATCH_NOTE = "no image saved: the frame does not match the profile (the webcam crop changed)"
+
+
+def log_line(local: LocalReading, agreed: bool, differ: list[Field], elapsed_seconds: float) -> str:
+    unreadable_reason = local.problems[0] if local.problems else UNREADABLE_TEXT
+    shown = f"{local.display_text or '-'} {local.unit} {local.mode}" if local.readable else unreadable_reason
+    verdict = "agrees" if agreed else ("differs in " + ", ".join(differ) if differ else NOT_COMPARED)
     return f"local: {shown} ({local.status}), {verdict}, {elapsed_seconds * MILLISECONDS_PER_SECOND:.0f} ms"
+
+
+def failed(error: Exception) -> Comparison:
+    """The comparison when the local code raised: an unreadable local reading that names the error."""
+    local = unreadable(FAILED_PROBLEM.format(error=f"{type(error).__name__}: {error}"))
+    return Comparison(local_reading=local, local_agrees=False, differences=[], log_line=log_line(local, False, [], 0.0))
 
 
 class LocalMeter:
@@ -129,43 +153,57 @@ class LocalMeter:
             self._cached = (stamp, load_profile(self.profile_path))
         return self._cached[1]
 
-    def compare(self, result: MeterResult, jpegs: Sequence[bytes], readings: Sequence[MultimeterReading]) -> Comparison:
+    def compare(self, result: MeterResult, frames: Sequence[MeterFrame], crop_set: bool) -> Comparison:
         """Decode each frame, combine them (every frame must agree, as for the vision result), and compare with the
-        combined vision result and each vision frame."""
+        combined vision result and each vision frame.
+
+        `crop_set`: a webcam crop is set. Without it, the dataset gets no image (the frame can show people).
+        """
         try:
             profile = self.profile()
         except ProfileError as exc:
             local = unreadable(str(exc)).model_copy(update={"status": LocalStatus.NO_PROFILE})
             return Comparison(
-                local_reading=local, local_agrees=False, differences=[], log_line=log_line(local, [], 0.0)
+                local_reading=local, local_agrees=False, differences=[], log_line=log_line(local, False, [], 0.0)
             )
-        decoded: list[DecodedFrame] = [decode_jpeg(jpeg, profile) for jpeg in jpegs]
+        readings = [reading for _, reading in frames]
+        decoded_frames = [decode_with_lcd(read_image(jpeg), profile) for jpeg, _ in frames]
+        decoded = [frame for frame, _ in decoded_frames]
         local = combine_readings([frame.reading for frame in decoded], min_agree=len(decoded))
         # Every vision frame must agree too: frames that disagree ("5.10", then "51.0") are not one vision reading.
         visions = [VisionFields.of_result(result), *(VisionFields.of_reading(reading) for reading in readings)]
         differ = list(dict.fromkeys(name for seen in visions for name in differences(seen, local)))
         agreed = all(agrees(seen, local) for seen in visions)
         if self.save_frames:
-            self._save(result, jpegs, readings, decoded, profile)
+            self._save(result, readings, decoded_frames, profile, crop_set)
         elapsed = sum(frame.elapsed.total_seconds() for frame in decoded)
         return Comparison(
-            local_reading=local, local_agrees=agreed, differences=differ, log_line=log_line(local, differ, elapsed)
+            local_reading=local,
+            local_agrees=agreed,
+            differences=differ,
+            log_line=log_line(local, agreed, differ, elapsed),
         )
 
     def _save(
         self,
         result: MeterResult,
-        jpegs: Sequence[bytes],
         readings: Sequence[MultimeterReading],
-        decoded: Sequence[DecodedFrame],
+        frames: Sequence[tuple[DecodedFrame, Gray | None]],
         profile: MeterProfile,
+        crop_set: bool,
     ) -> None:
-        frames = [*result.frames, *[None] * len(jpegs)][: len(jpegs)]
-        for jpeg, reading, frame, capture in zip(jpegs, readings, decoded, frames, strict=True):
+        """One entry per frame: the warped LCD image only when a crop is set and the frame matches the profile."""
+        captures = [*result.frames, *[None] * len(frames)][: len(frames)]
+        for reading, (frame, lcd), capture in zip(readings, frames, captures, strict=True):
             entry = new_entry(
                 VisionFields.of_reading(reading), frame.reading, frame.regions, capture, profile.calibrated_at
             )
-            self.dataset.add(entry, jpeg)
+            if not crop_set:
+                self.dataset.add(entry, None, NO_CROP_NOTE)
+            elif lcd is None:
+                self.dataset.add(entry, None, MISMATCH_NOTE)
+            else:
+                self.dataset.add(entry, lcd)
 
 
 @cache
@@ -181,8 +219,9 @@ def default_meter() -> LocalMeter:
 async def compare_local(
     result: MeterResult,
     source: MeterSource,
-    jpegs: Sequence[bytes],
-    readings: Sequence[MultimeterReading],
+    frames: Sequence[MeterFrame],
+    *,
+    crop_set: bool,
     meter: LocalMeter | None = None,
 ) -> MeterResult:
     """The result with `local_reading` and `local_agrees` added, and the short line in the monitor log entry.
@@ -193,11 +232,12 @@ async def compare_local(
         return result
     meter = meter or default_meter()
     try:
-        comparison = await asyncio.to_thread(meter.compare, result, jpegs, readings)
-    except Exception:
-        # Compare mode is for evaluation: a local failure must never fail multimeter_read or bench_measure.
+        comparison = await asyncio.to_thread(meter.compare, result, frames, crop_set)
+    except Exception as exc:
+        # Compare mode is for evaluation: a local failure must never fail multimeter_read or bench_measure. The
+        # local fields and the log line say that it failed, so it does not look like off mode.
         logger.exception("the local meter decoder failed")
-        return result
+        comparison = failed(exc)
     call = current_call()
     if call is not None:
         call.set_detail(LOG_DETAIL_KEY, comparison.log_line)

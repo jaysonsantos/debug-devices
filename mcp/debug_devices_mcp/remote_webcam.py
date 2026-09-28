@@ -2,11 +2,15 @@
 
 Only one process can read a V4L2 device. When the webcam is busy and a debug-devices monitor answers on
 127.0.0.1, this process takes its frames from that monitor, already cropped with the crop of that monitor.
+
+The monitor is looked for on this process's own page port first, then on `other_ports` (for the webcam: the default
+page port and the ports of the running pages in the runtime dir), so a server started with another `--ui-port` (a
+test, a second client) still finds the running monitor (QA round 11).
 """
 
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from datetime import timedelta
 from pathlib import Path
 
@@ -50,18 +54,28 @@ class RemoteMonitor:
         timeout: timedelta,
         host: str = defaults.HOST,
         transport: httpx.AsyncBaseTransport | None = None,
+        other_ports: Callable[[], Iterable[int]] | None = None,
     ) -> None:
         self.port = port
-        self.base_url = f"{http.SCHEME}://{host}:{port}"
+        self._host = host
+        self._other_ports = other_ports
+        self.base_url = self._url(port)
         self._http = httpx.AsyncClient(base_url=self.base_url, timeout=timeout.total_seconds(), transport=transport)
+
+    def _url(self, port: int) -> str:
+        return f"{http.SCHEME}://{self._host}:{port}"
 
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def find_monitor(self) -> MonitorIdentity | None:
-        """The debug-devices monitor of another process on this port, with or without a webcam stream."""
+    def _candidates(self) -> list[int]:
+        """The own port first, then the other ports, each one time."""
+        others = list(self._other_ports()) if self._other_ports is not None else []
+        return list(dict.fromkeys([self.port, *others]))
+
+    async def _whoami(self, port: int) -> MonitorIdentity | None:
         try:
-            response = await self._http.get(remote.WHOAMI_PATH)
+            response = await self._http.get(f"{self._url(port)}{remote.WHOAMI_PATH}")
             identity = MonitorIdentity.model_validate_json(response.content) if response.status_code == OK else None
         except httpx.HTTPError, ValidationError:
             return None
@@ -69,12 +83,26 @@ class RemoteMonitor:
             return None
         return identity
 
+    async def _find(self, accept: Callable[[MonitorIdentity], bool]) -> MonitorIdentity | None:
+        """The first candidate port with a debug-devices monitor of another process that `accept`s. The next
+        requests (info, stream, frames) go to that port."""
+        for port in self._candidates():
+            identity = await self._whoami(port)
+            if identity is not None and accept(identity):
+                if self._url(port) != self.base_url:
+                    logger.info("a debug-devices monitor answers on port %s", port)
+                self.base_url = self._url(port)
+                self._http.base_url = self.base_url
+                return identity
+        return None
+
+    async def find_monitor(self) -> MonitorIdentity | None:
+        """The debug-devices monitor of another process, with or without a webcam stream."""
+        return await self._find(lambda _: True)
+
     async def identify(self, device: Path) -> MonitorIdentity | None:
         """The other monitor, when it is a debug-devices monitor of another process that streams `device`."""
-        identity = await self.find_monitor()
-        if identity is None or identity.webcam != str(device) or not identity.webcam_running:
-            return None
-        return identity
+        return await self._find(lambda identity: identity.webcam == str(device) and identity.webcam_running)
 
     async def info(self) -> bytes:
         """The raw `/api/webcam/info` JSON of the other monitor."""

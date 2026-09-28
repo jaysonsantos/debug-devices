@@ -1,9 +1,12 @@
 """The local bench record (bench_state.py). Report: "P2: Keep a compact bench state"."""
 
 import asyncio
+import contextlib
+import fcntl
 import json
 import re
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,7 @@ from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 
+from debug_devices_mcp import bench_state
 from debug_devices_mcp.bench_points import NAME_THE_POINT, PointNameError, point_name
 from debug_devices_mcp.bench_state import (
     AC_RESIDUAL_NOTE,
@@ -21,6 +25,7 @@ from debug_devices_mcp.bench_state import (
     USER_MODE_MAX_AGE,
     BenchState,
     BenchStateStore,
+    DiodeContext,
     Measurement,
     PowerRecord,
     PowerState,
@@ -28,6 +33,7 @@ from debug_devices_mcp.bench_state import (
     StepKind,
     add_photo,
     clear_all_points,
+    diode_voltage,
     gate,
     is_safe,
     lcd_voltage,
@@ -1148,6 +1154,111 @@ async def test_the_refusal_asks_for_a_step_that_fits(bench: Bench) -> None:
 
     assert "is a resistance step, but this measurement is dc_voltage" in refusal
     assert "a step that fits this reading (a voltage or power-check step)" in refusal
+
+
+# endregion
+
+
+# region: QA round 11 (N32: a user-confirmed diode mode, N33: an unsafe reading after a lock timeout)
+
+
+@pytest.mark.parametrize(
+    ("display_text", "user_diode", "model_read_volts", "note"),
+    [
+        ("2.50", True, True, "the model read DC V symbols"),
+        ("2.50", True, False, "above a typical diode drop (1 V)"),
+        ("0.62", True, True, "the model read DC V symbols"),
+        ("0.62", True, False, None),  # a diode drop that the user confirmed
+        ("2.50", False, False, None),  # an LED test from the LCD
+        ("5.10", False, False, "above the diode test voltage of 3 V"),
+    ],
+)
+def test_a_user_confirmed_diode_mode_does_not_hide_a_voltage(
+    display_text: str, user_diode: bool, model_read_volts: bool, note: str | None
+) -> None:
+    context = DiodeContext(user_diode=user_diode, model_read_volts=model_read_volts)
+    voltage = diode_voltage(display_text, "V", MeterMode.DIODE, context)
+    if note is None:
+        assert voltage is None
+    else:
+        assert voltage is not None
+        assert voltage.note is not None
+        assert note in voltage.note
+
+
+async def test_the_gate_notice_explains_the_diode_rule(settings: Settings) -> None:
+    dc_volts = {**READING, "mode": "dc_voltage", "unit": "V", "display_text": "2.50", "value": 2.5}
+    services = make_services(settings, FakePhone(), answers(dc_volts))
+    async with Client(build_server(services)) as client:
+        await confirm_mode(client, "diode")
+        read = await call(client, "multimeter_read")
+        state = await call(client, "bench_state")
+
+    assert (read["status"], read["mode"], read["model_mode"]) == ("confirmed", "diode", "dc_voltage")
+    assert "2.50 V is above the safe residual limit" in read["bench_notice"]
+    assert "the user confirmed diode mode, but the model read DC V symbols" in read["bench_notice"]
+    assert state["gate"]["unpowered_tests_allowed"] is False
+
+
+@pytest.fixture
+def short_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bench_state, "LOCK_TIMEOUT", timedelta(milliseconds=50))
+    monkeypatch.setattr(bench_state, "FLUSH_DELAY", timedelta(milliseconds=10))
+
+
+@contextlib.contextmanager
+def other_writer(path: Path) -> Iterator[None]:
+    """Another process holds the lock file of the record."""
+    with path.with_name(f"{path.name}{bench_state.LOCK_SUFFIX}").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@pytest.mark.usefixtures("short_lock")
+async def test_an_unsafe_reading_is_kept_and_saved_after_a_lock_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "bench-state.json"
+    store = BenchStateStore(path)
+    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
+    with other_writer(path):
+        notice = await note_meter_reading(store, unsafe)
+        kept = store.view()
+        file_only = BenchStateStore(path).load()
+    assert notice is not None
+    assert "NOT SAVED YET" in notice
+    # This server counts it: the gate stays closed here, and the answer says that it is not saved yet.
+    assert [point.point for point in kept.state.residual_points] == [f"unknown point {unsafe.capture_id}"]
+    assert kept.notice is not None
+    assert "not saved in the bench state file yet (it was locked): 1" in kept.notice
+    assert file_only.residual_points == []
+    # The background retry saves it after the lock is free.
+    assert store._flush_task is not None
+    await store._flush_task
+    assert [point.point for point in BenchStateStore(path).load().residual_points] == [
+        f"unknown point {unsafe.capture_id}"
+    ]
+    assert store.unsaved == 0
+    assert store.view().notice is None
+
+
+@pytest.mark.usefixtures("short_lock")
+async def test_the_next_write_saves_an_unsaved_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bench_state, "FLUSH_ATTEMPTS", 0)
+    path = tmp_path / "bench-state.json"
+    store = BenchStateStore(path)
+    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
+    with other_writer(path):
+        await note_meter_reading(store, unsafe)
+    assert store._flush_task is not None
+    await store._flush_task
+    assert store.unsaved == 1
+    add_photo(store, "photo-1")
+    saved = BenchStateStore(path).load()
+    assert saved.photo_ids == ["photo-1"]
+    assert [point.point for point in saved.residual_points] == [f"unknown point {unsafe.capture_id}"]
+    assert store.unsaved == 0
 
 
 # endregion

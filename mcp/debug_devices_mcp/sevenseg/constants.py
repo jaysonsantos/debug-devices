@@ -9,7 +9,9 @@ STATE_SUBDIR = "sevenseg"
 PROFILE_FILE_NAME = "profile.json"
 DATASET_DIR_NAME = "dataset"
 ANNOTATED_SUFFIX = ".annotated.png"
-JPEG_SUFFIX = ".jpg"
+# A dataset image: the warped LCD only. An older version saved the webcam crop as `.jpg`: a prune removes those.
+LCD_SUFFIX = ".lcd.png"
+LEGACY_FRAME_SUFFIX = ".jpg"
 JSON_SUFFIX = ".json"
 TEMPLATE_T21D = "proster-t21d"
 

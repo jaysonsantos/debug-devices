@@ -1,14 +1,17 @@
 """The agreement of the local decoder with the vision model over the compare-mode dataset.
 
-Each field (digits, point, sign, unit, mode) counts only the frames that both read. `redecode` decodes the saved
-frames again with the current profile, so a profile change can be checked without new vision calls.
+Each field (digits, point, sign, unit, mode) counts only the frames that both read. `redecode` decodes the saved LCD
+images again with the layout of the current profile, so a region change can be checked without new vision calls. The
+LCD images are already warped: a change of the LCD corners needs new frames. An entry without an image keeps its
+saved local reading.
 """
 
+import cv2
 from pydantic import BaseModel
 
 from debug_devices_mcp.sevenseg.compare import COMPARED_FIELDS, Field, field_values
 from debug_devices_mcp.sevenseg.dataset import Dataset, DatasetEntry
-from debug_devices_mcp.sevenseg.decode import decode_jpeg
+from debug_devices_mcp.sevenseg.decode import decode_lcd, fit_lcd
 from debug_devices_mcp.sevenseg.profile import MeterProfile
 
 
@@ -75,16 +78,19 @@ def evaluate(pairs: list[DatasetEntry]) -> Evaluation:
     )
 
 
-def load_entries(dataset: Dataset, profile: MeterProfile | None = None) -> list[DatasetEntry]:
-    """The saved entries; with a profile, the local reading of each frame is decoded again."""
+def load_entries(dataset: Dataset, profile: MeterProfile | None = None) -> tuple[list[DatasetEntry], int]:
+    """The saved entries, and how many were decoded again (with a profile: each saved LCD image)."""
     entries = []
-    for saved, frame_path in dataset.entries():
-        if profile is not None and frame_path.is_file():
-            decoded = decode_jpeg(frame_path.read_bytes(), profile)
+    redecoded = 0
+    for saved, image_path in dataset.entries():
+        lcd = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE) if profile is not None and image_path else None
+        if profile is not None and lcd is not None:
+            decoded = decode_lcd(fit_lcd(lcd, profile.layout), profile.layout)
             entries.append(saved.model_copy(update={"local": decoded.reading, "regions": decoded.regions}))
+            redecoded += 1
         else:
             entries.append(saved)
-    return entries
+    return entries, redecoded
 
 
 def report(evaluation: Evaluation, max_disagreements: int) -> str:

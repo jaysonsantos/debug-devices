@@ -586,6 +586,79 @@ Brief: `docs/briefs/qa-round10-followup.md`, dd-android-2. Contract: `docs/phone
   - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` and the scrcpy forward stay.
 - Not changed: during a restart, clients can get a refused connection (`000`) or 503 for a short time (old server stopped, or the start state of the new instance). Clients already retry `/v1/health` after a start.
 
+### Round: QA round 11 follow-up (crash-fix gaps)
+
+Brief: `docs/briefs/qa-round11-followup.md`, dd-android-2. QA: `docs/reports/dd-qa.md`, "Round 11: check", crash-fix gaps (1) and (2).
+
+- **Gap (1), start and stop errors:** `ServerHost` catches an `Exception` from a start or a stop. The app keeps running.
+  - A failed start writes one `Log.w` line (tag `DebugCamera`, with the cause): "API server start failed; trying again, every ms: 2000". It tries again every `Constants.Server.START_RETRY_MILLIS` (2 s) until the start works. A stop of this server, or a newer start, ends the tries. After a success, one more line: "API server started; failed tries before: N". The host does not write a line for each try.
+  - A failed stop writes "API server stop failed" with the cause. The next start still runs.
+  - Each start try makes a new engine, because a failed start leaves its engine unusable.
+- **A bind failure inside Ktor ends the app:** Ktor also sends a failed bind to the coroutine exception handler, and on Android that handler ends the app. A try/catch cannot stop this. So `ApiServer.startEngine` first does a plain bind check on 127.0.0.1:8765 (`ServerSocketChannel` with `SO_REUSEADDR`) and closes it. If the port is busy, the check throws on the host thread, the host catches it, and Ktor never sees the busy port. Limit: another process can take the port between the check and the Ktor bind. This gap is very short.
+- **Gap (2), `reuseAddress`:** the CIO engine now has `reuseAddress = true`, set explicitly. The bind check uses the same option.
+- **"Report 503 until the server runs":** the app cannot answer 503 while it has no bound socket. Until the start works, a client gets a refused connection (or the other process on the port). The app logs the failure and starts the server as soon as the port is free.
+- New unit tests, 180 in total, all pass (`--no-daemon`), in `ApiServerTest`:
+  - A busy port: the app does not end, there is one log line with the `BindException`, the server answers after the port is free, and there is one line after the start. This test runs in `runTest`, so it fails on an uncaught coroutine exception. Without the bind check, it fails with the `BindException` from Ktor.
+  - A stop ends the start tries: nothing answers after the port is free.
+  - A failed stop is logged, the next start still runs, and a late stop of the old server does nothing (with a fake server).
+  - The server tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked):
+  - A shell `nc` held 127.0.0.1:8765, and then I started the app (`am force-stop`, `am start`). There was no crash, and one log line "API server start failed; trying again, every ms: 2000". I stopped `nc`, the server started on the next try ("failed tries before: 4"), and `/v1/status` gave 200.
+  - 3 fast restart cycles (BACK, `am start` 0.3 s later, rotation requests in parallel): no crash, the same process, and 200 after each cycle.
+  - Rotation responses have a non-null `overlay_region`.
+  - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. No `nc` process is left. I removed my forward (`tcp:18775`).
+- Not in this brief, not changed: N42 (the `CancellationException` rethrow in `cameraApi`) and N43 (a change applied before a 503). N42 is in my code. I can do it in a next round.
+
+### Round: N42 (cancel in the error handler)
+
+Order: dd-orchestrator, after Round 11. QA: `docs/reports/dd-qa.md`, N42.
+
+- **Change:** the `Throwable` handler in `cameraApi` (`ApiServer.kt`) rethrows a `CancellationException` only when the call is no longer active (`!currentCoroutineContext().isActive`: a server stop or a client cancel). A `CancellationException` while the call is still active (for example a cancelled CameraX future) goes to `onUnexpected` (`Log.e` with the tag `DebugCamera` in `MainActivity`). The answer is then the contract JSON: 500 `internal_error`.
+- New unit tests in `ApiServerTest`, 181 in total, all pass (`--no-daemon`):
+  - A cancel while the call is active: 500 `internal_error` JSON, and one `onUnexpected` call. This replaces the round 10 test "a cancelled call is not an unexpected error", which used an active call.
+  - A call that the server stop cancels (the request runs longer than the stop timeout, with a real CIO server): no `onUnexpected` call, and no normal answer.
+  - Each test fails with the wrong handler: the first one with the old rethrow of every cancel, the second one without any rethrow. The server tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device smoke test on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked): I installed the APK. Health, rotation (200), a bad body (400 `bad_request`), and an unknown path (404 `not_found`) all give their contract answers. No crash, and no "Unexpected error" line in the log. End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`).
+- **New finding (not changed, from before this round):** a snapshot during a camera rebind returns 500 `capture_failed` "Camera is closed.".
+  - Case: after each app start, a client sent `POST /v1/camera` with `in_sensor_zoom` (log: "Rebind (in_sensor_zoom request)"). I did not send it. The only other forward is the MCP server's `tcp:18765`, so it is probably the MCP server, which sends its settings again after an app start.
+  - The rebind takes 1-2 s. `capture()` does not wait for the control lock, so a snapshot in that time fails. Measured: 500 at 246 ms and 847 ms after the first status 200; 200 at 3.2-3.8 s.
+  - My changes are not the cause: the error comes from CameraX (`ImageCaptureException`) through the contract path `capture_failed`, not from N42.
+  - Proposal: `capture()` waits for the control lock (`ControlGate`), or it returns 503 `camera_not_ready` (clients retry a 503) while a rebind runs. This needs a decision on the contract text.
+
+### Round: N45 (snapshot during a new bind)
+
+Order: dd-orchestrator, after N42. Contract: `docs/phone-api.md`, the new rule after "The app runs zoom and torch changes one at a time" (`SNAPSHOT_READY_WAIT`). dd-orchestrator first named this finding N44; it is N45, because `docs/reports/dd-qa.md` uses N44 for a `pointing.py` item.
+
+- **Change:** `ControlGate.snapshot(waitMillis, block)` runs a snapshot under the same lock as the camera changes (zoom, torch, the start state, and `POST /v1/camera` with its new bind).
+  - A snapshot waits for a running change, at most `Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS` (5 s). After that time, it gets 503 `camera_not_ready` with the message "camera change still running" (`Constants.Messages.CAMERA_CHANGE_RUNNING`), not 500 `capture_failed`.
+  - A change waits for a running snapshot.
+  - The existing rules stay: 503 at once while the start state runs, and a request never cancels another request. The snapshot wait (`withTimeoutOrNull` on `Mutex.lock`) cancels only its own wait, not the change.
+- `CameraController.capture()` takes the camera still inside `gate.snapshot`. `captureLock` stays, so snapshots also stay one at a time among themselves. The pixel turn (C13) runs after the gate lock is released, so a change does not wait for the JPEG turn.
+- All new binds already run under the gate: `setCameraSettings`, `setInSensorZoom` (also from the intent in `onNewIntent`), and the start state.
+- New unit tests, 187 in total, all pass (`--no-daemon`):
+  - `ControlGateTest` +4 (virtual time): a snapshot waits for a running change and then runs; a change longer than the wait gives the snapshot 503 "camera change still running" after exactly the wait, and the change still ends; a change waits for a running snapshot; a snapshot is 503 at once while the start state runs.
+  - `ApiServerTest` +2 (HTTP, the fake camera now uses the real gate for `capture`): a snapshot during a slow change waits and then gets 200, after the change; a change longer than the snapshot wait gives 503 `camera_not_ready` "camera change still running", and the change still gets 200.
+  - All 5 wait tests fail when `snapshot` does not take the lock. The server and gate tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked), with my own forward `tcp:18775`. Each run: `am force-stop`, `am start`, wait for the first status 200, then one snapshot:
+
+| Run | Snapshot after status 200 | New bind | Result |
+|---|---|---|---|
+| 1 | 0 s | none in the snapshot time | 200, 2.2 s |
+| 2 | 0.2 s | none in the snapshot time | 200, 2.0 s |
+| 3 | 0.5 s | yes, from the other client (`in_sensor_zoom`) | 200, 3.3 s |
+| 4 | 0.8 s | yes, my own `POST /v1/camera {"in_sensor_zoom":true}` | 200, 2.3 s |
+| 5 | 0.2 s | yes, my own request | 200, 3.0 s |
+| 6 | 0.5 s | yes, my own request | 200, 2.5 s |
+
+  - The log of run 6 shows the order: "Rebind (in_sensor_zoom request) ... 767 ms" at 08.810, then `takePictureInternal` at 08.819. The snapshot waited for the new bind.
+  - No 500 and no crash. Before this change, the same measure gave 500 `capture_failed` "Camera is closed." in each of 5 runs.
+  - The 503 path (a change longer than 5 s) does not happen on the S22: its new bind takes 1-2 s, and it has no in-sensor session check. The unit tests cover the 503 path.
+  - `in_sensor_zoom: true` is the value that the MCP server sets after an app start. On the S22 the state stays `unsupported`.
+  - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` stays.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

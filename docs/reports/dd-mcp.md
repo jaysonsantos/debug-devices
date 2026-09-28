@@ -1107,3 +1107,58 @@ I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.
 ### Checks
 
 - `uv run pytest`: 972 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## QA round 11 follow-up: N32 and N33
+
+### What I did (`mcp/debug_devices_mcp/bench_state.py`)
+
+- N32: a diode mode that only the user's dial confirmation gives does not hide a DC voltage.
+  - `result_voltage` builds a `DiodeContext` from the result: `user_diode` (the checked mode is diode and `mode_source` is "user") and `model_read_volts` (`model_mode` is DC V or AC V).
+  - `diode_rule` counts a diode reading as a voltage in three cases:
+    - above `--max-diode-voltage`, as before;
+    - with a user diode mode, when the model read DC V symbols;
+    - with a user diode mode, when the value is above a typical diode drop (`TYPICAL_DIODE_DROP_MAX`, 1.0 V).
+  - The reason goes into the gate notice, for example: "the user confirmed diode mode, but the model read DC V symbols: it counts as a voltage (fail safe)". A diode reading from the LCD alone keeps the old rule.
+  - Cost: with a user diode mode, an LED test (1.6 to 3 V) closes the gate. It then needs a new DC reading at that point or a clearance.
+  - I did not edit `multimeter.py`: the fields `model_mode` and `mode_source` already exist in `MeterResult`.
+- N33: an unsafe reading is not lost after a lock timeout.
+  - `note_meter_reading` keeps the result in the store (`keep_unsaved`) and starts one background retry (`flush_later`: 12 tries, 5 s apart).
+  - Every `load` of this server applies the kept readings, so the gate stays closed here.
+  - The next `update` (any bench-state write, also `add_photo`) saves them and forgets them only after the save.
+  - The `multimeter_read` notice says "the bench state is NOT SAVED YET". Every bench-state answer (`view`) has a note while readings are unsaved.
+  - Limit: another MCP server sees the reading only after the save.
+- Docs: the "Bench state" bullet in `mcp/README.md`, and the safety sentence in the `multimeter_read` description (`server.py`, one sentence).
+
+### Tests (`mcp/tests/test_bench_state.py`, "QA round 11")
+
+- N32:
+  - `diode_voltage` in 6 cases: user diode with DC V symbols (2.50 V and 0.62 V count); user diode above 1 V counts; user diode at 0.62 V does not; an LED test from the LCD does not; 5.10 V from the LCD counts.
+  - Through `multimeter_read`: user diode, the model reads DC V "2.50". The result is a confirmed diode reading, `bench_notice` explains the rule, and the gate is closed.
+- N33:
+  - Another holder of the lock file and a 7.00 V reading: the notice says "NOT SAVED YET"; this server counts the point, and its answer says that it is not saved; the file has no point. After the lock is free, the background retry saves it, and the note goes away.
+  - Without the retry, the next `add_photo` saves the photo and the kept reading together.
+
+### Checks
+
+- `uv run pytest`: 1068 passed, 1 skipped. One earlier run had 7 failures in `test_sevenseg_compare.py` while dd-meter changed `sevenseg/`. They passed again after that change: 28 passed alone, and the full run was clean. ruff and prek on my files: pass. Nothing committed.
+
+## N45: snapshot retry during a camera rebind
+
+### What I did
+
+- The contract rule in `docs/phone-api.md`: during a camera rebind, the app answers `/v1/snapshot` with 503 `camera_not_ready` after its own 5 s wait. Clients try again until their start timeout ends.
+- `server.py`: `Services.snapshot_when_ready` (new) is the only caller of `PhoneClient.snapshot`. `Services.phone_snapshot` (the old `server.py:638`) uses it, and so do `phone_snapshot` and `bench_measure`.
+  - On a `PhoneApiError` with the code `camera_not_ready`, it tries again every `poll_interval` until `app_start_timeout` ends. Then it raises that normal error ("phone API error 503 camera_not_ready: camera change still running").
+  - Other errors do not retry.
+  - One import (`Still`). No other `phone.snapshot()` call exists in the MCP server.
+- The fake phone did not need a change: the new test file has its own `BusyPhone` subclass of the test `FakePhone`. I did not change `scripts/fake_phone.py` or `mcp/tests/test_server.py`.
+
+### Tests (`mcp/tests/test_snapshot_retry.py`)
+
+- 503 `camera_not_ready` twice, then 200: `phone_snapshot` gives the still after 3 requests.
+- 503 until the start timeout (50 ms in the test): the tool error has "503 camera_not_ready" and the app's message, and there was more than one request.
+- 500 `capture_failed`: the tool error comes after one request (no retry).
+
+### Checks
+
+- `uv run pytest`: 1077 passed, 1 skipped. ruff and prek on `server.py` and the new test file: pass. Nothing committed.

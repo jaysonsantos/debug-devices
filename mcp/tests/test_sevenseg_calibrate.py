@@ -117,4 +117,53 @@ def test_cli_calibrate_then_read(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "combined: 5.10 V dc_voltage status=read (2/2 frames agree)" in capsys.readouterr().out
 
 
+def user_error(args: list[str], capsys: pytest.CaptureFixture[str]) -> str:
+    """The one-line error of the CLI: exit code 1 and no traceback."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(args)
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1
+    return captured.err
+
+
+def test_cli_user_errors_are_one_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    image = tmp_path / "crop.jpg"
+    image.write_bytes(crop_jpeg(LAYOUT, SCENE))
+    profile = tmp_path / "profile.json"
+    not_an_image = tmp_path / "notes.txt"
+    not_an_image.write_text("no image")
+    dark = tmp_path / "dark.png"
+    cv2.imwrite(str(dark), np.full((200, 300), 60, dtype=np.uint8))
+    missing = str(tmp_path / "missing.jpg")
+
+    assert "No such file or directory" in user_error(
+        ["calibrate", "--image", missing, "--profile", str(profile)], capsys
+    )
+    assert "not a JPEG or PNG" in user_error(
+        ["calibrate", "--image", str(not_an_image), "--profile", str(profile)], capsys
+    )
+    assert "is a folder" in user_error(["calibrate", "--image", str(tmp_path), "--profile", str(profile)], capsys)
+    assert "no bright quadrilateral" in user_error(
+        ["calibrate", "--image", str(dark), "--profile", str(profile)], capsys
+    )
+    assert "unknown template" in user_error(
+        ["calibrate", "--image", str(image), "--template", "nope", "--profile", str(profile)], capsys
+    )
+    bad_name = ["calibrate", "--image", str(image), "--profile", str(profile), "--annotated", str(tmp_path / "a.x")]
+    assert "use a .png or .jpg name" in user_error(bad_name, capsys)
+    assert not profile.exists()
+
+    assert "run `debug-devices-sevenseg calibrate` first" in user_error(
+        ["read", "--images", str(image), "--profile", str(profile)], capsys
+    )
+    profile.write_text("{not json")
+    assert "is not valid" in user_error(["read", "--images", str(image), "--profile", str(profile)], capsys)
+    assert "invalid option: read.min_agree" in user_error(
+        ["read", "--images", str(image), "--min-agree", "0", "--profile", str(profile)], capsys
+    )
+    assert "is not valid" in user_error(["evaluate", "--redecode", "--profile", str(profile)], capsys)
+
+
 # endregion

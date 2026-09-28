@@ -44,6 +44,23 @@ def token_path(directory: Path, port: int) -> Path:
     return directory / f"{ingest.TOKEN_FILE_PREFIX}{port}{ingest.TOKEN_FILE_SUFFIX}"
 
 
+def page_ports(directory: Path) -> list[int]:
+    """The ports of the running pages: each primary writes its token file in the runtime dir. Only the file name is
+    read (the port), never the token."""
+    ports = []
+    for path in directory.glob(f"{ingest.TOKEN_FILE_PREFIX}*{ingest.TOKEN_FILE_SUFFIX}"):
+        port = path.name.removeprefix(ingest.TOKEN_FILE_PREFIX).removesuffix(ingest.TOKEN_FILE_SUFFIX)
+        if port.isdigit():
+            ports.append(int(port))
+    return sorted(ports)
+
+
+def other_monitor_ports(directory: Path | None = None) -> list[int]:
+    """Where another debug-devices monitor can answer, for the webcam sharing: the default page port, then the
+    ports of the running pages (QA round 11: a server with another --ui-port shares the running monitor's webcam)."""
+    return [defaults.PORT, *page_ports(directory if directory is not None else token_dir())]
+
+
 def write_token(directory: Path, port: int) -> str:
     """A new random token for the page on `port`, readable only by this user."""
     directory.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,7 @@ hand to move a region.
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from debug_devices_mcp.sevenseg.constants import PROFILE_FILE_NAME, STATE_SUBDIR, warp
 from debug_devices_mcp.ui.settings import state_dir
@@ -91,7 +91,7 @@ class LcdLayout(BaseModel):
     # Width / height of the LCD: the warp keeps this aspect ratio.
     aspect: float = Field(ge=warp.MIN_ASPECT, le=warp.MAX_ASPECT)
     # The digit boxes from left to right (LCD coordinates). A box is the upright box at the bottom of the digit.
-    digits: list[Rect]
+    digits: list[Rect] = Field(min_length=1)
     # The slant of the digits: the top of a digit is this part of the box width to the right of its bottom.
     slant: float = 0.0
     # The 7 segments in digit-box coordinates (shared by every digit).
@@ -101,6 +101,19 @@ class LcdLayout(BaseModel):
     # The minus sign left of the digits.
     sign: Rect
     symbols: dict[Symbol, Rect]
+
+    @model_validator(mode="after")
+    def check_digit_regions(self) -> LcdLayout:
+        """Every digit needs all 7 segments, and there is one decimal point after each digit but the last."""
+        missing = [str(segment) for segment in Segment if segment not in self.segments]
+        if missing:
+            raise ValueError(f"missing segments: {', '.join(missing)}. A digit needs all 7 (a to g)")
+        if len(self.points) != len(self.digits) - 1:
+            raise ValueError(
+                f"{len(self.points)} decimal points for {len(self.digits)} digits: the layout needs "
+                f"{len(self.digits) - 1} (one after each digit but the last)"
+            )
+        return self
 
 
 class MeterProfile(BaseModel):
@@ -137,10 +150,19 @@ def save_profile(profile: MeterProfile, path: Path) -> None:
     temporary.replace(path)
 
 
+def validation_summary(error: ValidationError) -> str:
+    """One line per problem: where in the file, and what is wrong."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc']) or 'the file'}: {item['msg']}" for item in error.errors()
+    )
+
+
 def load_profile(path: Path) -> MeterProfile:
     try:
         return MeterProfile.model_validate_json(path.read_bytes())
     except FileNotFoundError as exc:
         raise ProfileError(f"no meter profile at {path}: run `debug-devices-sevenseg calibrate` first") from exc
-    except ValueError as exc:
-        raise ProfileError(f"the meter profile {path} is not valid: {exc}") from exc
+    except OSError as exc:
+        raise ProfileError(f"cannot read the meter profile {path}: {exc.strerror}") from exc
+    except ValidationError as exc:
+        raise ProfileError(f"the meter profile {path} is not valid: {validation_summary(exc)}") from exc

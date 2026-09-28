@@ -72,6 +72,7 @@ Rules:
 - `/v1/health` returns 200 while the camera is not bound yet. The other camera endpoints return 503 `camera_not_ready` until the camera is bound AND the start state (torch off, zoom at the start zoom) is set.
 - The HTTP server needs a few seconds after `am start`. The client retries `/v1/health`, then `/v1/status` while it gets 503, until its start timeout ends.
 - The app runs zoom and torch changes one at a time. A request never cancels another request.
+- `/v1/snapshot` also runs one at a time with the camera changes (zoom, torch, the start state, and a `POST /v1/camera` with its new bind). A snapshot waits for a running change, at most 5 s (`SNAPSHOT_READY_WAIT`), and a change waits for a running snapshot. A new bind never makes a snapshot fail: when the change is not done after `SNAPSHOT_READY_WAIT`, the snapshot returns 503 `camera_not_ready` with the message "camera change still running", not 500 `capture_failed`. Clients retry a snapshot that gets 503 `camera_not_ready` until their start timeout ends.
 - `ratio` must be a JSON number. A string (also `"2"`) returns 400 `bad_request`.
 - After an app start, the torch is off and the zoom is 1.0 when 1.0 is inside `[min_zoom_ratio, max_zoom_ratio]`, else `min_zoom_ratio`. (A phone with an ultrawide lens can have a minimum below 1.0; 1.0 is the main camera.)
 - `rotation_degrees` is the rotation of the next snapshot (0, 90, 180, 270). With `rotation_locked: false`, the app follows the physical orientation of the phone. When the phone lies flat (no angle), the app keeps the last value.

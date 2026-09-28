@@ -1176,3 +1176,139 @@ New findings (server, page, Android):
 3. N33: do not drop an unsafe reading when the lock wait times out (retry, or keep it in memory and save later); N32: count a DC V reading from the model even when the user mode is diode.
 4. The N11 text in `docs/phone-api.md:101`, and the crash-fix gaps (catch start and stop errors; `reuseAddress = true`).
 5. When the user allows it: the fast Back and restart test, `--after-start`, and `--expect starting-race` on the S22.
+
+## Round 12: check
+
+Date: 2026-09-28. Scope: `docs/briefs/qa-round11-followup.md` (all sections); dd-android-2 round 11 (`ServerHost` start and stop errors, bind check, `reuseAddress`); N42; N45 (a snapshot during a camera change: the new rule in `docs/phone-api.md` after "The app runs zoom and torch changes one at a time", `SNAPSHOT_READY_WAIT`, `Services.snapshot_when_ready`); dd-meter N40, N41, and the CLI errors. N45 was first called N44; the N44 of round 11 (`pointing.py`) is a different item. The working tree at the last commit ("feat: local 7-segment meter decoder (compare only) and QA fixes") with the uncommitted changes. All dd agents had stopped editing (dd-ally-tutor changes no repository files). I did not change product code or my scripts, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1077 passed, 1 skipped |
+| `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file (315 files) and `git status --porcelain` before and after | All 15 hooks pass; hashes and git status unchanged. `bench-state.json.lock` is no longer in `git status` (N31). |
+| `(cd android && nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest)` | BUILD SUCCESSFUL (`UP-TO-DATE`). Forced `testDebugUnitTest --rerun`: BUILD SUCCESSFUL, 187 tests in 16 suites, 0 failures. |
+
+### 2. QA scripts
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 13 modes |
+| `python3 scripts/fake_phone.py --port 18892`, then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18892 --strict --after-start` | 30/30 |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv` |
+
+The fake phone does not model N45 (a camera change never takes time in the fake), and `qa_contract.py` has no N45 check. I checked N45 by hand on the phone (section 4).
+
+### 3. Re-check
+
+Three read-only agents re-checked every item against the code and the contract text, and ran the cases in memory (temporary state dirs, synthetic images only). I checked the main findings in the code myself ("checked"). All changes are uncommitted. Paths are in `mcp/debug_devices_mcp/` unless they start with another directory; `A/` and `AT/` are the Android source and test directories. Round 11 used N44 for `pointing.py`; the snapshot item of this round is N45, and the new findings start at N46.
+
+#### Privacy, decoder, and bench (N37, N40, N41, CLI errors, N31, N32, N33)
+
+`uv run pytest -q mcp/tests/test_sevenseg_compare.py mcp/tests/test_sevenseg_calibrate.py mcp/tests/test_sevenseg_decode.py mcp/tests/test_bench_state.py`: 206 passed. The reviewer used a temporary state dir and synthetic images only.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N37 (privacy) | fixed | `sevenseg/compare.py:119-121`, `:187-206`, `sevenseg/dataset.py:124-139`, `sevenseg/decode.py:387-403`, `server.py:885-889`; tests `test_sevenseg_compare.py:196-468` | A 1280x720 noise frame with a 420x300 profile and a crop: only 2 `.json` files, no image, a mismatch note. A matching crop: `.json` and `.lcd.png` of the warped LCD (440x200). No crop: `.json` only, with a note. The server prunes only `<state>/sevenseg/dataset` (`sevenseg/compare.py:209-216`). See N53 for the CLI. |
+| N40 | fixed | `sevenseg/profile.py:105-116`, `:160-168`, `sevenseg/compare.py:162-168`; tests `test_sevenseg_compare.py:292-316`, `test_sevenseg_calibrate.py:131` | A missing segment and a wrong number of points give a clear error; in compare mode `no_profile` and the log line "not compared". |
+| N41 | fixed | `sevenseg/stability.py:19-28`, `:48-58`; tests `test_sevenseg_compare.py:83-99` | DC then AC 5.10 V: `unstable`. One unreadable frame of 2: `unreadable`. |
+| CLI errors | fixed | `sevenseg/cli.py:37-50`, `:185-190`; test `test_sevenseg_calibrate.py:131` | 19 bad inputs: one line on stderr, exit 1, no traceback, no profile file. |
+| N31 | fixed | `.gitignore:24`; `git check-ignore -v bench-state.json.lock` gives `.gitignore:24` | – |
+| N32 | partly | `bench_state.py:74`, `:283-314`, `:350-361`, `server.py:1263-1266`; tests `test_bench_state.py:1165-1189` | The brief case is fixed: user diode mode, model DC V "2.50 V" in 2 frames: an unsafe point and the note "... it counts as a voltage (fail safe)". Gaps (safety, low): (a) only the first frame's model mode counts (`bench_state.py:356`, `meter_frames.py:134`, `:253`): user diode, frame 1 model diode "0.62 V", frame 2 model DC V "0.62 V": no point, no notice. (b) With an unreadable unit, `bench_state.py:330` checks the user mode first: user diode, model DC V, no unit, "5.10" in 2 frames: `uncertain`, no point, no notice (without the user mode, a point is added). (c) Cosmetic: for a model AC V reading, the note says "DC V symbols" (`:308`). |
+| N33 | fixed, one limit | `bench_state.py:437-441`, `:450-508`, `:537-541`, `:570-576`, `:844-862`; tests `test_bench_state.py:1221`, `:1247` | Another process held the lock for 7 s: the result said "NOT SAVED YET", `bench_state` showed the point as unsaved, and a background retry saved it at about 10.5 s. Limit: the kept reading is in memory only; nothing saves it at process exit, so it is lost if the server stops or reloads before a retry succeeds. |
+
+New findings (decoder and bench):
+
+- **N53 (low-medium, data loss, checked): `debug-devices-sevenseg evaluate --dataset <folder>` deletes files in any folder.** `Dataset.prune` (`sevenseg/dataset.py:146-160`) deletes every `*.jpg`, every `*.json` after the newest 500 by name, and every `*.lcd.png` without an entry, and `evaluate` runs it first (`sevenseg/cli.py:147-152`). Case: a folder with `holiday1.jpg` to `holiday3.jpg`: "removed 3 webcam frames of an older version", the files are gone, exit 0. A folder with 503 `.json` files: 3 are deleted. Fix: delete only files with a UUID v7 entry name, or prune only the default state dataset folder.
+- N54 (low): a dataset write error (for example a full disk) raises inside `LocalMeter.compare` (`sevenseg/compare.py:177-178`), and `compare_local` then replaces a valid local reading with "the local decoder failed" (`:234-240`). The vision result does not change.
+- Very low: `crop_set` is read after the capture (`server.py:889`); the saved image is still only the LCD area.
+- Info: the git-ignored `bench-state.json` in the repository root got a new `updated_at` during the check; 4 `debug-devices-mcp` processes run. The review used only temporary stores.
+
+#### Android (ServerHost, bind check, reuseAddress, N42, N45 app side)
+
+The status comes from the code and its tests (the Gradle run in 1. passes) and the phone run in section 4.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| ServerHost start and stop errors | fixed | `A/ApiServer.kt:74-85` (`tryStart` catches an `Exception`, logs, tries again every 2 s, `A/Constants.kt:15`), `:87-94` (`stopEngine` catches and logs), `:68-72` (a stop ends the tries); tests `AT/ApiServerTest.kt:1109`, `:1139`, `:1174` | "503 until the server runs" cannot work: no socket is bound, so a client gets a refused connection. The contract (`docs/phone-api.md:73`) does not say this. The level is `Log.w`. See N47. |
+| Bind check | fixed | `A/ApiServer.kt:141-153` (a socket with `SO_REUSEADDR` binds and closes before Ktor starts; a new engine for each try) | Another process can take the port between the check and the Ktor bind (known, in the dd-android report). |
+| `reuseAddress = true` | fixed | `A/ApiServer.kt:116-128` (the CIO configuration; the flag reaches the server socket in Ktor 3.6.0) | – |
+| N42 | fixed | `A/ApiServer.kt:173-179` (rethrow only when the call is no longer active; else `Log.e` and 500 `internal_error` JSON); tests `AT/ApiServerTest.kt:972`, `:984` | – |
+| N45 app side | fixed, with N46 | `A/ControlGate.kt:40-50` (the snapshot uses the lock of `control` and `start`; waits at most `SNAPSHOT_READY_WAIT_MILLIS` = 5000, `A/Constants.kt:152`; then 503 "camera change still running", `:189`), `A/CameraController.kt:767`; the rebind, in-sensor zoom, start state, zoom, and torch run under the gate (`:454-461`, `:495`, `:510`, `:711`, `:723`); the JPEG turn is outside the gate (`:797`); tests `AT/ControlGateTest.kt:85-136`, `AT/ApiServerTest.kt:623`, `:648`. S22: 8 of 8 snapshots during a change gave 200 (section 4). | No test of the real `CameraController.capture`. (a) A total rebind failure (both tries throw, `:238-258`) leaves the old camera object: later snapshots give 500 `capture_failed` and `/v1/status` stays 200, against "a new bind never makes a snapshot fail" (older than N45, rare). (b) A pause during a rebind: `restoreState` waits for OPEN with no limit (`:409`) and keeps the lock; snapshots get 503 "camera change still running" after 5 s, not the immediate 503 "not active"; other changes wait with no limit (the MCP HTTP timeout of 10 s ends first). (c) A pause during `takePicture` gives 500 `capture_failed`, not 503 (`capture` does not check the foreground again, unlike the N22 paths). |
+
+New findings (Android):
+
+- **N46 (checked; low probability, high effect): the snapshot wait can leak the camera lock.** `A/ControlGate.kt:42` runs `lock.lock()` inside `withTimeoutOrNull`. The kotlinx documentation says that the timeout can fire right before the block returns; then the lock is taken, `withTimeoutOrNull` returns `null`, the 503 is thrown, and nothing unlocks. After that, every camera change hangs with no limit and every snapshot gets 503, until the activity is created again. The window is very small. Fix: set a flag after `lock.lock()` inside the block and unlock when the flag is set but the result is `null` (or use an owner token with `holdsLock`). No test covers it.
+- N47 (low): `ServerHost` does not catch an `Error` (for example `LinkageError` or `ExceptionInInitializerError` from Ktor): the executor wraps each task in a Future, so the error disappears with no log and no retry, and the server does not run (`A/ApiServer.kt:61-94`). Catch `Throwable`.
+- N48 (low, text): `docs/phone-api.md:75` lists "the start state" among the changes that a snapshot waits for, but the code gives 503 at once while the start state runs (`A/ControlGate.kt:41`; `docs/phone-api.md:72` agrees with the code). The gate also covers focus, overlay, visibility, flips, and rotation (`A/CameraController.kt:531`, `:546`, `:636`, `:732`, `:743`), which the text does not list. "At most 5 s" is only the gate wait: a second snapshot first waits for the capture lock (`:763`) with no limit.
+- N49 (low): with in-sensor zoom `on`, a rebind (bind, restore, a 4 s session check, `A/Constants.kt:86`, and maybe a fallback bind) takes more than 5 s, so a snapshot during it always gets 503 and the MCP retries. The S22 is `unsupported`, so the phone run did not reach this path.
+- Cosmetic: the code and tests still call this item N44 (`A/ControlGate.kt:36`, `A/CameraController.kt:766`, `A/Constants.kt:151`, `AT/ControlGateTest.kt`, `AT/ApiServerTest.kt`, `server.py:632`, `mcp/tests/test_snapshot_retry.py:1`); the KDoc at `A/CameraController.kt:66` is out of date. Older than N45: a failed restore leaves the in-sensor zoom state and the label observers stale (`:210-212`, `:840`).
+
+#### MCP server and page (N45 client side, the webcam port lookup)
+
+`uv run pytest -q mcp/tests/test_snapshot_retry.py mcp/tests/test_remote_ports.py`: 9 passed. The reviewer ran the cases in memory with a private `XDG_RUNTIME_DIR` and `XDG_STATE_HOME`.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N45 retry (`snapshot_when_ready`) | fixed | `server.py:630-641`; the only HTTP snapshot call is `server.py:637`; tests `test_snapshot_retry.py:43-61` | In memory: 503 two times, then 200: the still after 3 requests. |
+| N45: which tools | fixed | `phone_snapshot` (`server.py:1072`, `:803`, `:652`), `bench_measure` (`:1325`), `multimeter_read` with the phone (`:783`, `:867`). The board tools take no photo. | Only `phone_snapshot` has a test. In memory, `bench_measure` and `multimeter_read` (phone, 2 frames) also pass after two 503. |
+| N45: which 503 | partly (as the contract says) | `server.py:639` retries every 503 `camera_not_ready` (the contract, `docs/phone-api.md:75`). The status read before the snapshot (`server.py:649`) fails at once for an app in the background. | When the app leaves the foreground after the status read, the retry runs up to `app_start_timeout` (20 s). The error then has only the last message ("Camera is not active"); it does not say that the server retried, and gives no hint (bring the app to the front, `phone_connect`). |
+| N45: timeout, poll, cancel | partly | `server.py:639-641`; a cancel stops the requests | The deadline is checked only after a response: the last request can start after the deadline and take the app's 5 s wait (worst case about 20 + 0.5 + 5 s). `wait_until_ready` uses a hard `asyncio.timeout` (`server.py:898`). |
+| N45: turn and capture id after a retry | fixed | `server.py:653-658` (the headers of the successful still), `:822`, `:869`, `ui/monitor.py:437-446` | In memory: header 90 or 270 after two 503 gives turn 90 or 270. No test. |
+| Webcam port lookup | fixed (webcam) | `remote_webcam.py:71-74`, `:82` (identity: app name and not this process), `:86-105`, `ui/forward.py:36-73` (`$XDG_RUNTIME_DIR/debug-devices`, the existing `ingest-<port>.token` names, mode 0600), `ui/monitor.py:815` (removed at stop); tests `test_remote_ports.py:63-121` | A stale token file after a crash: one request to a closed port, then skipped. A stale port that accepts but never answers makes each lookup wait up to 20 s (`webcam_timeout`). No test for stale files. |
+
+New findings (MCP and page):
+
+- **N50 (medium, checked): the primary-page lookup now also uses the other page ports.** `ui/setup.py:74-88` gives the webcam `RemoteMonitor` (with `other_ports`) to the monitor as `shared`, and `Monitor._find_primary` and `_other_monitor_runs` use it (`ui/monitor.py:762-776`); `ensure_page` acts on the result (`:740-746`).
+  - Case 1 (in memory): a server with `--ui-port 40111` runs while the user's monitor is on 18766. It finds 18766 as the primary, so it serves no page, but its forwarder asks only 40111 and finds no primary: its tool calls show on no page. `monitor_open` and `bench_start` return the user's page URL and can open it (`ui/tools.py:92-93`, `:115-116`).
+  - Case 2 (in memory; it touches the user's cockpit): the user's server on 18766 starts its page lazily while another debug-devices page runs on another port (a test server, `scripts/record_demo.py`, or a primary on a free port). It takes that page as the primary and serves no page on 18766, and its calls go nowhere.
+  - This contradicts `mcp/README.md:266`. Fix: the monitor gets its own `RemoteMonitor` for its own port only (as `ui/setup.py:122`, `:126`), and a test.
+- **N51 (privacy, low): the user's server can now take frames from any debug-devices monitor on a page port, with that monitor's crop** (`remote_webcam.py:157-159`, `ui/monitor.py:116`). Case: a test server with a temporary state dir and no crop owns `/dev/video0`; the user's `multimeter_read` then sends the whole webcam frame to OpenRouter. Before this change, the user's server failed with "busy".
+- N52 (low): with the retry, the `bench_measure` photo can come about 25 s after the meter frames. The result gives only `gap_seconds` (`server.py:1333`), and `BENCH_MEASURE_NOTE` (`:1296`) still says that the value and the photo "belong together"; no limit or warning.
+- Cosmetic: `RemoteMonitor.base_url` keeps the last port that it found after that monitor is gone (`remote_webcam.py:94-95`); the dd-ui report and `mcp/README.md:259` say that only the webcam sharing uses the other ports (see N50).
+
+### 4. Real phone
+
+- Selected serial (`~/.local/state/debug-devices/ui-settings.json`, `adb_serial`): the Wi-Fi serial of the Samsung S22 (`SM_S901B`). `adb devices -l` listed only this device, in state `device`. I used the adb binary of the running adb server (`android-tools-37.0.0`).
+- Separate forward `tcp:18794 tcp:8765` on the selected serial only. Health 200, status 200 (foreground, unlocked). The `app_start_id` is new since round 11 (the new APK).
+- `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18794 --strict`: 29/29.
+- N45 by hand: 8 times, a `POST /v1/camera` in the background and `GET /v1/snapshot` 20 ms later (bodies: `in_sensor_zoom` false/true two times each, `af_mode` macro/continuous, and both fields together two times):
+
+  | # | POST body | POST | Snapshot |
+  |---|---|---|---|
+  | 1 | `{"in_sensor_zoom": false}` | 200, 0.05 s | 200, 1.91 s |
+  | 2 | `{"in_sensor_zoom": true}` | 200 (`unsupported`), 1.15 s | 200, 3.23 s |
+  | 3 | `{"in_sensor_zoom": false}` | 200, 0.94 s | 200, 3.78 s |
+  | 4 | `{"in_sensor_zoom": true}` | 200 (`unsupported`), 2.20 s | 200, 1.91 s |
+  | 5 | `{"af_mode": "macro"}` | 200 (stays `continuous`: no macro mode), 0.07 s | 200, 1.84 s |
+  | 6 | `{"af_mode": "continuous"}` | 200, 1.32 s | 200, 1.95 s |
+  | 7 | `{"in_sensor_zoom": false, "af_mode": "macro"}` | 200, 1.03 s | 200, 3.08 s |
+  | 8 | `{"in_sensor_zoom": true, "af_mode": "continuous"}` | 200 (`unsupported`), 2.23 s | 200, 2.00 s |
+
+  Every snapshot returned 200; none returned 500. The times show that the snapshot and the change run one at a time (a snapshot during a rebind took 3.1-3.8 s; a change after a running snapshot took 2.2 s). No 503 occurred, because every change ended within the 5 s `SNAPSHOT_READY_WAIT`. The 503 path was not reached on the phone.
+- The last request put back the saved settings (`in_sensor_zoom` true, which gives `unsupported`; `af_mode` continuous). 3 s later, every field (except `focus`) equalled the first status.
+- I removed the forward. Only the MCP server forward (18765) remains. No command went to another device.
+- Not tested on the phone: a `ServerHost` start error (it needs another app on port 8765), the fast Back and restart, `--after-start`, and `--expect starting-race`.
+
+### Summary
+
+- Tests: all pass (pytest 1077, boardview 13, Android 187, fake self-check 13 modes, contract 30/30 on the fake and 29/29 on the S22, MCP stdio 15/15). prek passes and leaves the tree unchanged (315 file hashes and the git status equal before and after).
+- Fixed: N37 (privacy), N40, N41, the CLI errors, N31, N33 (with a limit), the `ServerHost` errors, the bind check, `reuseAddress`, N42, N45 on the app and the client side (S22: 8 of 8 snapshots during a camera change gave 200), and the webcam port lookup.
+- Not fully fixed: N32 (two gaps: a later frame's DC V and an unreadable unit), the N45 retry texts and soft deadline, and the stale-port-file wait.
+- New:
+  - **N50 (medium, checked): the primary-page lookup also uses other page ports**, so the user's server can serve no page, and a test server's calls go nowhere (`ui/setup.py:74-88`, `ui/monitor.py:762-776`).
+  - **N46 (checked, low probability, high effect): the snapshot wait can leak the camera lock** (`A/ControlGate.kt:42`).
+  - **N53 (checked): `debug-devices-sevenseg evaluate --dataset` deletes `*.jpg` files in any folder.**
+  - N51 (privacy, low): frames of another monitor, with its crop (or none), can go to OpenRouter.
+  - Low: N47, N48, N49, N52, N54.
+
+### What to do next
+
+1. N50: the monitor uses a `RemoteMonitor` for its own port only; add a test.
+2. N46: release the lock when the timeout fires after `lock.lock()`; add a test.
+3. N53: prune only UUID v7 entry files, or only in the default state dataset folder.
+4. N32 gaps (a) and (b), N51 (take remote frames only from the monitor on the default port, or require a crop), N33 limit (save at exit).
+5. Contract text: N48 (the snapshot and the start state; the list of gated changes), and whether a server that cannot bind is "refused" (not 503).
+6. On a phone with in-sensor zoom: the N45 503 path (N49).

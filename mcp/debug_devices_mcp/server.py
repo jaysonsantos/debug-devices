@@ -120,6 +120,7 @@ from debug_devices_mcp.phone_api import (
     RotationLockRequest,
     ScreenFocusRequest,
     SnapshotFocusRequest,
+    Still,
     ZoomRatioRequest,
     ZoomStep,
     ZoomStepRequest,
@@ -134,6 +135,7 @@ from debug_devices_mcp.sevenseg.compare import compare_local
 from debug_devices_mcp.sevenseg.constants import LocalDecoderMode
 from debug_devices_mcp.snapshot_crop import CropInfo, CropOutsideError, SnapshotCrop, crop_snapshot, precheck_crop
 from debug_devices_mcp.ui.constants import tools as tool_names
+from debug_devices_mcp.ui.forward import other_monitor_ports
 from debug_devices_mcp.ui.monitor import Monitor
 from debug_devices_mcp.ui.settings import SettingsStore, state_dir
 from debug_devices_mcp.ui.tools import register_monitor_tools
@@ -625,6 +627,19 @@ class Services:
         status = await self.af_mode_sync.ensure(status)
         return await self.markings_sync.ensure(status)
 
+    async def snapshot_when_ready(self) -> Still:
+        """One still. During a camera rebind the app answers 503 camera_not_ready (after its own wait): try again every
+        poll interval until the app start timeout ends, then raise that error. Other errors do not retry (N44)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.app_start_timeout.total_seconds()
+        while True:
+            try:
+                return await self.phone.snapshot()
+            except PhoneApiError as exc:
+                if exc.error.error != ApiErrorCode.CAMERA_NOT_READY or loop.time() >= deadline:
+                    raise
+            await asyncio.sleep(self.settings.poll_interval.total_seconds())
+
     async def phone_snapshot(self) -> tuple[bytes, ImageTransform]:
         """One phone still, shown like the monitor preview: turned by the remaining turn, then the user's flips.
 
@@ -634,7 +649,7 @@ class Services:
         status = await self.phone.status()
         self.seen_status(status)
         await self.check_app_start(status)
-        still = await self.phone.snapshot()
+        still = await self.snapshot_when_ready()
         # The still's own headers (C12 of QA round 4): the phone can turn, or the app restart, after the status.
         if still.app_start_id is not None and still.app_start_id != status.app_start_id:
             status = status.model_copy(update={"app_start_id": still.app_start_id})
@@ -678,7 +693,8 @@ class Services:
                         crop=settings.webcam_crop,
                     ),
                 ),
-                RemoteMonitor(settings.ui_port, settings.webcam_timeout),
+                # Also the running monitor on the default port or another page port (QA round 11).
+                RemoteMonitor(settings.ui_port, settings.webcam_timeout, other_ports=other_monitor_ports),
             ),
             vision=vision,
             orientation=OrientationState(SettingsStore.in_dir(state_dir())),
@@ -867,8 +883,10 @@ async def read_meter(
     # An unsafe voltage closes the bench safety gate at once, confirmed or not (fail safe).
     result.bench_notice = await note_meter_reading(services.bench, result)
     if settings.meter_local_decoder is LocalDecoderMode.COMPARE:
-        # The local 7-segment decoder reads the same frames: it adds local_reading and local_agrees only.
-        result = await compare_local(result, source, [jpeg for jpeg, _ in captured], readings)
+        # The local 7-segment decoder reads the same frames: it adds local_reading and local_agrees only. Without a
+        # webcam crop, its dataset keeps no image (the frame can show people).
+        frames = [(jpeg, reading) for (jpeg, _), reading in zip(captured, readings, strict=True)]
+        result = await compare_local(result, source, frames, crop_set=services.webcam.crop is not None)
     for _, capture in captured:
         services.captures.meter_results[capture.capture_id] = result
     return result, captured
@@ -1243,7 +1261,8 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         "14.15" for 1.415 V) can pass as "confirmed". For a value that decides a repair step, give `expected_value`,
         or ask the user to confirm the LCD.
         Safety: a voltage above 0.5 V on the LCD (any frame, any status; a diode reading only above
-        --max-diode-voltage) closes the bench safety gate at once, at an unknown point of this capture;
+        --max-diode-voltage, or, when only the user's dial confirmation says diode, when the model read DC V or the
+        value is above a typical diode drop) closes the bench safety gate at once, at an unknown point of this capture;
         `bench_notice` says so. Record the capture with its point name (bench_record_measurement) so that a later
         safe reading at that point can clear it.
         `source` "webcam" (default) uses the PC webcam with its crop. "phone" uses a phone snapshot (call

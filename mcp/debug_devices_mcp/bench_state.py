@@ -40,6 +40,7 @@ from debug_devices_mcp.multimeter import (
     MeterMode,
     MeterResult,
     MeterStatus,
+    ModeSource,
     UnitFamily,
     is_overload,
     signature,
@@ -55,6 +56,9 @@ MAX_PHOTO_IDS = 1000
 LOCK_SUFFIX = ".lock"
 LOCK_TIMEOUT = timedelta(seconds=5)
 LOCK_RETRY = timedelta(milliseconds=10)
+# The background retry of an unsafe reading that could not be saved (then the next write saves it).
+FLUSH_DELAY = timedelta(seconds=5)
+FLUSH_ATTEMPTS = 12
 # A mode that the user confirmed on the dial is context for multimeter_read for this long.
 USER_MODE_MAX_AGE = timedelta(minutes=10)
 USER_SOURCE = "user"
@@ -65,6 +69,9 @@ USER_REPORT = "user_report"
 SKIPPED = "skipped"
 MAX_CANDIDATES = 20
 VOLTAGE_MODES = frozenset({MeterMode.DC_VOLTAGE, MeterMode.AC_VOLTAGE})
+# A silicon diode or a MOSFET body diode drops less than this. With a user-confirmed diode mode, a higher value counts
+# as a voltage for the gate (fail safe: an LED test then needs a new DC reading or a clear).
+TYPICAL_DIODE_DROP_MAX = 1.0
 # With an unreadable unit symbol, these modes count as volts for the safety gate (fail safe).
 UNKNOWN_UNIT_VOLT_MODES = frozenset({MeterMode.DC_VOLTAGE, MeterMode.AC_VOLTAGE, MeterMode.OTHER})
 # Only DC voltage shows the charge that a capacitor holds: an AC reading is not a residual-voltage check.
@@ -269,18 +276,53 @@ class LcdVoltage(BaseModel):
     volts: float
     # The LCD text and the unit, for the notes ("5.10 V").
     text: str
+    # Why a diode reading counts as a voltage (for the notice), or None.
+    note: str | None = None
+
+
+class DiodeContext(BaseModel):
+    """How much to trust a diode mode: from the LCD, or from the user's dial confirmation (which can hide DC V)."""
+
+    max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE
+    # The mode is diode because the user confirmed it (multimeter.ModeSource.USER), not from the LCD.
+    user_diode: bool = False
+    # The model itself read a voltage mode (DC V or AC V symbols) while the user mode says diode.
+    model_read_volts: bool = False
 
 
 def lcd_voltage(
     display_text: str, unit: str, mode: MeterMode, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE
 ) -> LcdVoltage | None:
+    """The number on the LCD in volts, for the safety gate (without the user's dial context: see `diode_voltage`)."""
+    return diode_voltage(display_text, unit, mode, DiodeContext(max_diode_volts=max_diode_volts))
+
+
+def diode_rule(volts: float, context: DiodeContext) -> str | None:
+    """Why a diode reading counts as a voltage for the gate (fail safe), or None when it is a plain diode test."""
+    if abs(volts) > context.max_diode_volts:
+        return (
+            f"a diode reading above the diode test voltage of {context.max_diode_volts:g} V counts as a voltage: the "
+            "dial is probably on DC V"
+        )
+    if context.user_diode and context.model_read_volts:
+        return "the user confirmed diode mode, but the model read DC V symbols: it counts as a voltage (fail safe)"
+    if context.user_diode and abs(volts) > TYPICAL_DIODE_DROP_MAX:
+        return (
+            f"the user confirmed diode mode, but the value is above a typical diode drop ({TYPICAL_DIODE_DROP_MAX:g} "
+            "V): it counts as a voltage (fail safe)"
+        )
+    return None
+
+
+def diode_voltage(display_text: str, unit: str, mode: MeterMode, context: DiodeContext) -> LcdVoltage | None:
     """The number on the LCD in volts, for the safety gate. It needs no confirmed value (fail safe): the unit prefix
     counts, an unreadable unit in a voltage mode (or a mode that the model could not tell) counts as volts, and an
     overload is above every limit.
 
-    A diode test shows the meter's own test voltage (a diode drop is about 0.6 V), so a diode reading counts only
-    above `max_diode_volts`: then the dial is probably on DC V. None: not a voltage reading (another unit, a diode
-    reading at or below the limit, an open diode "OL", or no digits).
+    A diode test shows the meter's own test voltage (a diode drop is about 0.6 V), so a diode reading counts only by
+    `diode_rule`: above the diode test voltage, or, with a user-confirmed diode mode, when the model read DC V or the
+    value is above a typical diode drop. None: not a voltage reading (another unit, a plain diode test, an open diode
+    "OL", or no digits).
     """
     family, prefix = unit_parts(unit)
     if family is UnitFamily.VOLTAGE:
@@ -293,8 +335,11 @@ def lcd_voltage(
     overload = is_overload(display_text)
     digits, point = signature(display_text)
     if mode is MeterMode.DIODE:
-        volts = None if overload or not digits else signed_value(display_text, digits, point) * factor
-        return LcdVoltage(volts=volts, text=text) if volts is not None and abs(volts) > max_diode_volts else None
+        if overload or not digits:
+            return None
+        volts = signed_value(display_text, digits, point) * factor
+        note = diode_rule(volts, context)
+        return LcdVoltage(volts=volts, text=text, note=note) if note is not None else None
     if overload:
         return LcdVoltage(volts=math.inf, text=text)
     if not digits:
@@ -304,9 +349,14 @@ def lcd_voltage(
 
 def result_voltage(result: MeterResult, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> LcdVoltage | None:
     """The highest voltage on the LCD of the result and of each frame, each with its own mode (one frame can show a
-    misread point, or another mode)."""
-    readings = [lcd_voltage(result.display_text, result.unit, result.mode, max_diode_volts)]
-    readings += [lcd_voltage(frame.display_text, frame.unit, frame.mode, max_diode_volts) for frame in result.frames]
+    misread point, or another mode). A diode mode that the user confirmed must not hide a DC reading."""
+    context = DiodeContext(
+        max_diode_volts=max_diode_volts,
+        user_diode=result.mode_source is ModeSource.USER and result.mode is MeterMode.DIODE,
+        model_read_volts=result.model_mode in VOLTAGE_MODES,
+    )
+    readings = [diode_voltage(result.display_text, result.unit, result.mode, context)]
+    readings += [diode_voltage(frame.display_text, frame.unit, frame.mode, context) for frame in result.frames]
     found = [reading for reading in readings if reading is not None]
     return max(found, key=lambda reading: abs(reading.volts)) if found else None
 
@@ -386,6 +436,9 @@ class BenchStateStore:
 
     Every writer changes the record through `update` (or `update_async`): one lock from load to save, so two writers
     (two tools, a tool and multimeter_read, or two MCP servers) never lose each other's change.
+
+    An unsafe reading that cannot be saved (the lock wait timed out) is not lost: the store keeps it, every `load` of
+    this server applies it (the gate stays closed here), a background retry saves it, and so does the next write.
     """
 
     def __init__(self, path: Path | None = None, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> None:
@@ -394,19 +447,65 @@ class BenchStateStore:
         self.max_diode_volts = max_diode_volts
         self._memory = BenchState()
         self._thread_lock = threading.Lock()
+        self._unsaved: list[MeterResult] = []
+        self._unsaved_lock = threading.Lock()
+        self._flush_task: asyncio.Task[None] | None = None
 
     def update[T](self, change: Callable[[BenchState], T]) -> tuple[BenchState, T]:
         """Load, change, and save under the lock. A ResidualKeptError from `change` saves the record, then goes up
-        (the reading changed the safety gate); any other error saves nothing. `change` must only change the record."""
+        (the reading changed the safety gate); any other error saves nothing. `change` must only change the record.
+        The unsaved unsafe readings go into the file with this save."""
         with self._locked():
-            state = self.load()
+            state = self._read()
+            flushed = self._apply_unsaved(state)
             try:
                 value = change(state)
             except ResidualKeptError:
                 self.save(state)
+                self._forget_unsaved(flushed)
                 raise
             self.save(state)
+            self._forget_unsaved(flushed)
         return state, value
+
+    # region: unsaved unsafe readings
+
+    @property
+    def unsaved(self) -> int:
+        with self._unsaved_lock:
+            return len(self._unsaved)
+
+    def keep_unsaved(self, result: MeterResult) -> None:
+        with self._unsaved_lock:
+            self._unsaved.append(result)
+
+    def _apply_unsaved(self, state: BenchState) -> list[MeterResult]:
+        with self._unsaved_lock:
+            unsaved = list(self._unsaved)
+        # gate_event is idempotent for one result: the same point and time, and the unsafe entry wins a tie.
+        for result in unsaved:
+            gate_event(state, result, None, None, self.max_diode_volts)
+        return unsaved
+
+    def _forget_unsaved(self, saved: list[MeterResult]) -> None:
+        with self._unsaved_lock:
+            self._unsaved = [result for result in self._unsaved if all(result is not item for item in saved)]
+
+    def flush_later(self) -> None:
+        """Start one background retry that saves the unsaved readings (a few tries, then the next write does it)."""
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.get_running_loop().create_task(self._flush())
+
+    async def _flush(self) -> None:
+        for _ in range(FLUSH_ATTEMPTS):
+            await asyncio.sleep(FLUSH_DELAY.total_seconds())
+            if not self.unsaved:
+                return
+            with contextlib.suppress(ToolError):
+                await self.update_async(lambda _state: None)
+                return
+
+    # endregion: unsaved unsafe readings
 
     async def update_async[T](self, change: Callable[[BenchState], T]) -> tuple[BenchState, T]:
         """`update` for code on the event loop: the lock wait and the file work run in a worker thread."""
@@ -436,6 +535,12 @@ class BenchStateStore:
                     fcntl.flock(handle, fcntl.LOCK_UN)
 
     def load(self) -> BenchState:
+        """The record, with the unsafe readings that this server could not save yet."""
+        state = self._read()
+        self._apply_unsaved(state)
+        return state
+
+    def _read(self) -> BenchState:
         if self.path is None:
             return self._memory.model_copy(deep=True)
         try:
@@ -464,6 +569,12 @@ class BenchStateStore:
 
     def view(self, state: BenchState | None = None, notice: str | None = None) -> BenchStateView:
         state = state if state is not None else self.load()
+        if unsaved := self.unsaved:
+            note = (
+                "unsafe readings that are not saved in the bench state file yet (it was locked): "
+                f"{unsaved}; they count in this server, and the next bench-state write saves them"
+            )
+            notice = f"{notice}; {note}" if notice else note
         return BenchStateView(
             path=str(self.path) if self.path else None,
             state=state,
@@ -611,7 +722,8 @@ def unsafe_event(
     notes = [
         f"{voltage.text} is above the safe residual limit of {SAFE_RESIDUAL_VOLTS} V (this result is "
         f"{result.status}): the bench safety gate is closed at {where}; it needs a newer safe DC reading there, or "
-        "the user clears it"
+        "the user clears it",
+        *filter(None, [voltage.note]),
     ]
     if name is not None and name.warning is not None:
         notes.append(name.warning)
@@ -741,7 +853,13 @@ async def note_meter_reading(store: BenchStateStore, result: MeterResult) -> str
             partial(gate_event, result=result, label=None, board=None, max_diode_volts=store.max_diode_volts)
         )
     except ToolError as exc:
-        return f"{voltage.text} is above the safe residual limit, but the bench state cannot record it: {exc}"
+        store.keep_unsaved(result)
+        store.flush_later()
+        return (
+            f"{voltage.text} is above the safe residual limit of {SAFE_RESIDUAL_VOLTS} V, but the bench state is NOT "
+            f"SAVED YET ({exc}): this server keeps the reading, the gate stays closed here, and a retry or the next "
+            "bench-state write saves it"
+        )
     return "; ".join(event.notes) or None
 
 

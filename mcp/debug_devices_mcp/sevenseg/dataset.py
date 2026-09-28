@@ -1,21 +1,25 @@
 """The compare-mode dataset: each meter frame with the vision reading and the local reading (local, git-ignored).
 
-It lives in the state folder, never in the repo. The frames are the webcam crop only (the area that already goes to
-the vision model). At most `max_entries` frames stay: the oldest go first (the ids are UUID v7, so the name order is
-the time order).
+It lives in the state folder, never in the repo. It never keeps a webcam frame: an entry has the warped LCD image
+only (the LCD area of the profile), and only when a webcam crop is set and the frame matches the profile. Otherwise
+the entry has the text results and a note. At most `max_entries` entries stay: the oldest go first (the ids are
+UUID v7, so the name order is the time order). A prune also removes webcam frames of an older version (`*.jpg`) and
+images without an entry.
 """
 
 import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
+import cv2
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
 from debug_devices_mcp.multimeter import FrameReading, MeterMode, MeterResult, MultimeterReading
-from debug_devices_mcp.sevenseg.constants import JPEG_SUFFIX, JSON_SUFFIX, dataset
-from debug_devices_mcp.sevenseg.decode import RegionScore
+from debug_devices_mcp.sevenseg.constants import JSON_SUFFIX, LCD_SUFFIX, LEGACY_FRAME_SUFFIX, dataset
+from debug_devices_mcp.sevenseg.decode import Gray, RegionScore
 from debug_devices_mcp.sevenseg.reading import LocalReading
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,13 @@ class VisionFields(BaseModel):
         )
 
 
+class SavedImage(StrEnum):
+    # The warped LCD image of the profile (`<entry_id>.lcd.png`): the LCD area only.
+    LCD = "lcd"
+    # No image: `note` says why (no webcam crop, or the frame does not match the profile).
+    NONE = "none"
+
+
 class DatasetEntry(BaseModel):
     entry_id: str
     saved_at: AwareDatetime
@@ -66,6 +77,8 @@ class DatasetEntry(BaseModel):
     vision: VisionFields
     local: LocalReading
     regions: list[RegionScore]
+    image: SavedImage = SavedImage.NONE
+    note: str | None = None
 
 
 def new_entry(
@@ -87,34 +100,72 @@ def new_entry(
     )
 
 
+class Pruned(BaseModel):
+    """What a prune removed."""
+
+    entries: int
+    # Webcam frames (`*.jpg`) of an older version: the dataset keeps only LCD images now.
+    legacy_frames: int
+    orphan_images: int
+
+
+class DatasetWriteError(OSError):
+    """OpenCV could not encode or write the LCD image."""
+
+
 class Dataset:
     def __init__(self, directory: Path, max_entries: int = dataset.MAX_ENTRIES) -> None:
         self.directory = directory
         self.max_entries = max_entries
 
-    def add(self, entry: DatasetEntry, jpeg: bytes) -> None:
+    def image_path(self, entry_id: str) -> Path:
+        return self.directory / f"{entry_id}{LCD_SUFFIX}"
+
+    def add(self, entry: DatasetEntry, lcd: Gray | None, note: str | None = None) -> DatasetEntry:
+        """Save the entry, with the warped LCD image when there is one (never a webcam frame).
+
+        The JSON goes first: a failed image write leaves an entry that the prune removes with the others.
+        """
         self.directory.mkdir(parents=True, exist_ok=True)
-        (self.directory / f"{entry.entry_id}{JPEG_SUFFIX}").write_bytes(jpeg)
+        entry = entry.model_copy(update={"image": SavedImage.NONE if lcd is None else SavedImage.LCD, "note": note})
         (self.directory / f"{entry.entry_id}{JSON_SUFFIX}").write_text(entry.model_dump_json() + "\n")
-        self.prune()
+        if lcd is not None and not cv2.imwrite(str(self.image_path(entry.entry_id)), lcd):
+            raise DatasetWriteError(f"cannot write the LCD image of {entry.entry_id} to {self.directory}")
+        removed = self.prune()
+        if removed.legacy_frames:
+            logger.warning(
+                "removed %d webcam frames of an older version from %s", removed.legacy_frames, self.directory
+            )
+        return entry
 
     def entry_paths(self) -> list[Path]:
         if not self.directory.is_dir():
             return []
         return sorted(self.directory.glob(f"*{JSON_SUFFIX}"))
 
-    def prune(self) -> None:
+    def prune(self) -> Pruned:
+        """Keep the newest `max_entries` entries. Remove older webcam frames (`*.jpg`) and images without an entry."""
         paths = self.entry_paths()
-        for path in paths[: max(0, len(paths) - self.max_entries)]:
+        old_entries = paths[: max(0, len(paths) - self.max_entries)]
+        for path in old_entries:
             path.unlink(missing_ok=True)
-            path.with_suffix(JPEG_SUFFIX).unlink(missing_ok=True)
+        entry_ids = {path.name.removesuffix(JSON_SUFFIX) for path in self.entry_paths()}
+        legacy = sorted(self.directory.glob(f"*{LEGACY_FRAME_SUFFIX}")) if self.directory.is_dir() else []
+        for path in legacy:
+            path.unlink(missing_ok=True)
+        images = sorted(self.directory.glob(f"*{LCD_SUFFIX}")) if self.directory.is_dir() else []
+        orphans = [path for path in images if path.name.removesuffix(LCD_SUFFIX) not in entry_ids]
+        for path in orphans:
+            path.unlink(missing_ok=True)
+        return Pruned(entries=len(old_entries), legacy_frames=len(legacy), orphan_images=len(orphans))
 
-    def entries(self) -> Iterator[tuple[DatasetEntry, Path]]:
-        """Each entry and the path of its frame, oldest first. A broken entry is skipped with a warning."""
+    def entries(self) -> Iterator[tuple[DatasetEntry, Path | None]]:
+        """Each entry and the path of its LCD image (None without one), oldest first. A broken entry is skipped."""
         for path in self.entry_paths():
             try:
                 entry = DatasetEntry.model_validate_json(path.read_bytes())
             except (OSError, ValidationError) as exc:
                 logger.warning("skip the dataset entry %s: %s", path, exc)
                 continue
-            yield entry, path.with_suffix(JPEG_SUFFIX)
+            image = self.image_path(entry.entry_id)
+            yield entry, image if entry.image is SavedImage.LCD and image.is_file() else None

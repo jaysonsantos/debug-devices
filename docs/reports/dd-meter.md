@@ -66,7 +66,7 @@ A frame that has a size other than the calibrated crop is `unreadable`: the webc
 - `compare_local` runs only for `source` `webcam`. The profile is for the webcam crop.
 - It decodes the same JPEGs as the vision model, in a thread. All frames must agree (as for the vision result).
 - `local_agrees` is true only when both are readable and the local reading agrees with the combined vision result and with each vision frame. The compared fields are digits, point, sign, unit (family and prefix), and mode (the model's LCD mode, not a mode that the user confirmed).
-- It saves each frame crop to `<state>/sevenseg/dataset/<uuid7>.jpg` with a JSON file: the raw vision reading, the local reading, and the region fills. It keeps at most 500 frames.
+- It saves one JSON entry per frame to `<state>/sevenseg/dataset/`: the raw vision reading, the local reading, and the region fills. It keeps at most 500 entries. Round 11 changed the images (see "Round 11 follow-up"): the dataset never keeps a webcam frame.
 - If the local code fails, the result stays as it is, and the server log gets the error.
 
 ## CLI
@@ -118,4 +118,79 @@ A second fact: with `--ui-port 18791`, the test server looked for the other moni
 3. The demo photo shows "4. 70 kΩ" with a wide gap after the point. I cannot tell if the gap is a blank digit or a different digit pitch. The fit can move the digit row but not one digit. If the real digit pitch is not even, edit the digit boxes in the profile.
 4. `sample()` (N frames per second) has no live caller. The CLI reads files only, and agents get frames only through the MCP tools. A live standalone mode needs a frame source in the MCP server.
 5. `MeterResult` JSON now has `"local_reading": null, "local_agrees": null` in `off` mode.
-6. Docs: `AGENTS.md` (Parts) and `mcp/README.md` do not mention `sevenseg/` yet. These files belong to other agents.
+6. Docs: done. `AGENTS.md` (Parts, by dd-orchestrator) and `mcp/README.md` ("Local 7-segment decoder (compare mode)") describe the decoder.
+
+## Round 11 follow-up (`docs/briefs/qa-round11-followup.md`)
+
+### N37 (privacy): the dataset never keeps a webcam frame
+
+What happened: in compare mode, `LocalMeter._save` wrote every frame JPEG as it came from the webcam. When no crop was set, or the frame did not match the profile, this was the full webcam frame. The dataset could keep up to 500 of them.
+
+What changed:
+
+- An entry has an image only when a webcam crop is set and the frame size is the profile size. The image is the warped LCD only (`<entry_id>.lcd.png`, the LCD area of the profile at the warp size, 200 px high). It is never the webcam crop.
+- Without a crop, or with a frame that does not match the profile, the entry has only the text results and a `note` (`image: "none"`).
+- `read_meter` (`server.py`) passes `crop_set=services.webcam.crop is not None`. For frames of another monitor, this is the crop of that monitor.
+- The JSON goes first, then the image (N39). A prune removes the oldest entries, every `*.jpg` file (webcam frames of the first version), and every image without an entry.
+- `add()` logs a warning when it removes old webcam frames. `debug-devices-sevenseg evaluate` prunes first and prints the count.
+- `evaluate --redecode` decodes the saved LCD images with the regions of the current profile. It scales an image to the current warp size. A change of the LCD corners needs new frames. Entries without an image keep their saved local reading.
+- Texts: `mcp/README.md`, `.env.example`, and the setting description say that the dataset keeps only the LCD area.
+
+Removed frames:
+
+- The state dataset folder (`~/.local/state/debug-devices/sevenseg/dataset`) does not exist. `~/.local/state/debug-devices/` has no `sevenseg/` folder. Removed: 0 frames.
+- dd-qa's scratchpad (session `e66efcd8`) has 7 dataset folders from the Round 11 check, with 14 `.jpg` files: 12 at 420x300 (synthetic test frames) and 2 at 1280x720 (`priv/sevenseg/dataset`, the N37 case). I did not open or remove them: they belong to another agent. The new prune removes them if a new version of the code writes to those folders.
+
+### N38 (the log line)
+
+`log_line` said "agrees" when there was no comparison (no profile). Now it says "agrees" only when `local_agrees` is true, "differs in <fields>" for differences, and "not compared" otherwise.
+
+### Tests
+
+New or changed tests in `mcp/tests/test_sevenseg_compare.py`:
+
+- With a crop: 2 entries and 2 LCD images at the warp size, no other file.
+- Without a crop: 2 entries, no image, the note.
+- A 1280x720 frame with a 420x300 profile: the local reading is `unreadable`, and the entry has no image and the note.
+- Through `multimeter_read`: with a crop, 2 LCD images; without a crop, no image.
+- An entry of the first version with its `.jpg` and an image without an entry: `evaluate` removes both, prints the count, and still reads the old entry.
+- A new entry removes an old `.jpg` too.
+- `evaluate --redecode` on LCD images, also with a profile of another aspect.
+- The log line: "not compared" without a profile, "differs in point" for a moved point.
+
+Not in this round (low, open): N40, N41, and the CLI tracebacks. See the next section.
+
+## Round 11 low items (N40, N41, CLI errors)
+
+### N40: a profile with missing regions
+
+What happened: `LcdLayout` accepted a profile without all 7 segments or with the wrong number of decimal points. The decoder then failed with a `KeyError`. Compare mode caught the error and returned no local fields and no log line, the same as off mode.
+
+What changed:
+
+- `LcdLayout` needs at least 1 digit, all 7 segments (a to g), and one decimal point after each digit but the last. Otherwise the profile is not valid.
+- `load_profile` gives one line per problem, for example: `layout: Value error, missing segments: g. A digit needs all 7 (a to g)`. A profile that is not readable (for example a folder) gives "cannot read the meter profile".
+- Compare mode with such a profile gives `local_reading.status: "no_profile"` with that message.
+- If the local code raises an error, compare mode now sets `local_reading` (status `unreadable`, problem "the local decoder failed: <error>") and `local_agrees: false`, and the log line says so. The vision result stays the same.
+- The log line of an unreadable local reading shows its first problem, not only "unreadable".
+
+### N41: stability
+
+- The frame key now has the mode. An AC/DC change between frames gives "unstable".
+- When fewer frames are readable than must agree, the combined reading is `unreadable` (`readable: false`, `value: null`), with the problem "1 of 2 frames are readable, 2 must agree (...)". Before, it was "unstable".
+- The problem text shows each frame with its unit and mode, for example "5.10 V dc_voltage, 5.10 V ac_voltage".
+
+### CLI errors
+
+- A user error prints one line on stderr (`debug-devices-sevenseg: error: ...`) and exits with code 1. It prints no traceback.
+- User errors: a missing file, a folder instead of a file, a file that is not an image, a missing or bad profile, no LCD in the image, an unknown template, a bad option value (for example `--min-agree 0`), and an annotated image name with an unknown extension.
+- `calibrate` encodes the annotated image before it writes anything. With a bad image name, it writes neither the profile nor the image.
+- Other errors (bugs) still show the traceback.
+
+### Tests
+
+- N40: a profile without segment g, and a profile with 2 points for 4 digits: `load_profile` names the problem, and compare mode gives `no_profile` with the message.
+- The local failure test now checks the failure reading, `local_agrees: false`, the log line, and that the vision fields do not change.
+- N41: an AC/DC change is unstable; 1 readable frame of 2 is unreadable; 2 readable frames of 3 that agree are read.
+- CLI: 10 user errors give one line on stderr, exit code 1, and no traceback.
+- `uv run pytest mcp/tests/test_sevenseg_*.py`: 87 passed. The full suite: 1074 passed, 1 skipped. `prek` on my files: passed.

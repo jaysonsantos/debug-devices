@@ -12,7 +12,7 @@ from debug_devices_mcp.server import Services
 from debug_devices_mcp.ui.board import BoardPanel
 from debug_devices_mcp.ui.constants import SCRCPY_LOG_FILE_NAME
 from debug_devices_mcp.ui.device_panel import DevicePanel
-from debug_devices_mcp.ui.forward import CallForwarder, token_dir
+from debug_devices_mcp.ui.forward import CallForwarder, other_monitor_ports, token_dir
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
 from debug_devices_mcp.ui.remote_screen import RemoteScreen
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, state_dir
@@ -70,7 +70,9 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
         # The status poll also sees an app restart (other preview flips) and sends the flips again.
         return await services.sync_phone(await services.phone.status())
 
-    shared = SharedWebcam(stream, RemoteMonitor(settings.ui_port, settings.webcam_timeout))
+    # The webcam: also the running monitor on the default port or another page port (QA round 11).
+    webcam_owner = RemoteMonitor(settings.ui_port, settings.webcam_timeout, other_ports=other_monitor_ports)
+    shared = SharedWebcam(stream, webcam_owner)
     monitor = Monitor(
         start,
         SettingsStore.in_dir(directory),

@@ -1,5 +1,6 @@
 package dev.jayson.debugdevices.camera
 
+import android.util.Log
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -7,6 +8,8 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.BadRequestException
 import io.ktor.server.plugins.ContentTransformationException
@@ -19,30 +22,74 @@ import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
-import java.util.concurrent.Executor
+import java.net.InetSocketAddress
+import java.net.StandardSocketOptions
+import java.nio.channels.ServerSocketChannel
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+
+/** A server that [ServerHost] starts and stops. */
+interface HostedServer {
+    fun startEngine()
+
+    fun stopEngine()
+}
 
 /**
  * The one running server of the process (N21). A new activity instance can start before the old one is destroyed,
  * so a start first stops the server that still runs, and a stop acts only on its own server. Both run on one
  * background thread, in call order: the main thread never waits for running requests (a request can need the main
  * thread to end).
+ *
+ * A failed start or stop does not end the app: [log] gets it, and a failed start runs again every [retryMillis]
+ * until it works, or until a stop or a newer start comes (for example while another app holds the port).
  */
-class ServerHost(private val lifecycle: Executor = Executors.newSingleThreadExecutor(::lifecycleThread)) {
-    /** Only the [lifecycle] thread reads and writes it. */
-    private var running: ApiServer? = null
+class ServerHost(
+    private val lifecycle: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(::lifecycleThread),
+    private val retryMillis: Long = Constants.Server.START_RETRY_MILLIS,
+    private val log: (String, Throwable?) -> Unit = ::logServerEvent
+) {
+    /** The server of the newest activity instance, and the one that runs. Only the [lifecycle] thread uses them. */
+    private var wanted: HostedServer? = null
+    private var running: HostedServer? = null
+    private var failedStarts = 0
 
-    fun start(server: ApiServer) = lifecycle.execute {
-        running?.stopEngine()
-        server.startEngine()
-        running = server
+    fun start(server: HostedServer) = lifecycle.execute {
+        running?.let(::stopEngine)
+        wanted = server
+        failedStarts = 0
+        tryStart(server)
     }
 
-    fun stop(server: ApiServer) = lifecycle.execute {
-        if (running === server) {
+    fun stop(server: HostedServer) = lifecycle.execute {
+        // No more start tries for this server.
+        if (wanted === server) wanted = null
+        if (running === server) stopEngine(server)
+    }
+
+    private fun tryStart(server: HostedServer) {
+        if (wanted !== server) return
+        try {
+            server.startEngine()
+        } catch (cause: Exception) {
+            if (failedStarts++ == 0) log(Constants.Messages.SERVER_START_FAILED + retryMillis, cause)
+            lifecycle.schedule({ tryStart(server) }, retryMillis, TimeUnit.MILLISECONDS)
+            return
+        }
+        running = server
+        if (failedStarts > 0) log(Constants.Messages.SERVER_STARTED_AFTER_RETRY + failedStarts, null)
+    }
+
+    private fun stopEngine(server: HostedServer) {
+        running = null
+        try {
             server.stopEngine()
-            running = null
+        } catch (cause: Exception) {
+            log(Constants.Messages.SERVER_STOP_FAILED, cause)
         }
     }
 
@@ -54,28 +101,61 @@ class ServerHost(private val lifecycle: Executor = Executors.newSingleThreadExec
 
 private fun lifecycleThread(task: Runnable) = Thread(task, Constants.Server.LIFECYCLE_THREAD).apply { isDaemon = true }
 
-/** Runs the contract API on 127.0.0.1:8765 with the CIO engine. [start] and [stop] go through [host]. */
+private fun logServerEvent(message: String, cause: Throwable?) {
+    Log.w(Constants.Log.TAG, message, cause)
+}
+
+/** Runs the contract API on 127.0.0.1:8765 with the CIO engine. [start] and [stop] go through [serverHost]. */
 class ApiServer(
     camera: CameraPort,
     appVersion: String,
-    port: Int = Constants.Server.PORT,
-    private val host: ServerHost = ServerHost.process,
+    private val port: Int = Constants.Server.PORT,
+    private val serverHost: ServerHost = ServerHost.process,
     onUnexpected: (Throwable) -> Unit
-) {
-    private val engine = embeddedServer(CIO, port = port, host = Constants.Server.HOST) {
-        cameraApi(camera, appVersion, onUnexpected)
+) : HostedServer {
+    private val newEngine = {
+        embeddedServer(
+            CIO,
+            configure = {
+                connector {
+                    host = Constants.Server.HOST
+                    port = this@ApiServer.port
+                }
+                // A new server binds while connections of the old one can still close (TIME_WAIT).
+                reuseAddress = true
+            }
+        ) { cameraApi(camera, appVersion, onUnexpected) }
     }
 
-    fun start() = host.start(this)
+    /** The running engine. Only the [serverHost] thread uses it. */
+    private var engine: EmbeddedServer<*, *>? = null
 
-    fun stop() = host.stop(this)
+    fun start() = serverHost.start(this)
 
-    internal fun startEngine() {
-        engine.start(wait = false)
+    fun stop() = serverHost.stop(this)
+
+    /**
+     * A plain bind checks the port first: a failed bind inside Ktor also goes to the coroutine exception handler,
+     * which ends the app. A new engine for each start, because a failed start leaves its engine unusable.
+     */
+    override fun startEngine() {
+        ServerSocketChannel.open().use { check ->
+            check.setOption(StandardSocketOptions.SO_REUSEADDR, true)
+            check.bind(InetSocketAddress(Constants.Server.HOST, port))
+        }
+        val next = newEngine()
+        try {
+            next.start(wait = false)
+        } catch (cause: Exception) {
+            next.stop(0L, 0L)
+            throw cause
+        }
+        engine = next
     }
 
-    internal fun stopEngine() {
-        engine.stop(Constants.Server.STOP_GRACE_PERIOD_MILLIS, Constants.Server.STOP_TIMEOUT_MILLIS)
+    override fun stopEngine() {
+        engine?.stop(Constants.Server.STOP_GRACE_PERIOD_MILLIS, Constants.Server.STOP_TIMEOUT_MILLIS)
+        engine = null
     }
 }
 
@@ -91,8 +171,9 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             call.respondError(ErrorCode.BAD_REQUEST, Constants.Messages.BAD_BODY)
         }
         exception<Throwable> { call, cause ->
-            // A server stop cancels the running calls (N21): no answer, and not an unexpected error.
-            if (cause is CancellationException) throw cause
+            // N42: a server stop or a client cancel ends the call: no answer, and not an unexpected error. A cancel
+            // while the call is still active (for example a cancelled CameraX future) is an unexpected error.
+            if (cause is CancellationException && !currentCoroutineContext().isActive) throw cause
             onUnexpected(cause)
             call.respondError(ErrorCode.INTERNAL_ERROR, Constants.Messages.UNEXPECTED)
         }

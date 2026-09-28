@@ -1835,3 +1835,26 @@ I read `docs/phone-api.md` again first (the new N11 sentence: the rotation respo
 ### Notes
 
 - One prek run printed a Nix "unexpected end-of-file" error while another agent edited the tree; a second run on each of my files passed.
+
+## Round 46: the webcam of the running monitor for a server on another port (QA round 11)
+
+The problem (found by dd-meter): a test or a second MCP server started with `--ui-port N` did not find the running monitor on the default port, so it could not share its webcam (only one process can read the V4L2 device).
+
+### What I did
+
+- `RemoteMonitor(..., other_ports=...)`: the lookup (`find_monitor`, `identify`) asks the own port first, then the other ports. The first debug-devices monitor of another process that fits wins (for the webcam: it streams the same device). The next requests (info, stream, frames) go to that port.
+- `ui/forward.other_monitor_ports()`: the default page port (18766), then the ports of the running pages. Each primary already writes its token file `ingest-<port>.token` in the runtime dir (`$XDG_RUNTIME_DIR/debug-devices`), so `page_ports()` takes the port from the file names. It never reads a token.
+- Only the webcam sharing uses the other ports (`ui/setup.py` for the page path, `Services.from_settings` for `--no-ui`). The call forwarder and the phone screen of a secondary keep only their own `--ui-port`, so a test server never forwards calls or boxes to the user's running monitor.
+- `mcp/README.md`: the lookup order.
+
+### Tests
+
+- New `mcp/tests/test_remote_ports.py` (6 tests, an httpx transport that answers per port):
+  - the monitor on the default port is found, and the frames come from it;
+  - the monitor that streams the device wins over one that does not;
+  - this process and another app are not a monitor;
+  - without other ports, only the own port is asked;
+  - the page ports come from the token file names (other files are ignored);
+  - a busy local webcam uses the running monitor on the default port.
+- `uv run pytest`: 1053 passed, 1 skipped, 7 failed. The 7 failures are in `test_sevenseg_compare.py`, during dd-meter's work on N37 (`sevenseg/` and `config.py` changed during the run). That file alone: 28 passed.
+- ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

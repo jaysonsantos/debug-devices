@@ -12,20 +12,26 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import java.net.BindException
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URI
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertArrayEquals
@@ -120,10 +126,13 @@ class ApiServerTest {
                 .also { status = it }
         }
 
-        override suspend fun capture(): Snapshot {
+        /** Like the real camera: one at a time with the changes (N44). */
+        var snapshotWaitMillis = Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS
+
+        override suspend fun capture(): Snapshot = gate.snapshot(snapshotWaitMillis) {
             captureError?.let { throw it }
             val current = status()
-            return Snapshot(jpeg, current.rotationDegrees, current.appStartId)
+            Snapshot(jpeg, current.rotationDegrees, current.appStartId)
         }
     }
 
@@ -611,6 +620,56 @@ class ApiServerTest {
     }
 
     @Test
+    fun `a snapshot during a slow change waits, then 200 (N44)`() {
+        val entered = CompletableDeferred<Unit>()
+        val order = CopyOnWriteArrayList<String>()
+        val camera = ready(ready).apply {
+            // A slow change, like a new bind after POST /v1/camera.
+            beforeRotationRead = {
+                entered.complete(Unit)
+                delay(SLOW_CHANGE_MILLIS)
+                order += "change"
+            }
+        }
+        api(camera) {
+            coroutineScope {
+                val change = async { postJson(Constants.Paths.ROTATION, """{"degrees":90}""").status }
+                entered.await()
+                val snapshot = client.get(Constants.Paths.SNAPSHOT)
+                order += "snapshot"
+                assertEquals(HttpStatusCode.OK, snapshot.status)
+                assertEquals(HttpStatusCode.OK, change.await())
+            }
+        }
+        assertEquals(listOf("change", "snapshot"), order.toList())
+    }
+
+    @Test
+    fun `a change longer than the snapshot wait gives 503 camera change still running (N44)`() {
+        val entered = CompletableDeferred<Unit>()
+        val camera = ready(ready).apply {
+            snapshotWaitMillis = SHORT_SNAPSHOT_WAIT_MILLIS
+            beforeRotationRead = {
+                entered.complete(Unit)
+                delay(SLOW_CHANGE_MILLIS)
+            }
+        }
+        api(camera) {
+            coroutineScope {
+                val change = async { postJson(Constants.Paths.ROTATION, """{"degrees":90}""").status }
+                entered.await()
+                val snapshot = client.get(Constants.Paths.SNAPSHOT)
+                assertEquals(HttpStatusCode.ServiceUnavailable, snapshot.status)
+                val error = snapshot.error()
+                assertEquals(ErrorCode.CAMERA_NOT_READY, error.error)
+                assertEquals(Constants.Messages.CAMERA_CHANGE_RUNNING, error.message)
+                // The snapshot wait does not cancel the change.
+                assertEquals(HttpStatusCode.OK, change.await())
+            }
+        }
+    }
+
+    @Test
     fun `snapshot has the rotation and app start id headers (C12)`() = api(ready(ready.copy(rotationDegrees = 90))) {
         val response = client.get(Constants.Paths.SNAPSHOT)
         assertEquals(HttpStatusCode.OK, response.status)
@@ -910,16 +969,53 @@ class ApiServerTest {
     }
 
     @Test
-    fun `a cancelled call is not an unexpected error`() {
-        val camera = ready(ready).apply { statusError = CancellationException("server stop") }
-        api(camera) { runCatching { client.get(Constants.Paths.STATUS) } }
-        assertTrue(unexpected.toString(), unexpected.isEmpty())
+    fun `a cancel while the call is active is 500 internal_error and is logged (N42)`() {
+        // For example a cancelled CameraX future: the call itself still runs.
+        val camera = ready(ready).apply { statusError = CancellationException("future cancelled") }
+        api(camera) {
+            val response = client.get(Constants.Paths.STATUS)
+            assertEquals(HttpStatusCode.InternalServerError, response.status)
+            assertEquals(ErrorCode.INTERNAL_ERROR, response.error().error)
+            assertEquals("future cancelled", unexpected.single().message)
+        }
+    }
+
+    @Test
+    fun `a call that the server stop cancels is not logged (N42)`() {
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
+        val client = Executors.newSingleThreadExecutor()
+        try {
+            val entered = CountDownLatch(1)
+            val camera = ready(ready).apply {
+                // Longer than the stop timeout: the stop cancels the call.
+                beforeRotationRead = {
+                    entered.countDown()
+                    delay(Constants.Server.STOP_TIMEOUT_MILLIS * STOP_TIMEOUTS_TO_OUTLAST)
+                }
+            }
+            val port = freePort()
+            val server = ApiServer(camera, APP_VERSION, port, ServerHost(lifecycle)) { unexpected += it }
+            server.start()
+            awaitHealth(port, APP_VERSION)
+            val rotation = client.submit<Int?> {
+                runCatching { call(port, Constants.Paths.ROTATION, """{"degrees":90}""").first }.getOrNull()
+            }
+            assertTrue(entered.await(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS))
+            server.stop()
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            // No answer (the connection closes), or no 200: the call did not end normally.
+            assertTrue(rotation.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS) != HttpURLConnection.HTTP_OK)
+            assertTrue(unexpected.toString(), unexpected.isEmpty())
+        } finally {
+            lifecycle.shutdownNow()
+            client.shutdownNow()
+        }
     }
 
     @Test
     fun `stop does not block a thread that a running request needs (N21)`() {
         val main = Executors.newSingleThreadExecutor()
-        val lifecycle = Executors.newSingleThreadExecutor()
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
         val client = Executors.newSingleThreadExecutor()
         try {
             val mainDispatcher = main.asCoroutineDispatcher()
@@ -952,7 +1048,7 @@ class ApiServerTest {
 
     @Test
     fun `a new server starts after the old one stopped, on the same port (N21)`() {
-        val lifecycle = Executors.newSingleThreadExecutor()
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
         try {
             val host = ServerHost(lifecycle)
             val port = freePort()
@@ -974,7 +1070,7 @@ class ApiServerTest {
 
     @Test
     fun `a new instance that starts before the old one is destroyed takes the port (N21)`() {
-        val lifecycle = Executors.newSingleThreadExecutor()
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
         try {
             val host = ServerHost(lifecycle)
             val port = freePort()
@@ -997,12 +1093,118 @@ class ApiServerTest {
         }
     }
 
+    /** The log lines of a [ServerHost]. */
+    private val hostLog = CopyOnWriteArrayList<Pair<String, Throwable?>>()
+
+    private fun waitUntil(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SERVER_WAIT_MILLIS)
+        while (!condition()) {
+            if (System.nanoTime() >= deadline) throw AssertionError("condition not met in $SERVER_WAIT_MILLIS ms")
+            Thread.sleep(POLL_MILLIS)
+        }
+    }
+
+    /** runTest fails on an uncaught coroutine exception (a failed bind inside Ktor): on Android it ends the app. */
+    @Test
+    fun `a busy port does not end the app, and the server starts when the port is free`() = runTest {
+        withContext(Dispatchers.IO) { busyPortCase() }
+    }
+
+    private fun busyPortCase() {
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
+        try {
+            val host = ServerHost(lifecycle, RETRY_MILLIS) { message, cause -> hostLog += message to cause }
+            val port = freePort()
+            // Another app holds the port.
+            val other = ServerSocket(port, 0, InetAddress.getByName(Constants.Server.HOST))
+            val server = ApiServer(ready(ready), APP_VERSION, port, host) { unexpected += it }
+            server.start()
+            waitUntil { hostLog.isNotEmpty() }
+            assertEquals(Constants.Messages.SERVER_START_FAILED + RETRY_MILLIS, hostLog.first().first)
+            assertTrue(hostLog.first().second is BindException)
+            other.close()
+            awaitHealth(port, APP_VERSION)
+            // One line for the failure, one for the start after it: no line for each try.
+            waitUntil { hostLog.size == 2 }
+            assertTrue(hostLog.last().first.startsWith(Constants.Messages.SERVER_STARTED_AFTER_RETRY))
+            server.stop()
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertTrue(unexpected.toString(), unexpected.isEmpty())
+        } finally {
+            lifecycle.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a stop ends the start tries`() {
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
+        try {
+            val host = ServerHost(lifecycle, RETRY_MILLIS) { message, cause -> hostLog += message to cause }
+            val port = freePort()
+            val other = ServerSocket(port, 0, InetAddress.getByName(Constants.Server.HOST))
+            val server = ApiServer(ready(ready), APP_VERSION, port, host) { unexpected += it }
+            server.start()
+            waitUntil { hostLog.isNotEmpty() }
+            server.stop()
+            other.close()
+            Thread.sleep(RETRY_MILLIS * RETRIES_TO_WAIT)
+            assertTrue(runCatching { call(port, Constants.Paths.HEALTH) }.isFailure)
+            assertEquals(1, hostLog.size)
+        } finally {
+            lifecycle.shutdownNow()
+        }
+    }
+
+    /** A server without sockets, for the host rules. */
+    private class FakeServer(private val stopError: Exception? = null) : HostedServer {
+        var starts = 0
+        var stops = 0
+
+        override fun startEngine() {
+            starts++
+        }
+
+        override fun stopEngine() {
+            stops++
+            stopError?.let { throw it }
+        }
+    }
+
+    @Test
+    fun `a failed stop is logged and the next start still runs`() {
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
+        try {
+            val host = ServerHost(lifecycle, RETRY_MILLIS) { message, cause -> hostLog += message to cause }
+            val error = IllegalStateException("engine stop")
+            val old = FakeServer(stopError = error)
+            val next = FakeServer()
+            host.start(old)
+            host.start(next)
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertEquals(1, old.stops)
+            assertEquals(1, next.starts)
+            assertEquals(listOf(Constants.Messages.SERVER_STOP_FAILED to error), hostLog.toList())
+            // The late destroy of the old activity: no second stop.
+            host.stop(old)
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertEquals(1, old.stops)
+            assertEquals(0, next.stops)
+        } finally {
+            lifecycle.shutdownNow()
+        }
+    }
+
     private companion object {
         const val APP_VERSION = "0.1.0"
         const val OLD_APP_VERSION = "0.0.9"
         const val SERVER_WAIT_MILLIS = 10_000L
         const val POLL_MILLIS = 20L
         const val REQUEST_PAUSE_MILLIS = 50L
+        const val RETRY_MILLIS = 50L
+        const val RETRIES_TO_WAIT = 4
+        const val STOP_TIMEOUTS_TO_OUTLAST = 10
+        const val SLOW_CHANGE_MILLIS = 300L
+        const val SHORT_SNAPSHOT_WAIT_MILLIS = 50L
         const val CONCURRENT_REQUESTS = 10
         const val OUTSIDE_PREVIEW_Y = 0.9f
         const val SENSOR_ROTATION = android.view.Surface.ROTATION_0
