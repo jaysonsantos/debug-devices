@@ -7,6 +7,8 @@ It keeps the camera state in memory, so the MCP server can run without a phone.
     python3 scripts/fake_phone.py --no-flash           # torch returns 409 no_flash_unit
     python3 scripts/fake_phone.py --not-ready          # camera endpoints return 503 camera_not_ready
     python3 scripts/fake_phone.py --capture-fails      # snapshot returns 500 capture_failed
+    python3 scripts/fake_phone.py --safe-area-unmeasured # overlay_region is null, preview_region is set
+    python3 scripts/fake_phone.py --safe-area-empty    # overlay_region has height 0 (measured, no room)
     python3 scripts/fake_phone.py --background         # the app is in the background: camera endpoints return 503
     python3 scripts/fake_phone.py --physical-rotation 90 # auto rotation follows this phone orientation
     python3 scripts/fake_phone.py --internal-error     # camera endpoints return 500 internal_error
@@ -244,6 +246,8 @@ SIDEWAYS_ROTATIONS = frozenset({90, 270})
 # At rotation 0 with no flip, this gives the contract example {0.2, 0.04, 0.6, 0.9}.
 SAFE_TOP = 0.04
 SAFE_BOTTOM = 0.06
+# The label band reaches the navigation bar: the measured safe area has no height (overlay_region height 0).
+EMPTY_SAFE_TOP = 1.0 - SAFE_BOTTOM
 REGION_DIGITS = 6
 
 
@@ -268,12 +272,19 @@ def still_point(
 
 
 def overlay_region(
-    preview: dict[str, float] | None, rotation_degrees: int, flip_horizontal: bool, flip_vertical: bool
+    preview: dict[str, float] | None,
+    rotation_degrees: int,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    safe_top: float = SAFE_TOP,
 ) -> dict[str, float] | None:
-    """The safe area of the screen, mapped into preview_region on the still. Same null rule as preview_region."""
+    """The safe area of the screen, mapped into preview_region on the still. null when preview_region is null.
+
+    `safe_top` = 1 - SAFE_BOTTOM gives a measured but empty safe area (the label covers it): height 0, not null.
+    """
     if preview is None:
         return None
-    corners = [(0.0, SAFE_TOP), (1.0, 1.0 - SAFE_BOTTOM)]
+    corners = [(0.0, safe_top), (1.0, 1.0 - SAFE_BOTTOM)]
     points = [still_point(u, v, rotation_degrees, flip_horizontal, flip_vertical) for u, v in corners]
     left, right = sorted(x for x, _ in points)
     top, bottom = sorted(y for _, y in points)
@@ -394,6 +405,10 @@ class FakeConfig:
     capture_fails: bool = False
     # The app is in the background: camera endpoints return 503 camera_not_ready.
     background: bool = False
+    # The window has no size yet: overlay_region is null while preview_region is set (docs/phone-api.md).
+    safe_area_unmeasured: bool = False
+    # The safe area is measured but empty: overlay_region has height 0 (not null).
+    safe_area_empty: bool = False
     # The physical orientation of the fake phone. The rotation follows it while it is not locked.
     physical_rotation: int = 0
     internal_error: bool = False
@@ -465,11 +480,16 @@ class FakeCamera:
             status = CameraStatus(**asdict(self._status))
         if status.preview_region is not None and status.rotation_degrees in SIDEWAYS_ROTATIONS:
             status.preview_region = dict(PREVIEW_REGION_SIDEWAYS)
-        status.overlay_region = overlay_region(
-            status.preview_region,
-            status.rotation_degrees,
-            status.preview_flip_horizontal,
-            status.preview_flip_vertical,
+        status.overlay_region = (
+            None
+            if self.config.safe_area_unmeasured
+            else overlay_region(
+                status.preview_region,
+                status.rotation_degrees,
+                status.preview_flip_horizontal,
+                status.preview_flip_vertical,
+                safe_top=EMPTY_SAFE_TOP if self.config.safe_area_empty else SAFE_TOP,
+            )
         )
         if status.focus is not None and time.monotonic() < self._scan_until:
             status.focus = {**status.focus, "state": FOCUS_SCANNING}
@@ -843,6 +863,8 @@ def self_check() -> int:
         ("internal error", FakeConfig(internal_error=True), qa_contract.Expect.READY, []),
         ("background", FakeConfig(background=True), qa_contract.Expect.BACKGROUND, []),
         ("lying at 270", FakeConfig(physical_rotation=270), qa_contract.Expect.READY, []),
+        ("safe area unmeasured", FakeConfig(safe_area_unmeasured=True), qa_contract.Expect.READY, []),
+        ("safe area empty", FakeConfig(safe_area_empty=True), qa_contract.Expect.READY, []),
     ]
     all_passed = True
     for label, config, expect_state, extra in scenarios:
@@ -904,6 +926,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--capture-fails", action="store_true", help="snapshot returns 500 capture_failed")
     parser.add_argument("--background", action="store_true", help="the app is in the background: camera endpoints 503")
     parser.add_argument(
+        "--safe-area-unmeasured",
+        action="store_true",
+        help="overlay_region is null while preview_region is set (the app window has no size yet)",
+    )
+    parser.add_argument(
+        "--safe-area-empty",
+        action="store_true",
+        help="overlay_region has height 0 (measured, but the status label covers the safe area)",
+    )
+    parser.add_argument(
         "--physical-rotation", type=int, choices=[0, 90, 180, 270], default=0, help="phone orientation for auto"
     )
     parser.add_argument("--internal-error", action="store_true", help="camera endpoints return 500 internal_error")
@@ -962,6 +994,8 @@ def main(argv: list[str] | None = None) -> int:
         in_sensor_zoom_unsupported=args.in_sensor_zoom_unsupported,
         no_macro=args.no_macro,
         background=args.background,
+        safe_area_unmeasured=args.safe_area_unmeasured,
+        safe_area_empty=args.safe_area_empty,
         physical_rotation=args.physical_rotation,
         start_delay=args.start_delay,
         snapshot=Path(args.snapshot).read_bytes() if args.snapshot else TEST_JPEG,

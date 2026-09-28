@@ -96,26 +96,40 @@ class MainActivity : ComponentActivity() {
         )
         overlayView.scene = { width, height, inset, length -> camera.overlayScene(width, height, inset, length) }
         // The phone view of the overlay layout: the safe-area padding (system bars and cutouts) and the status label.
-        val safeInsets = {
-            PixelRect(
-                safeArea.paddingLeft.toFloat(),
-                safeArea.paddingTop.toFloat(),
-                safeArea.paddingRight.toFloat(),
-                safeArea.paddingBottom.toFloat()
-            )
+        // The phone view of the overlay and of CameraStatus.overlay_region: the safe-area padding (system bars and
+        // cutouts) and the status label band, measured for the current orientation (null until then).
+        val labelGap = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            Constants.Overlay.LABEL_GAP_DP,
+            resources.displayMetrics
+        )
+        val phoneFrameInput = {
+            val safeWidth = safeArea.width - safeArea.paddingLeft - safeArea.paddingRight
+            val safeHeight = safeArea.height - safeArea.paddingTop - safeArea.paddingBottom
+            val degrees = OrientationLogic.surfaceDegrees(camera.effectiveRotation)
+            OverlayLayout.labelBand(
+                overlay.width,
+                safeWidth,
+                safeHeight,
+                degrees,
+                statusView.bottom,
+                labelGap
+            )?.let { band ->
+                PhoneFrameInput(
+                    PixelRect(
+                        safeArea.paddingLeft.toFloat(),
+                        safeArea.paddingTop.toFloat(),
+                        safeArea.paddingRight.toFloat(),
+                        safeArea.paddingBottom.toFloat()
+                    ),
+                    band
+                )
+            }
         }
-        val labelBand = {
-            statusView.bottom + TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP,
-                Constants.Overlay.LABEL_GAP_DP,
-                resources.displayMetrics
-            )
-        }
-        overlayView.insets = safeInsets
-        overlayView.labelBand = labelBand
-        // The same safe area gives CameraStatus.overlay_region.
-        camera.safeInsets = safeInsets
-        camera.labelBand = labelBand
+        overlayView.phoneFrameInput = phoneFrameInput
+        camera.phoneFrameInput = phoneFrameInput
+        // Draw again after the turned container is laid out for a new orientation (N10).
+        overlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> overlayView.invalidate() }
         statusView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> overlayView.invalidate() }
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow
         // the physical orientation.

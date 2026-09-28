@@ -117,6 +117,11 @@ class PreviewRegion(BaseModel):
     width: float
     height: float
 
+    @property
+    def empty(self) -> bool:
+        """A measured region with no area (for example an empty safe area): nothing shows there."""
+        return self.width <= 0 or self.height <= 0
+
 
 class CameraStatus(BaseModel):
     zoom_ratio: float
@@ -151,8 +156,9 @@ class CameraStatus(BaseModel):
     overlay_region: PreviewRegion | None = None
 
     def visible_region(self) -> PreviewRegion | None:
-        """Where a box shows on the phone: `overlay_region`, else `preview_region` (an app from before it)."""
-        return self.overlay_region or self.preview_region
+        """Where a box shows on the phone: `overlay_region`, else `preview_region` (an app from before it, or a safe
+        area not measured yet). A zero-size `overlay_region` is kept: nothing shows on the phone then."""
+        return self.overlay_region if self.overlay_region is not None else self.preview_region
 
 
 class ApiErrorCode(StrEnum):

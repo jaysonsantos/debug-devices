@@ -353,9 +353,10 @@ object OverlayLogic {
     /**
      * `CameraStatus.overlay_region`: the part of the snapshot under [safeRect] (the phone view, in view pixels), inside
      * [previewRegion]. Unlike `preview_region` it can change with the flips: the safe area is not symmetric (a status
-     * bar at the top, a navigation bar at the bottom). Null when nothing is left.
+     * bar at the top, a navigation bar at the bottom). When nothing is left (the label band covers the safe area),
+     * a zero-size region: no box shows (N8; null is only for a view that is not measured yet).
      */
-    fun overlayRegion(safeRect: PixelRect, geometry: OverlayGeometry): PreviewRegion? {
+    fun overlayRegion(safeRect: PixelRect, geometry: OverlayGeometry): PreviewRegion {
         val a = viewToSnapshot(safeRect.left, safeRect.top, geometry)
         val b = viewToSnapshot(safeRect.right, safeRect.bottom, geometry)
         val preview = previewRegion(geometry)
@@ -363,7 +364,7 @@ object OverlayLogic {
         val top = maxOf(minOf(a.second, b.second), preview.snapshotY)
         val right = minOf(maxOf(a.first, b.first), preview.snapshotX + preview.width)
         val bottom = minOf(maxOf(a.second, b.second), preview.snapshotY + preview.height)
-        if (right <= left || bottom <= top) return null
+        if (right <= left || bottom <= top) return PreviewRegion(preview.snapshotX, preview.snapshotY, 0f, 0f)
         return PreviewRegion(left, top, right - left, bottom - top)
     }
 }

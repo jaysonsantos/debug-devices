@@ -134,6 +134,8 @@ REGION_TOLERANCE = 1e-6
 REGION_COMPARE_TOLERANCE = 0.02
 # A vertical flip must move overlay_region by more than rounding (the bars differ by a few % of the screen).
 REGION_MOVE_MIN = 1e-3
+# The app measures the safe area after its window has a size: wait this long for a non-null overlay_region.
+SAFE_AREA_WAIT_SECONDS = 2.0
 APP_START_ID_VERSION = 7
 AF_MODES = ("continuous", "macro")
 IN_SENSOR_ZOOM_STATES = ("off", "on", "unsupported", "fallback")
@@ -301,10 +303,11 @@ def expect_status(resp: Response) -> CameraStatus:
     expect(data["af_mode"] in AF_MODES, f"af_mode {data['af_mode']!r} is not in {AF_MODES}")
     expect_app_start_id(data["app_start_id"])
     expect_preview_region(data["preview_region"])
-    expect_preview_region(data["overlay_region"])
+    expect_preview_region(data["overlay_region"], "overlay_region", allow_empty=True)
+    # null when preview_region is null; it can also be null alone while the safe area is not measured yet.
     expect(
-        (data["overlay_region"] is None) == (data["preview_region"] is None),
-        f"overlay_region {data['overlay_region']!r}, preview_region {data['preview_region']!r}: other null rule",
+        data["preview_region"] is not None or data["overlay_region"] is None,
+        f"overlay_region {data['overlay_region']!r} is set, but preview_region is null",
     )
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
@@ -435,16 +438,24 @@ def check_health(ctx: Context) -> None:
     ctx.notes.append(f"app_version={data['app_version']}")
 
 
-def expect_preview_region(region: Any) -> None:
-    """null before the camera is bound, else a part of the still from 0 to 1."""
+def expect_preview_region(region: Any, name: str = "preview_region", allow_empty: bool = False) -> None:
+    """null before the camera is bound, else a part of the still from 0 to 1.
+
+    `allow_empty`: overlay_region can have width 0 or height 0 (a measured safe area with no room).
+    """
     if region is None:
         return
-    expect(isinstance(region, dict) and set(region) == set(REGION_FIELDS), f"preview_region {region!r}")
-    values = [region[name] for name in REGION_FIELDS]
+    expect(isinstance(region, dict) and set(region) == set(REGION_FIELDS), f"{name} {region!r}")
+    values = [region[field] for field in REGION_FIELDS]
     expect(all(isinstance(value, int | float) and not isinstance(value, bool) for value in values), f"{region!r}")
     x, y, width, height = values
     inside = x >= 0 and y >= 0 and x + width <= 1 + REGION_TOLERANCE and y + height <= 1 + REGION_TOLERANCE
-    expect(width > 0 and height > 0 and inside, f"preview_region {region!r} is not a part of the image")
+    sized = width >= 0 and height >= 0 if allow_empty else width > 0 and height > 0
+    expect(sized and inside, f"{name} {region!r} is not a part of the image")
+
+
+def is_empty_region(region: dict[str, float]) -> bool:
+    return region["width"] == 0 or region["height"] == 0
 
 
 def expect_app_start_id(value: Any) -> None:
@@ -1222,21 +1233,41 @@ def expect_inside(inner: dict[str, float], outer: dict[str, float], what: str) -
     expect(inside, f"{what}: overlay_region {inner} is not inside preview_region {outer}")
 
 
+def measured_overlay_region(ctx: Context) -> dict[str, float] | None:
+    """overlay_region from the status. It is null while the safe area is not measured, so wait a short time."""
+    deadline = time.monotonic() + SAFE_AREA_WAIT_SECONDS
+    while True:
+        region = expect_json(ctx.client.get(Route.STATUS))["overlay_region"]
+        if region is not None or time.monotonic() >= deadline:
+            return region
+        time.sleep(START_POLL_SECONDS)
+
+
 def check_overlay_region(ctx: Context) -> None:
     """--strict: overlay_region is inside preview_region, and a vertical preview flip moves it (bars not symmetric)."""
     if not ctx.strict:
+        return
+    if measured_overlay_region(ctx) is None:
+        # Allowed while the safe area is not measured yet (docs/phone-api.md): clients then use preview_region.
+        ctx.notes.append(f"overlay_region stays null for {SAFE_AREA_WAIT_SECONDS} s: the safe area is not measured")
         return
     regions: dict[bool, dict[str, float]] = {}
     try:
         for flip_vertical in (False, True):
             body = {"flip_horizontal": False, "flip_vertical": flip_vertical}
-            data = expect_json(ctx.client.post_json(Route.PREVIEW, body))
-            overlay, preview = data["overlay_region"], data["preview_region"]
+            expect_status(ctx.client.post_json(Route.PREVIEW, body))
+            overlay = measured_overlay_region(ctx)
+            preview = expect_json(ctx.client.get(Route.STATUS))["preview_region"]
             expect(overlay is not None and preview is not None, f"flip_vertical {flip_vertical}: a region is null")
             expect_inside(overlay, preview, f"flip_vertical {flip_vertical}")
             regions[flip_vertical] = overlay
     finally:
         ctx.client.post_json(Route.PREVIEW, {"flip_horizontal": False, "flip_vertical": False})
+    if any(is_empty_region(region) for region in regions.values()):
+        # A measured safe area with no room: width or height 0 (not null). Nothing shows on the phone; there is no
+        # fallback to preview_region, and an empty region does not have to move with a flip.
+        ctx.notes.append(f"overlay_region is empty (measured, no room): {regions}")
+        return
     moved = any(abs(regions[True][k] - regions[False][k]) > REGION_MOVE_MIN for k in REGION_FIELDS)
     expect(moved, f"a vertical preview flip did not move overlay_region: {regions[False]}")
     ctx.notes.append(f"no flip: {regions[False]}, vertical flip: {regions[True]}")

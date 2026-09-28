@@ -63,6 +63,16 @@ class WebcamControls(BaseModel):
     auto_exposure: bool | None = None
     exposure: int | None = None
 
+    def following(self, changes: WebcamControls) -> WebcamControls:
+        """The saved values after `changes`, as the camera has them (N7 of QA round 6): a fixed exposure time turns
+        auto exposure off (settings() sends manual mode with it), and auto exposure on drops the fixed time (the
+        camera sets it). One source of truth: after a restart, the camera gets the same values again."""
+        if changes.exposure is not None and changes.auto_exposure is None:
+            return self.model_copy(update={"auto_exposure": False})
+        if changes.auto_exposure is True and changes.exposure is None:
+            return self.model_copy(update={"exposure": None})
+        return self
+
     def settings(self) -> dict[str, int]:
         """The V4L2 control values to set, in a safe order (the exposure mode before the exposure time). With auto
         exposure on, a saved fixed exposure time is left out: the camera refuses it then (B-F10 of QA round 4)."""
@@ -188,7 +198,7 @@ class V4l2Controls:
 
     async def update(self, changes: WebcamControls) -> ControlsReport:
         saved = self.store.load()
-        merged = saved.model_copy(update=changes.model_dump(exclude_none=True))
+        merged = saved.model_copy(update=changes.model_dump(exclude_none=True)).following(changes)
         known = await self.read()
         await self.set(changes.settings(), known)
         self.store.save(merged)

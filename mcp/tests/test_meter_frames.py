@@ -199,6 +199,8 @@ def test_user_mode_in_the_single_frame_check() -> None:
         (frame("4.98", 4.98, "V"), frame("4.98", 4.98, "mV"), "unit"),
         (frame("5.10", 5.10, mode="dc_voltage"), frame("5.10", 5.10, mode="ac_voltage"), "mode"),
         (frame("-0.12", -0.12), frame("0.12", 0.12), "sign"),
+        (frame("DC -5.10", -5.10), frame("DC 5.10", 5.10), "sign"),  # the sign after a word on the LCD
+        (frame("5.10", 5.10), frame("- 5.10", -5.10), "sign"),
     ],
 )
 def test_frames_that_disagree_are_disputed(first: MeterResult, second: MeterResult, name: str) -> None:
@@ -221,6 +223,7 @@ def test_the_unit_problem_names_both_units() -> None:
     [
         (frame("-0.00", 0.0), frame("0.00", 0.0)),  # a meter can show both at zero
         (frame("\u22120.12", -0.12), frame("-0.12", -0.12)),  # MINUS SIGN and hyphen-minus
+        (frame("DC -5.10", -5.10), frame("-5.10", -5.10)),  # the same sign after a word
         (frame("450.0", 450.0, "\u00b5V"), frame("450.0", 450.0, "uV")),  # MICRO SIGN and u
     ],
 )

@@ -246,3 +246,38 @@ Design choice for B-F2: the scale compares the image sizes of the two photos fro
 - The expiry time (5 minutes) and the watch timeout (5 s) are `SceneOptions` defaults, not settings. Make them flags if the bench needs other values.
 - `phone_focus`, `phone_torch`, `phone_af_mode`, and highlight boxes do not make photos stale without a watcher: they do not change the pixel geometry.
 - `pointing._board_to_snapshot` still scales by the declared registration size (unchanged; it already refused another shape).
+
+## QA round 6 follow-up: C15 side labels (dd-research-2)
+
+Date: 2026-09-28. Brief: `docs/briefs/qa-round6-followup.md`, section "dd-research-2". Finding: `docs/reports/dd-qa.md`, round 6, C15.
+
+### What changed
+
+Every side check now uses `Board.side_ok` (`board/model.py`): in a file with mixed side labels, a label never rules a part out. A clean file works as before.
+
+| Place | Before | Now |
+|---|---|---|
+| `pointer.py` `plan()` (used by `phone_point_to`) | `part.side not in {registered_side, BOTH}`: a part labelled bottom in a mixed file got "on the other side" and no box | New argument `side_ok` (default `on_side`); `pointing.py` passes `board.side_ok`. A part that passes only because the labels are mixed gets the note "(the file labels it bottom, but its side labels are mixed: check it in the photo)" in its target message |
+| `board/marking.py` `find_marking_parts()` (used by `board_match_marking`) | `on_side`: `side="top"` did not list a part labelled bottom | `board.side_ok`. `MarkingMatch.side_warning` carries the board warning when `side` is given |
+| `board/tools.py` `locate()` (`board_locate_in_photo`) | `on_registered_side` from the label alone, so `highlight` skipped the part | `board.side_ok`; the notes already carry the warning |
+| `board/model.py` `parts_near()` (`board_parts_near`) | `on_side` | `self.side_ok`. `NearParts.side_warning` when `side` is given |
+
+Not changed: `board/render.py` still draws each side by its label. A side view needs a side per part, and the render is supporting evidence.
+
+### Tests
+
+- New `mcp/tests/test_side_labels_c15.py` (4 tests) with the mixed fixture `sides.json` and the clean fixture `markings.json`:
+  - the marking search keeps a mixed label and still rules out a clean one;
+  - `plan()` with the board rule shows the part with the note, and without it gives "on the other side";
+  - `phone_point_to`, `board_match_marking(side="top")`, `board_locate_in_photo`, and `board_parts_near(side="top")` on the mixed file;
+  - the same tools on the clean file still rule out the bottom part, with no warning.
+
+| Check | Command | Result |
+|---|---|---|
+| All Python tests | `uv run pytest` | 872 passed, 1 skipped |
+| Lint | `ruff check`, `ruff format --check` on the 6 changed Python files | pass |
+| Hooks | `prek run --files` on those files and `mcp/README.md` | pass |
+
+### Open
+
+- The contract text of C15 (`docs/boardview-json.md:62`: `side` can be unreliable in a mixed file, and the MCP sets `both` for through-hole parts) is in the orchestrator's contract file. I did not change it.

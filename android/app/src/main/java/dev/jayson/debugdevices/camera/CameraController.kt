@@ -96,6 +96,7 @@ class CameraController(
     val effectiveRotation: Int
         get() = rotation.effectiveRotation
     private val captureLock = Mutex()
+    private val jpegTurner = JpegTurner()
     private var camera: Camera? = null
 
     /** Latest preview result values. Written on the camera thread, read on the main thread. */
@@ -606,11 +607,8 @@ class CameraController(
         )
     }
 
-    /** The system bar and cutout insets of the preview, in screen pixels (set by the activity). Main thread only. */
-    var safeInsets: () -> PixelRect = { PixelRect(0f, 0f, 0f, 0f) }
-
-    /** The status label band at the viewer's top, in pixels (set by the activity). Main thread only. */
-    var labelBand: () -> Float = { 0f }
+    /** The measured phone view (set by the activity), or null while it is not measured. Main thread only. */
+    var phoneFrameInput: () -> PhoneFrameInput? = { null }
 
     /** `CameraStatus.overlay_region`: the phone view (the overlay's safe area) on the snapshot; the same null rule. */
     private fun overlayRegion(camera: Camera): PreviewRegion? {
@@ -619,8 +617,9 @@ class CameraController(
         val width = view.width.toFloat()
         val height = view.height.toFloat()
         val geometry = previewGeometry(camera, view, width, height) ?: return null
+        val input = phoneFrameInput() ?: return null
         val degrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
-        val frame = OverlayLayout.phoneFrame(width, height, safeInsets(), degrees, labelBand())
+        val frame = OverlayLayout.phoneFrame(width, height, input.insets, degrees, input.labelBand)
         return OverlayLogic.overlayRegion(OverlayLayout.fromViewer(frame, degrees, width, height), geometry)
     }
 
@@ -779,7 +778,7 @@ class CameraController(
             }
         }
         // C13: upright pixels, EXIF Orientation 1 or absent. Off the main thread: it can decode and encode.
-        Snapshot(withContext(Dispatchers.Default) { JpegTurner.upright(jpeg) }, rotationDegrees, appStart.id)
+        Snapshot(withContext(Dispatchers.Default) { jpegTurner.upright(jpeg) }, rotationDegrees, appStart.id)
     }
 
     private fun activeCamera(): Camera {

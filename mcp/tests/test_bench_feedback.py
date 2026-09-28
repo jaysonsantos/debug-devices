@@ -139,6 +139,8 @@ async def no_frames() -> AsyncIterator[bytes]:
 
 def test_screen_start_and_frames(tmp_path: Path) -> None:
     monitor, client = primary_client(tmp_path)
+    # The user selected this phone in the primary's page (N2 of QA round 6: only it is streamed for a secondary).
+    monitor.selected_serial = lambda: "R5CT1234567"
     headers = {ingest.TOKEN_HEADER: "secret-token"}
     no_screen = client.post(ingest.SCREEN_START_PATH, json={"serial": "R5CT1234567"}, headers=headers).json()
     assert no_screen == {"running": False, "detail": "this monitor has no phone screen (--no-phone-screen)"}
@@ -167,6 +169,7 @@ async def test_a_secondary_gets_frames_and_sends_its_boxes(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     primary = await start_primary(tmp_path, monkeypatch)
+    primary.selected_serial = lambda: "R5CT1234567"
     primary.screen = FakeScreen()  # type: ignore[assignment]
     primary.scene_watcher = SceneWatcher(SceneState(), no_frames)
     port = port_of(primary)

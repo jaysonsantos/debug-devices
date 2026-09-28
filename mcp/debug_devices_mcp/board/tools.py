@@ -50,7 +50,7 @@ from debug_devices_mcp.board.marking import (
     message,
 )
 from debug_devices_mcp.board.marking_readings import lookup_marking, reading_message
-from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, SideLabels, TestPoint, on_side
+from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, SideLabels, TestPoint
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
 from debug_devices_mcp.board.session_store import BoardSessionRecord, BoardSessionStore
 from debug_devices_mcp.constants import phone
@@ -162,6 +162,8 @@ class NearParts(BaseModel):
     side: Side | None
     parts: list[PartDistance]
     truncated: bool
+    # With `side` and a file with mixed side labels: parts of both labels are listed (board_open side_warning).
+    side_warning: str | None = None
 
 
 class PhotoPair(BaseModel):
@@ -218,7 +220,8 @@ class LocatedPart(BaseModel):
     x_px: float
     y_px: float
     in_photo: bool
-    # False when the part is on the other side of the board than the registration.
+    # False when the part is on the other side of the board than the registration. In a file with mixed side
+    # labels it is always true: the label cannot rule a part out (the notes carry the warning).
     on_registered_side: bool
 
 
@@ -539,7 +542,7 @@ def locate(board: Board, registration: Registration, refdes: list[str], net: str
                 x_px=round(x, 1),
                 y_px=round(y, 1),
                 in_photo=inside(x, y),
-                on_registered_side=on_side(part.side, registration.side),
+                on_registered_side=board.side_ok(part.side, registration.side),
             )
             for part, (x, y) in zip(parts, part_px, strict=True)
         ],
@@ -695,7 +698,8 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
     ) -> NearParts:
         """Parts whose center is within `radius_mm` of a part (`refdes`) or of a point (`x_mm`, `y_mm`).
 
-        Sorted by distance. `side` keeps only parts on that side (parts on "both" always count).
+        Sorted by distance. `side` keeps only parts on that side (parts on "both" always count). In a file with mixed
+        side labels, `side` rules no part out, and `side_warning` says so.
         """
         board = session.current()
         excluded = ""
@@ -709,7 +713,12 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
         near = board.parts_near(center, radius_mm, side, exclude=excluded)
         items = [PartDistance(part=part, distance_mm=part.center.distance(center)) for part in near]
         return NearParts(
-            center=center, radius_mm=radius_mm, side=side, parts=items[:limit], truncated=len(items) > limit
+            center=center,
+            radius_mm=radius_mm,
+            side=side,
+            parts=items[:limit],
+            truncated=len(items) > limit,
+            side_warning=board.side_check.warning if side is not None else None,
         )
 
     @board_tool(server, session)
@@ -809,6 +818,7 @@ def match_marking(
         reading=lookup.reading,
         rotated_reading=lookup.rotated_text,
         value_interpretations=lookup.value_interpretations,
+        side_warning=board.side_check.warning if side is not None else None,
     )
 
 

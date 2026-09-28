@@ -1,5 +1,6 @@
 """Settings that the user changes in the monitor window. They persist in a JSON file in the XDG state directory."""
 
+import asyncio
 import errno
 import fcntl
 import logging
@@ -130,6 +131,12 @@ class SettingsStore:
             updated = change(self.load())
             self.save(updated)
         return updated
+
+    async def update_async(self, change: Callable[[UiSettings], UiSettings]) -> UiSettings:
+        """`update` for code on the event loop: the lock wait (up to LOCK_TIMEOUT) and the file work run in a worker
+        thread, so the server never stops while another process holds the lock (N3 of QA round 6). `change` must
+        only build the new settings (no other work)."""
+        return await asyncio.to_thread(self.update, change)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:

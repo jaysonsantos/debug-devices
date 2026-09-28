@@ -904,3 +904,89 @@ Result: "93.2 V" with 6000 counts, or at a low confidence, is now "disputed" wit
 
 - `uv run pytest`: 824 passed, 1 skipped (all tests, also the files of the other agents). ruff and prek on my files: pass.
 - The running MCP server loads these changes only after a restart. I did not restart it. Nothing committed.
+
+## QA round 6 follow-up: N5, N6, and the rest of B-E2
+
+### What I did
+
+- N5 (`bench_state.py`): only DC voltage (`RESIDUAL_MODE`) is the residual-voltage check. Only a DC reading can complete a power-check step or open the gate.
+  - An AC reading after the isolation confirmation is recorded, and the tool result has the `notice` "residual check needs DC V: this AC reading does not count as the residual-voltage check (a capacitor holds a DC charge that AC V does not show)". With a power-check `step_id`, the step stays open with the same note.
+  - One addition for safety: an AC reading above 0.5 V still blocks the gate as an unsafe point (230 V AC at "VBUS" is not a board without power). A safe DC reading with the same label clears it.
+  - `POWER_CHECK_TEXT` and the gate text now say "DC voltage mode".
+- N6 (`bench_state.py`): the step is now checked after the reading enters the record. If the step is refused and the reading counts for the gate, `record_measurement` does these things:
+  - It keeps the reading without the step.
+  - It raises `ResidualKeptError`, a `ToolError`. The tool saves the record first, then refuses.
+  - The refusal says: "The voltage reading is recorded without the step, because it counts for the safety gate: do not record it again."
+  - A reading counts for the gate when it is a DC reading or an unsafe AC reading after the confirmation.
+  - An unknown `step_id` is now a refusal of the same kind (before, `find_step` raised before any record).
+  - Any other refused reading changes nothing, as before.
+  - A second call with the same capture id does not add the measurement again. So a retry with the correct step completes the step with the recorded reading.
+  - `add_measurement` and `complete_power_checks` are new helpers.
+- B-E2 rest (`meter_frames.py`): `sign_key` uses the `signed_value` rule, a minus sign anywhere before the first digit. So "DC -5.10" and "DC 5.10" are "disputed". Before the fix, they gave a confirmed -5.1 V.
+- Docs: the `bench_record_measurement` and `bench_begin_step` descriptions, rule 10 in `instructions.py` ("a safe DC residual voltage"), and the "Bench state" bullet in `mcp/README.md`.
+
+### Tests
+
+- `test_bench_state.py`, "QA round 6":
+  - An AC reading with and without the power-check step: recorded, the note, the step open, the gate closed.
+  - 230 V AC blocks an open gate, and a safe DC reading at the same point opens it again.
+  - The QA case in two forms (a resistance `step_id` and an unknown `step_id`): the gate is open after "C12 0.01 V", and "VBUS 5.10 V" with the wrong step is refused but recorded. `bench_begin_step` refuses, and a retry does not add the reading again.
+  - The other order: the refused unsafe reading first, then a safe reading at another point, and the gate stays closed.
+  - A refused resistance reading with a voltage step records nothing.
+- `test_meter_frames.py`: "DC -5.10" and "DC 5.10", and "5.10" and "- 5.10", are disputed. "DC -5.10" and "-5.10" agree.
+
+### Checks
+
+- `uv run pytest`: 872 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+### Open (not in this brief)
+
+- QA also asks to consider B-E3 again. The point is the free-text label, so one label at two points (for example "residual") lets a later safe reading replace an unsafe one. Also, after a new isolation confirmation, a safe reading at any point opens the gate, but a confirmation does not discharge a capacitor. Possible fixes: keep an unsafe reading until the same label reads safe after a waiting time, or ask for a reading at every earlier unsafe point after a new confirmation. This needs the orchestrator's decision.
+
+## QA round 6 follow-up: the B-E3 decision (residual points)
+
+### What I did
+
+- Rule 1 (the new module `mcp/debug_devices_mcp/bench_points.py`): a residual reading needs a point name.
+  - A residual reading is a DC reading after the isolation confirmation, or an unsafe AC reading.
+  - The name is a part pin ("C12.1", "C12:1", "C12 pin 1") or a net. With a board open, `point_name` checks it against the board: the part and the pin exist, or the net exists.
+  - It refuses these names with "name the point: part.pin or net (for example C12.1 or PP3V3_S5)":
+    - a generic name ("residual", "test", "point", empty, or only these words and numbers);
+    - a pattern;
+    - a bare part (the error lists its pins);
+    - a pin or a net that the board does not have.
+  - Without a board, a free name is accepted, and the `notice` warns that the name must stand for this one point only.
+  - Every spelling of one pin gives one key ("c12.1"), so "C12 pin 1" and "C12.1" are the same point.
+  - A refused name does not lose an unsafe reading. The reading sets the last unsafe time, so the gate stays closed until a newer confirmation. The tool saves this and asks the agent to record the reading again with the point name.
+- Rule 2 (`bench_state.py`): the points moved from `PowerRecord` to `BenchState.residual_points`, together with the new field `last_unsafe_at`. So a new isolation confirmation, a power change, or a probe short does not clear them. The gate opens only when all three conditions are true:
+  - the confirmation is newer than the last unsafe reading;
+  - every point has a safe latest reading (a newer safe DC reading at the same point, or a user clearance);
+  - at least one safe DC reading comes after the confirmation.
+- Rule 3: `bench_state_update` has two new fields, `clear_residual_point` (the point name) and `clear_residual_reason` (required).
+  - The clearance counts as a safe reading for that point.
+  - It is kept as a user action in `residual_clearances`.
+  - It does not count as the safe DC reading after the confirmation.
+- `server.py`: a small edit only. `build_server` gives `register_bench_state_tools` an `open_board` function: `services.board.restore()`, then the open board, or None.
+- A bench state file from before this round loads. Its old residual fields are dropped, so the gate then needs a new residual reading.
+- Docs: the `bench_record_measurement` and `bench_state_update` descriptions, rule 10 in `instructions.py`, and the "Bench state" bullet in `mcp/README.md`.
+
+### Tests (`mcp/tests/test_bench_state.py`)
+
+- Rule 1:
+  - Part pin and net names on the open fixture `identity.json` (synthetic, license note in the fixture folder).
+  - Refused names: a bare part, a missing pin, a missing part, a pattern, a free text.
+  - Generic names are refused with and without a board.
+  - The free-name warning without a board.
+  - The QA case "same generic label at two points": "residual" 5.10 V is refused and closes the gate. "residual" 0.01 V is refused. "C8850 pin 1" 0.01 V is recorded, but the gate needs a new confirmation. "C8850.1" 5.10 V is the same point.
+- Rule 2:
+  - A safe reading at another point, and then at the same point in another spelling, does not open the gate before a new confirmation.
+  - The QA case "safe reading at another point after a new confirmation" keeps the gate closed.
+  - A probe short does not clear the points.
+  - A power-check step stays open until a newer confirmation and a safe reading come.
+  - An unsafe AC reading clears only with a new confirmation and a safe DC reading at that point.
+- Rule 3: a clearance needs a reason and an existing point, is kept as a user action, and counts only for its point.
+- The earlier tests now use point names ("C12.1", "VBUS"), and the fields are in `state.residual_points`.
+
+### Checks
+
+- `uv run pytest`: 909 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

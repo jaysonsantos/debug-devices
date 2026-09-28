@@ -10,7 +10,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from debug_devices_mcp.board.dump import Side
-from debug_devices_mcp.board.model import Board, Box, Mm, Part, Point, on_side
+from debug_devices_mcp.board.model import Board, Box, Mm, Part, Point
 from debug_devices_mcp.board.rotation import Reading
 from debug_devices_mcp.board.value_code import ValueInterpretation
 
@@ -67,6 +67,8 @@ class MarkingMatch(BaseModel):
     rotated_reading: str | None = None
     # The marking (and its rotated reading) as an SMD value code. Interpretations only, never a part name.
     value_interpretations: list[ValueInterpretation] = []
+    # With `side` and a file with mixed side labels: the side filter kept parts of both labels (board_open warning).
+    side_warning: str | None = None
 
 
 def normalize(text: str) -> str:
@@ -80,7 +82,8 @@ def unconfuse(text: str) -> str:
 def find_marking_parts(board: Board, marking: str, side: Side | None) -> tuple[Resolution, list[Part]]:
     """Exact, then prefix, then contained, then OCR-confusion matches. The first level with a match wins."""
     key = normalize(marking)
-    parts = [part for part in board.parts.values() if on_side(part.side, side)]
+    # side_ok: a file with mixed side labels does not rule out a part by its label (board/model.py).
+    parts = [part for part in board.parts.values() if board.side_ok(part.side, side)]
     if not key:
         return Resolution.NONE, []
     names = {part.name: normalize(part.name) for part in parts}

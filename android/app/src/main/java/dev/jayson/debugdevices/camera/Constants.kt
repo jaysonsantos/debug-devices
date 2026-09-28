@@ -151,6 +151,7 @@ object Constants {
         const val NOT_FOUND = "No such endpoint"
         const val METHOD_NOT_ALLOWED = "This method is not allowed on this endpoint"
         const val CAPTURE_FAILED = "The still capture failed"
+        const val STILL_TURN_FAILED = "could not turn the still"
         const val UNEXPECTED = "Unexpected error. The app log has the stack trace"
         const val IN_SENSOR_ZOOM_FALLBACK = "In-sensor zoom session failed, binding again without it"
         const val REBIND_REASON_API = "in_sensor_zoom request"

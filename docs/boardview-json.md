@@ -59,7 +59,7 @@ Rules:
 
 - Coordinates are integers in mil (1/1000 inch), the OpenBoardView `BRDPoint` unit. The MCP server converts to mm at its boundary.
 - `format`: one of `brd`, `brd2`, `bdv`, `asc`, `bvr`, `bvr3`, `cad`, `cst`, `fz`, `cae`, `gencad`, `ad`, `xzz`.
-- `side`: `top`, `bottom`, or `both`. The MCP server treats mounting holes and through-hole parts as `both`. In a file with mixed side labels (many near neighbours on opposite labels), it treats the labels as unreliable and warns instead of rejecting a part for its side.
+- `side`: `top`, `bottom`, or `both`. The MCP server treats mounting holes and through-hole parts as `both`. In a file with mixed side labels (many near neighbours on opposite labels), it treats the labels as unreliable: every side check (`phone_point_to`, `board_match_marking`, `board_locate_in_photo`, `board_parts_near`, and the identity checks) warns instead of rejecting a part for its side. `board_render` still draws each part on the side of its label.
 - `mounting`: `smd` or `through_hole`.
 - `p1` and `p2`: the part box when the format has it. `null` when the parser leaves them at 0,0. When `p1 == p2`, the point is the placement point (GenCAD), not a box. In both cases the MCP server computes the box from the pins.
 - `rotation_deg`: the value from the file in degrees, with no change for the bottom side. Set for `gencad` (0 when the component has no `ROTATION`), `ad`, and `fz` (only when the field is a number). `null` for the other formats. `0.0` can also mean that a converter put the rotation into the shape.

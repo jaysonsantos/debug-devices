@@ -112,10 +112,20 @@ class PhoneSelection:
 
     def set(self, serial: str | None) -> None:
         """Save the choice. Raises SelectionNotSavedError when the file cannot be written: the choice is then not in
-        effect (the file is the source of truth for every server), and the caller must say so."""
+        effect (the file is the source of truth for every server), and the caller must say so. For code without an
+        event loop; on the event loop, `save`."""
         if self._store is not None:
             try:
                 self._store.update(lambda saved: saved.model_copy(update={"adb_serial": serial}))
+            except OSError as exc:
+                raise SelectionNotSavedError(f"cannot save the selected phone: {exc}") from exc
+        self._value = serial
+
+    async def save(self, serial: str | None) -> None:
+        """`set` for code on the event loop: the file lock wait runs in a worker thread (N3 of QA round 6)."""
+        if self._store is not None:
+            try:
+                await self._store.update_async(lambda saved: saved.model_copy(update={"adb_serial": serial}))
             except OSError as exc:
                 raise SelectionNotSavedError(f"cannot save the selected phone: {exc}") from exc
         self._value = serial

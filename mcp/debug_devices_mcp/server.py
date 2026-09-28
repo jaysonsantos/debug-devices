@@ -17,7 +17,15 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
-from debug_devices_mcp.adb import Adb, AdbDevice, AdbError, DeviceNotListedError, DeviceStateError, ForwardRemoval
+from debug_devices_mcp.adb import (
+    Adb,
+    AdbDevice,
+    AdbError,
+    DeviceGoneError,
+    DeviceNotListedError,
+    DeviceStateError,
+    ForwardRemoval,
+)
 from debug_devices_mcp.app_restart import (
     PHONE_TOOL_PREFIX,
     RESTART_STALE_REASON,
@@ -34,6 +42,7 @@ from debug_devices_mcp.bench_state import (
 )
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.loader import BoardviewKeys, LoaderOptions
+from debug_devices_mcp.board.model import Board
 from debug_devices_mcp.board.session_store import SESSION_FILE_NAME, BoardSessionStore
 from debug_devices_mcp.board.tools import BoardSession, register_board_tools, scene_stale_reason
 from debug_devices_mcp.camera_choice import (
@@ -367,6 +376,9 @@ class Services:
         on_phone = ([], []) if self.server_hides_markings() else (boxes, arrows)
         with self.camera_command(), tool_errors():
             status = await self._post_overlay(*on_phone)
+        # The lifetime follows our record, also when an old app got [] while the markings are hidden (C11 (b) of QA
+        # round 6): the record expires OVERLAY_TTL after this call.
+        self._restart_overlay_ttl(bool(boxes or arrows))
         self.seen_status(status)
         await self._overlay_changed(boxes, arrows)
         return status
@@ -382,7 +394,6 @@ class Services:
             untagged = [box.model_copy(update={"tag": None}) for box in boxes]
             plain = [arrow.model_copy(update={"tag": None}) for arrow in arrows]
             status = await self.phone.overlay(OverlayRequest(boxes=untagged, arrows=plain))
-        self._restart_overlay_ttl(bool(boxes or arrows))
         return status
 
     def _restart_overlay_ttl(self, drawn: bool) -> None:
@@ -412,7 +423,7 @@ class Services:
 
     async def set_markings(self, visible: bool) -> MarkingsResult:
         """The page's Markings toggle: save the choice, then hide or show the phone's own boxes and arrows."""
-        self.markings.set(visible)
+        await self.markings.save(visible)
         try:
             with self.camera_command():
                 status = await self.markings_sync.send()
@@ -437,6 +448,9 @@ class Services:
             return MarkingsResult(visible=visible, phone=str(exc))
         except PhoneError as exc:
             return MarkingsResult(visible=visible, phone=f"not sent to the phone now: {exc}")
+        if visible:
+            # The app got a new call: its lifetime starts again, and ours with it. Hidden: our record keeps its time.
+            self._restart_overlay_ttl(bool(boxes or arrows))
         self.seen_status(status)
         return MarkingsResult(visible=visible, phone="shown" if visible else OLD_APP_HIDDEN)
 
@@ -534,7 +548,8 @@ class Services:
         # The boxes follow the board while the phone moves, when the phone screen stream matches the snapshot.
         tracking = await self.pointing.follow_plain_boxes(boxes, request.boxes)
         annotated, layout_summary = await asyncio.to_thread(draw_highlights, image, boxes)
-        seen, warning = visibility(overlay, status.visible_region() or self.overlay_region)
+        fresh = status.visible_region()
+        seen, warning = visibility(overlay, fresh if fresh is not None else self.overlay_region)
         result = HighlightResult(
             count=len(overlay),
             boxes=overlay,
@@ -555,13 +570,26 @@ class Services:
 
     async def release_forward(self) -> str:
         """Remove the camera API forward that this server made, only while its port still goes to that phone. A
-        second call does nothing. Raises DeviceGoneError when adb says that the device is gone."""
-        serial, self.forwarded_serial = self.forwarded_serial, None
+        second call does nothing. Raises DeviceGoneError when adb says that the device is gone.
+
+        The record goes only when the forward is gone (removed, not there, another phone's now, or the device is
+        gone). A passing adb failure keeps it, so a later stop tries again (N4 of QA round 6)."""
+        serial = self.forwarded_serial
         if serial is None:
             return NO_OWN_FORWARD
         port = self.settings.local_forward_port
-        removal = await self.adb.remove_own_forward(serial, port)
+        try:
+            removal = await self.adb.remove_own_forward(serial, port)
+        except DeviceGoneError:
+            self._forget_forward(serial)
+            raise
+        self._forget_forward(serial)
         return FORWARD_RELEASED[removal].format(serial=serial, port=port)
+
+    def _forget_forward(self, serial: str) -> None:
+        # A phone_connect during the adb calls can have made a new forward: keep that one.
+        if self.forwarded_serial == serial:
+            self.forwarded_serial = None
 
     def reset_phone_syncs(self) -> None:
         """A new phone_connect: try the newer endpoints again (the app can have an update)."""
@@ -1021,7 +1049,7 @@ def register_phone_tools(server: MCPServer, services: Services) -> None:
         if flip_horizontal is None and flip_vertical is None:
             # Only read: no save and no push to the phone, so a read never undoes another client's flips (B-S5).
             return services.orientation.current
-        orientation = services.orientation.update(flip_horizontal, flip_vertical)
+        orientation = await services.orientation.save(flip_horizontal, flip_vertical)
         # The phone preview follows (only the camera image; the app's text stays readable).
         with services.camera_command():
             pushed = await services.preview_sync.push()
@@ -1067,7 +1095,7 @@ def register_camera_tools(server: MCPServer, services: Services) -> None:
         mode failed; the camera runs normally). The choice persists and comes back after an app restart. Take a
         fresh phone_snapshot after the change; this is not optical zoom.
         """
-        services.in_sensor_zoom.set(enabled)
+        await services.in_sensor_zoom.save(enabled)
         with services.camera_command(), tool_errors():
             status = await services.in_sensor_zoom_sync.send()
         await services.scene.unwatched_view_change("in-sensor zoom")
@@ -1081,7 +1109,7 @@ def register_camera_tools(server: MCPServer, services: Services) -> None:
         `af_mode` in the result is the mode now. A phone without the macro mode stays `continuous`. The choice
         persists and comes back after an app restart. Take a fresh phone_snapshot after the change.
         """
-        services.af_mode.set(mode)
+        await services.af_mode.save(mode)
         with services.camera_command(), tool_errors():
             status = await services.af_mode_sync.send()
         report = PhoneStatusReport.of(status)
@@ -1353,7 +1381,13 @@ def build_server(
     register_evidence_tools(server, services.captures)
     register_bench_measure_tools(server, services)
     register_webcam_control_tools(server, services.webcam_controls)
-    register_bench_state_tools(server, services.bench, services.captures)
+
+    async def open_board() -> Board | None:
+        # The residual point names are checked against the open board (after a restart, the board of the last session).
+        await services.board.restore()
+        return services.board.board
+
+    register_bench_state_tools(server, services.bench, services.captures, open_board)
     services.connect_board()
     register_board_tools(server, services.board)
     if monitor is not None:

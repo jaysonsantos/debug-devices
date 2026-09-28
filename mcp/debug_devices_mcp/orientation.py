@@ -191,23 +191,40 @@ class OrientationState:
     def add_listener(self, listener: OrientationListener) -> None:
         self._listeners.append(listener)
 
-    def update(self, flip_horizontal: bool | None = None, flip_vertical: bool | None = None) -> SnapshotOrientation:
-        """Change the given flips (None keeps a flip), save, and tell the listeners."""
+    def _updated(self, flip_horizontal: bool | None, flip_vertical: bool | None) -> SnapshotOrientation:
         before = self.current
-        updated = SnapshotOrientation(
+        return SnapshotOrientation(
             flip_horizontal=before.flip_horizontal if flip_horizontal is None else flip_horizontal,
             flip_vertical=before.flip_vertical if flip_vertical is None else flip_vertical,
         )
+
+    def _tell(self, updated: SnapshotOrientation) -> SnapshotOrientation:
         self._value = updated
+        self._seen = updated
+        for listener in self._listeners:
+            listener(updated)
+        return updated
+
+    def update(self, flip_horizontal: bool | None = None, flip_vertical: bool | None = None) -> SnapshotOrientation:
+        """Change the given flips (None keeps a flip), save, and tell the listeners. For code without an event loop;
+        on the event loop, `save`."""
+        updated = self._updated(flip_horizontal, flip_vertical)
         if self._store is not None:
             try:
                 self._store.update(lambda saved: saved.model_copy(update={"snapshot_orientation": updated}))
             except OSError as exc:
                 logger.warning("cannot save the snapshot orientation: %s", exc)
-        self._seen = updated
-        for listener in self._listeners:
-            listener(updated)
-        return updated
+        return self._tell(updated)
+
+    async def save(self, flip_horizontal: bool | None = None, flip_vertical: bool | None = None) -> SnapshotOrientation:
+        """`update` for code on the event loop: the file lock wait runs in a worker thread (N3 of QA round 6)."""
+        updated = self._updated(flip_horizontal, flip_vertical)
+        if self._store is not None:
+            try:
+                await self._store.update_async(lambda saved: saved.model_copy(update={"snapshot_orientation": updated}))
+            except OSError as exc:
+                logger.warning("cannot save the snapshot orientation: %s", exc)
+        return self._tell(updated)
 
 
 class PreviewSync:

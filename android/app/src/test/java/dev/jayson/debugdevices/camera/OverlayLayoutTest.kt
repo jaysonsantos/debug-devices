@@ -215,6 +215,21 @@ class OverlayLayoutTest {
     }
 
     @Test
+    fun `the label band is measured only for the current orientation (N8, N10)`() {
+        // Safe area 1080 x 2115 (portrait), label bottom 163, gap 12.
+        assertEquals(175f, OverlayLayout.labelBand(1080, 1080, 2115, 0, 163, 12f))
+        assertEquals(175f, OverlayLayout.labelBand(1080, 1080, 2115, 180, 163, 12f))
+        // Sideways the turned container is as wide as the safe area is high.
+        assertEquals(64f, OverlayLayout.labelBand(2115, 1080, 2115, 90, 52, 12f))
+        // Right after a turn, the container still has the old width: not measured yet.
+        assertNull(OverlayLayout.labelBand(1080, 1080, 2115, 90, 163, 12f))
+        assertNull(OverlayLayout.labelBand(2115, 1080, 2115, 0, 52, 12f))
+        // The safe area has no size yet.
+        assertNull(OverlayLayout.labelBand(0, 0, 0, 0, 0, 12f))
+        assertNull(OverlayLayout.labelBand(1080, 1080, 0, 0, 0, 12f))
+    }
+
+    @Test
     fun `from viewer is the inverse of to viewer`() {
         val r = PixelRect(100f, 200f, 150f, 260f)
         for (degrees in listOf(0, 90, 180, 270)) {

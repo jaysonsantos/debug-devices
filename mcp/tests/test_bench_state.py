@@ -1,6 +1,7 @@
 """The local bench record (bench_state.py). Report: "P2: Keep a compact bench state"."""
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,8 +12,11 @@ from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 
+from debug_devices_mcp.bench_points import NAME_THE_POINT, PointNameError, point_name
 from debug_devices_mcp.bench_state import (
+    AC_RESIDUAL_NOTE,
     SAFE_RESIDUAL_VOLTS,
+    UNSAFE_AFTER_CONFIRMATION,
     USER_MODE_MAX_AGE,
     BenchState,
     BenchStateStore,
@@ -23,11 +27,14 @@ from debug_devices_mcp.bench_state import (
     recent_user_mode,
     residual_volts,
 )
+from debug_devices_mcp.board.dump import BoardDump
+from debug_devices_mcp.board.model import Board
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.constants import REPO_ROOT
 from debug_devices_mcp.multimeter import MeterMode, MeterResult, MeterStatus, MultimeterReading, check_reading
 from debug_devices_mcp.server import Services, build_server
 
+from .test_board import fixture
 from .test_meter_frames import DIODE_VOLTS, answers, confirm_mode
 from .test_multimeter import READING
 from .test_server import FakePhone, make_services, no_vision
@@ -96,7 +103,7 @@ async def test_safety_gate_for_a_resistance_step(bench: Bench) -> None:
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         no_residual = await refused(client, "bench_begin_step", step_id=step_id)
         residual = bench.add_meter(meter("dc_voltage", "mV", 12.0, "12.0"))
-        await call(client, "bench_record_measurement", capture_id=residual, label="residual voltage")
+        await call(client, "bench_record_measurement", capture_id=residual, label="C12.1")
         allowed = await call(client, "bench_begin_step", step_id=step_id)
         resistance = bench.add_meter(meter("resistance", "kΩ", 443.0, "443.0"))
         done = await call(client, "bench_record_measurement", capture_id=resistance, label="rail", step_id=step_id)
@@ -110,7 +117,7 @@ async def test_safety_gate_for_a_resistance_step(bench: Bench) -> None:
     assert done["next_step"] is None
     assert done["state"]["steps"][0]["done"] is True
     assert done["state"]["steps"][0]["evidence_id"] == resistance
-    assert [item["label"] for item in done["state"]["measurements"]] == ["residual voltage", "rail"]
+    assert [item["label"] for item in done["state"]["measurements"]] == ["C12.1", "rail"]
     assert done["state"]["measurements"][1]["confidence_state"] == "confirmed"
 
 
@@ -119,7 +126,7 @@ async def test_unsafe_residual_voltage_blocks(bench: Bench) -> None:
         state = await call(client, "bench_state_update", add_steps=[{"text": "Diode test", "kind": "diode"}])
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         high = bench.add_meter(meter("dc_voltage", "V", 5.1, "5.10"))
-        after = await call(client, "bench_record_measurement", capture_id=high, label="residual voltage")
+        after = await call(client, "bench_record_measurement", capture_id=high, label="C12.1")
         message = await refused(client, "bench_begin_step", step_id=state["next_step"]["step_id"])
 
     assert after["gate"]["unpowered_tests_allowed"] is False
@@ -130,9 +137,9 @@ async def test_residual_before_the_confirmation_does_not_count(bench: Bench) -> 
     early = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
     async with Client(bench.server) as client:
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
-        state = await call(client, "bench_record_measurement", capture_id=early, label="residual voltage")
+        state = await call(client, "bench_record_measurement", capture_id=early, label="C12.1")
 
-    assert state["state"]["power"]["residual"] is None
+    assert state["state"]["residual_points"] == []
     assert state["gate"]["unpowered_tests_allowed"] is False
 
 
@@ -141,7 +148,7 @@ async def test_probe_short_goes_back_to_the_power_check(bench: Bench) -> None:
         await call(client, "bench_state_update", add_steps=[{"text": "Continuity", "kind": "continuity"}])
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         residual = bench.add_meter(meter("dc_voltage", "V", 0.0, "0.00"))
-        await call(client, "bench_record_measurement", capture_id=residual, label="residual voltage")
+        await call(client, "bench_record_measurement", capture_id=residual, label="C12.1")
         state = await call(client, "bench_probe_short")
         continuity_id = state["state"]["steps"][1]["step_id"]
         blocked = await refused(client, "bench_begin_step", step_id=continuity_id)
@@ -161,7 +168,7 @@ async def test_power_check_step_completes_with_a_safe_residual(bench: Bench) -> 
         await call(client, "bench_probe_short")
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         residual = bench.add_meter(meter("dc_voltage", "V", 0.02, "0.02"))
-        state = await call(client, "bench_record_measurement", capture_id=residual, label="residual voltage")
+        state = await call(client, "bench_record_measurement", capture_id=residual, label="C12.1")
 
     assert state["state"]["steps"][0]["done"] is True
     assert state["next_step"] is None
@@ -250,7 +257,7 @@ async def test_measurement_keeps_the_power_state(bench: Bench) -> None:
     async with Client(bench.server) as client:
         await call(client, "bench_state_update", power="isolated", user_confirmed_isolation=True)
         residual = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
-        state = await call(client, "bench_record_measurement", capture_id=residual, label="residual voltage")
+        state = await call(client, "bench_record_measurement", capture_id=residual, label="C12.1")
 
     measurement = state["state"]["measurements"][0]
     assert measurement["power_state"] == "isolated"
@@ -338,37 +345,70 @@ async def test_a_safe_reading_at_another_point_does_not_hide_an_unsafe_one(bench
     async with Client(bench.server) as client:
         await call(client, "bench_probe_short")
         await isolate(client)
-        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12 positive side")
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
         other = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
-        again = await measure(client, bench, meter("dc_voltage", "mV", 8.0, "8.0"), "  c12 POSITIVE  side")
+        # The same point in another spelling: a newer safe reading, but the confirmation is older than the unsafe one.
+        same_point = await measure(client, bench, meter("dc_voltage", "mV", 8.0, "8.0"), "c12 pin 1")
+        await isolate(client)
+        after_new_confirmation = await measure(client, bench, meter("dc_voltage", "mV", 6.0, "6.0"), "C12.1")
 
     assert other["gate"]["unpowered_tests_allowed"] is False
-    assert any("5.10 V at 'C12 positive side' is not safe" in item for item in other["gate"]["missing"])
-    assert other["state"]["power"]["residual"]["label"] == "C12 positive side"
+    assert any("5.10 V at 'C12.1' is not safe" in item for item in other["gate"]["missing"])
     assert other["next_step"]["kind"] == "power_check"
-    # A new reading at the same point (the same label, any case and spaces) replaces the unsafe one.
-    assert again["gate"]["unpowered_tests_allowed"] is True
-    assert again["next_step"] is None
-    assert [point["label"] for point in again["state"]["power"]["residual_points"]] == [
-        "VBUS",
-        "  c12 POSITIVE  side",
-    ]
+    assert same_point["gate"]["unpowered_tests_allowed"] is False
+    assert same_point["gate"]["missing"] == [UNSAFE_AFTER_CONFIRMATION]
+    assert [point["point"] for point in same_point["state"]["residual_points"]] == ["vbus", "c12.1"]
+    assert after_new_confirmation["gate"]["unpowered_tests_allowed"] is True
+    assert after_new_confirmation["next_step"] is None
 
 
-async def test_the_highest_unsafe_point_decides_and_a_new_confirmation_clears_the_points(bench: Bench) -> None:
+async def test_a_new_confirmation_does_not_clear_an_unsafe_point(bench: Bench) -> None:
     async with Client(bench.server) as client:
         await isolate(client)
-        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "A")
-        both = await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "B")
-        one = await measure(client, bench, meter("dc_voltage", "V", 0.0, "0.00"), "B")
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        await measure(client, bench, meter("dc_voltage", "V", 12.0, "12.00"), "PP12V")
         await isolate(client)
-        cleared = await call(client, "bench_state")
+        elsewhere = await measure(client, bench, meter("dc_voltage", "V", 0.0, "0.00"), "VBUS")
+        one_left = await measure(client, bench, meter("dc_voltage", "V", 0.0, "0.00"), "PP12V")
+        after_short = await call(client, "bench_probe_short")
 
-    assert both["state"]["power"]["residual"]["label"] == "B"
-    assert len([item for item in both["gate"]["missing"] if "not safe" in item]) == 2
-    assert one["state"]["power"]["residual"]["label"] == "A"
-    assert cleared["state"]["power"]["residual_points"] == []
-    assert any("no residual-voltage measurement" in item for item in cleared["gate"]["missing"])
+    # The QA case: a safe reading at another point after a new confirmation does not open the gate.
+    assert elsewhere["gate"]["unpowered_tests_allowed"] is False
+    assert len([item for item in elsewhere["gate"]["missing"] if "is not safe" in item]) == 2
+    assert [item for item in one_left["gate"]["missing"] if "is not safe" in item] == [
+        item for item in elsewhere["gate"]["missing"] if "'C12.1'" in item
+    ]
+    # A probe short does not clear the points either.
+    assert [point["safe"] for point in after_short["state"]["residual_points"]] == [False, True, True]
+
+
+async def test_the_user_can_clear_one_point_with_a_reason(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "C12.1")
+        no_reason = await refused(client, "bench_state_update", clear_residual_point="C12.1")
+        unknown = await refused(client, "bench_state_update", clear_residual_point="C99.1", clear_residual_reason="x")
+        cleared = await call(
+            client,
+            "bench_state_update",
+            clear_residual_point="C12 pin 1",
+            clear_residual_reason="capacitor discharged with a resistor",
+        )
+        await isolate(client)
+        opened = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS")
+
+    assert "clear_residual_reason" in no_reason
+    assert "no residual point 'C99.1'" in unknown
+    point = cleared["state"]["residual_points"][0]
+    assert (point["safe"], point["source_id"], point["user_reason"]) == (
+        True,
+        None,
+        "capacitor discharged with a resistor",
+    )
+    assert cleared["state"]["residual_clearances"][0]["reason"] == "capacitor discharged with a resistor"
+    # The clearance counts for its point; the gate still needs a new confirmation and a safe DC reading after it.
+    assert cleared["gate"]["unpowered_tests_allowed"] is False
+    assert opened["gate"]["unpowered_tests_allowed"] is True
 
 
 async def test_a_power_check_step_needs_a_safe_residual_after_the_confirmation(bench: Bench) -> None:
@@ -378,16 +418,21 @@ async def test_a_power_check_step_needs_a_safe_residual_after_the_confirmation(b
         before = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS", step_id=check_id)
         await isolate(client)
         unsafe = await measure(client, bench, meter("dc_voltage", "V", 5.1, "5.10"), "VBUS", step_id=check_id)
-        safe = await measure(client, bench, meter("dc_voltage", "V", 0.02, "0.02"), "VBUS", step_id=check_id)
+        too_early = await measure(client, bench, meter("dc_voltage", "V", 0.02, "0.02"), "VBUS", step_id=check_id)
+        await isolate(client)
+        safe = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "VBUS", step_id=check_id)
 
     assert before["next_step"]["step_id"] == check_id
-    assert before["notice"].startswith(f"step {check_id} stays open: a power check needs a voltage reading after")
+    assert before["notice"].startswith(f"step {check_id} stays open: a power check needs a DC voltage reading after")
     assert unsafe["next_step"]["step_id"] == check_id
     assert "5.10 V at 'VBUS' is not safe" in unsafe["notice"]
     # The unsafe reading is in the record and blocks the gate.
     assert unsafe["state"]["measurements"][-1]["display_text"] == "5.10"
     assert unsafe["gate"]["unpowered_tests_allowed"] is False
-    assert safe["notice"] is None
+    # A newer safe reading at the point, but the confirmation is older than the unsafe reading.
+    assert too_early["notice"].startswith(f"step {check_id} stays open: {UNSAFE_AFTER_CONFIRMATION}")
+    # Without a board, only the warning about the point name stays.
+    assert safe["notice"].startswith("no board is open, so 'VBUS' is not checked")
     assert safe["next_step"] is None
     assert safe["state"]["steps"][0]["evidence_id"] == safe["state"]["measurements"][-1]["source_id"]
 
@@ -469,6 +514,165 @@ async def test_a_reading_replaces_an_expired_user_mode(bench: Bench) -> None:
         "resistance",
         "reading",
     )
+
+
+# endregion
+
+
+# region: QA round 6, only DC V is the residual check (N5), and a refused step keeps the reading (N6)
+
+
+async def test_an_ac_reading_is_recorded_but_does_not_open_the_gate(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_probe_short")
+        check_id = state["next_step"]["step_id"]
+        await isolate(client)
+        with_step = await measure(client, bench, meter("ac_voltage", "V", 0.01, "0.01"), "C12", step_id=check_id)
+        without_step = await measure(client, bench, meter("ac_voltage", "mV", 3.0, "3.0"), "VBUS")
+
+    assert with_step["notice"] == f"step {check_id} stays open: {AC_RESIDUAL_NOTE}"
+    assert with_step["next_step"]["step_id"] == check_id
+    assert with_step["state"]["measurements"][-1]["mode"] == "ac_voltage"
+    assert without_step["notice"] == AC_RESIDUAL_NOTE
+    assert without_step["gate"]["unpowered_tests_allowed"] is False
+    assert without_step["state"]["residual_points"] == []
+    assert AC_RESIDUAL_NOTE.startswith("residual check needs DC V")
+
+
+async def test_an_unsafe_ac_reading_still_blocks_the_gate(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        await isolate(client)
+        await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12.1")
+        mains = await measure(client, bench, meter("ac_voltage", "V", 230.0, "230.0"), "VBUS")
+        await isolate(client)
+        dc_again = await measure(client, bench, meter("dc_voltage", "V", 0.02, "0.02"), "VBUS")
+
+    assert mains["gate"]["unpowered_tests_allowed"] is False
+    assert any("230.0 V at 'VBUS' is not safe" in item for item in mains["gate"]["missing"])
+    # A new confirmation and a safe DC reading at the same point clear it.
+    assert dc_again["gate"]["unpowered_tests_allowed"] is True
+
+
+@pytest.mark.parametrize("wrong_step", ["resistance step", "unknown step id"])
+async def test_a_refused_step_keeps_the_unsafe_reading(bench: Bench, wrong_step: str) -> None:
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_state_update", add_steps=[{"text": "Rail to GND", "kind": "resistance"}])
+        resistance_id = state["next_step"]["step_id"]
+        await isolate(client)
+        opened = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12")
+        unsafe = bench.add_meter(meter("dc_voltage", "V", 5.1, "5.10"))
+        step_id = resistance_id if wrong_step == "resistance step" else "no-such-step"
+        refusal = await refused(client, "bench_record_measurement", capture_id=unsafe, label="VBUS", step_id=step_id)
+        blocked = await refused(client, "bench_begin_step", step_id=resistance_id)
+        again = await call(client, "bench_record_measurement", capture_id=unsafe, label="VBUS")
+
+    assert opened["gate"]["unpowered_tests_allowed"] is True
+    assert "recorded without the step" in refusal
+    assert "not safe" in blocked
+    # The retry of the same capture id does not add it again.
+    assert [item["display_text"] for item in again["state"]["measurements"]] == ["0.01", "5.10"]
+    assert again["state"]["measurements"][-1]["step_id"] is None
+    assert again["gate"]["unpowered_tests_allowed"] is False
+
+
+async def test_a_refused_unsafe_reading_first_then_a_safe_one_elsewhere_keeps_the_gate_closed(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_state_update", add_steps=[{"text": "Rail to GND", "kind": "resistance"}])
+        resistance_id = state["next_step"]["step_id"]
+        await isolate(client)
+        unsafe = bench.add_meter(meter("dc_voltage", "V", 5.1, "5.10"))
+        await refused(client, "bench_record_measurement", capture_id=unsafe, label="VBUS", step_id=resistance_id)
+        safe = await measure(client, bench, meter("dc_voltage", "V", 0.01, "0.01"), "C12")
+
+    assert safe["gate"]["unpowered_tests_allowed"] is False
+    assert any("5.10 V at 'VBUS' is not safe" in item for item in safe["gate"]["missing"])
+
+
+async def test_a_refused_reading_that_is_not_a_residual_changes_nothing(bench: Bench) -> None:
+    async with Client(bench.server) as client:
+        state = await call(client, "bench_state_update", add_steps=[{"text": "Rail voltage", "kind": "voltage"}])
+        voltage_id = state["next_step"]["step_id"]
+        ohms = bench.add_meter(meter("resistance", "k\u03a9", 443.0, "443.0"))
+        message = await refused(client, "bench_record_measurement", capture_id=ohms, label="R12", step_id=voltage_id)
+        after = await call(client, "bench_state")
+
+    assert "is a voltage step" in message
+    assert "recorded without the step" not in message
+    assert after["state"]["measurements"] == []
+
+
+# endregion
+
+
+# region: QA round 6, the B-E3 decision: a residual label names one point (rule 1)
+
+
+def identity_board() -> Board:
+    """Synthetic open fixture (mcp/tests/fixtures/boardview/identity.json): C8850 pins 1-2, net PP_SYN_1V0."""
+    return Board(BoardDump.model_validate_json(fixture("identity.json")), "sha")
+
+
+@pytest.mark.parametrize(
+    ("label", "key"),
+    [("C8850.1", "c8850.1"), ("c8850 pin 2", "c8850.2"), ("C8850:1", "c8850.1"), ("pp_syn_1v0", "pp_syn_1v0")],
+)
+def test_a_board_point_name_is_a_part_pin_or_a_net(label: str, key: str) -> None:
+    name = point_name(label, identity_board())
+    assert (name.key, name.warning) == (key, None)
+
+
+@pytest.mark.parametrize(
+    ("label", "problem"),
+    [
+        ("C8850", "is a part; name its pin (C8850.1, C8850.2)"),
+        ("C8850.3", "C8850 has no pin '3'"),
+        ("C9999.1", "is not a part pin or a net of the open board"),
+        ("PP_*", "is a pattern, not one point"),
+        ("C12 positive side", "is not a part pin or a net of the open board"),
+    ],
+)
+def test_a_name_that_is_not_one_board_point_is_refused(label: str, problem: str) -> None:
+    with pytest.raises(PointNameError, match=re.escape(problem)) as error:
+        point_name(label, identity_board())
+    assert str(error.value).startswith(NAME_THE_POINT)
+
+
+@pytest.mark.parametrize("label", ["residual", "Residual voltage", "test", "point", "test point 3", "", "   "])
+@pytest.mark.parametrize("with_board", [True, False])
+def test_a_generic_name_is_refused_with_and_without_a_board(label: str, with_board: bool) -> None:
+    with pytest.raises(PointNameError, match=re.escape(NAME_THE_POINT)):
+        point_name(label, identity_board() if with_board else None)
+
+
+def test_without_a_board_a_free_name_has_a_warning() -> None:
+    name = point_name("C12 pin 1", None)
+    assert name.key == "c12.1"
+    assert name.warning is not None
+    assert "use this name only for this one point" in name.warning
+
+
+async def test_the_same_generic_label_at_two_points_cannot_open_the_gate(bench: Bench) -> None:
+    bench.services.board.board = identity_board()
+    async with Client(bench.server) as client:
+        await isolate(client)
+        unsafe = bench.add_meter(meter("dc_voltage", "V", 5.1, "5.10"))
+        refusal = await refused(client, "bench_record_measurement", capture_id=unsafe, label="residual")
+        safe = bench.add_meter(meter("dc_voltage", "V", 0.01, "0.01"))
+        generic_safe = await refused(client, "bench_record_measurement", capture_id=safe, label="residual")
+        named = await call(client, "bench_record_measurement", capture_id=safe, label="C8850 pin 1")
+        named_unsafe = await call(client, "bench_record_measurement", capture_id=unsafe, label="C8850.1")
+
+    assert "name the point: part.pin or net" in refusal
+    assert "closed the safety gate until the user confirms the isolation again" in refusal
+    assert "closed the safety gate" not in generic_safe
+    # The refused unsafe reading still counts: the confirmation is older than it.
+    assert named["notice"] is None
+    assert named["gate"]["missing"] == [UNSAFE_AFTER_CONFIRMATION]
+    assert [item["label"] for item in named["state"]["measurements"]] == ["C8850 pin 1"]
+    # Both spellings are one point: the newer unsafe reading replaces the safe one.
+    assert [(point["point"], point["safe"]) for point in named_unsafe["state"]["residual_points"]] == [
+        ("c8850.1", False)
+    ]
 
 
 # endregion

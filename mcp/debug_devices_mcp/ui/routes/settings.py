@@ -38,7 +38,7 @@ async def put_settings(request: Request) -> JSONResponse:
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
     before = monitor.effective.webcam_crop
-    monitor.update_settings(saved)
+    await monitor.save_settings(saved)
     await monitor.log_crop_change(before)
     return json_response(settings_view(monitor))
 
@@ -46,7 +46,7 @@ async def put_settings(request: Request) -> JSONResponse:
 async def delete_crop(request: Request) -> JSONResponse:
     monitor = monitor_of(request)
     before = monitor.effective.webcam_crop
-    monitor.update_settings(monitor.saved.model_copy(update={"webcam_crop": None}))
+    await monitor.save_settings(monitor.saved.model_copy(update={"webcam_crop": None}))
     await monitor.log_crop_change(before)
     return json_response(settings_view(monitor))
 

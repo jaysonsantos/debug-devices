@@ -9,7 +9,6 @@ from pydantic import BaseModel
 
 from debug_devices_mcp.constants import defaults
 from debug_devices_mcp.multimeter import (
-    MINUS_SIGNS,
     FrameReading,
     MeterMode,
     MeterResult,
@@ -174,12 +173,12 @@ def unit_key(unit: str) -> tuple[UnitFamily, str] | None:
 
 
 def sign_key(display_text: str) -> bool | None:
-    """True for a minus sign; None for a zero or no digits (a meter can show "-0.00" and "0.00" at zero)."""
-    digits, _ = signature(display_text)
+    """True for a negative number, with the rule of `signed_value` (a minus anywhere before the first digit, as in
+    "DC -5.10"); None for a zero or no digits (a meter can show "-0.00" and "0.00" at zero)."""
+    digits, point = signature(display_text)
     if not digits.strip("0"):
         return None
-    text = display_text.replace(" ", "")
-    return text[:1] in MINUS_SIGNS
+    return signed_value(display_text, digits, point) < 0
 
 
 def disagreements(readable: list[MeterResult]) -> list[str]:

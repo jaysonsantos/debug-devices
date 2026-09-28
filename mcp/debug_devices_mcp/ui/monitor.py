@@ -42,7 +42,15 @@ from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details,
 from debug_devices_mcp.ui.desktop import BrowserOpener
 from debug_devices_mcp.ui.device_panel import DevicePanel
 from debug_devices_mcp.ui.events import CallSource, CallStatus, EventBus, ToolCall, current_call, truncate
-from debug_devices_mcp.ui.forward import CallForwarder, origin_label, remove_token, token_dir, write_token
+from debug_devices_mcp.ui.forward import (
+    CallForwarder,
+    IngestOverlay,
+    RemoteOverlays,
+    origin_label,
+    remove_token,
+    token_dir,
+    write_token,
+)
 from debug_devices_mcp.ui.remote_screen import RemoteScreen, ScreenStartResult
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
 from debug_devices_mcp.ui.version import code_version
@@ -248,6 +256,9 @@ class Monitor:
     markings_setter: Callable[[bool], Awaitable[Any]] | None = None
     # The MCP client name from initialize (for example "codex").
     client_name: str | None = None
+    # The serial of the phone that the user selected (page, then config); setup sets it. The ingest route streams only
+    # this phone for a secondary server.
+    selected_serial: Callable[[], str] | None = None
     # The flips that `last_snapshot` has (the flips when it was taken); a new snapshot sets it.
     last_snapshot_flips: SnapshotOrientation = SnapshotOrientation()
 
@@ -312,8 +323,8 @@ class Monitor:
         self.phone_selection: PhoneSelection | None = None
         # Changes with each server start and each change of the page files: an open page reloads itself.
         self.code_version = code_version()
-        # The newest overlay number of each secondary origin (IngestOverlay.seq).
-        self._remote_overlay_seq: dict[str, int] = {}
+        # The boxes and arrows of secondary servers: their order and their lifetime (forward.RemoteOverlays).
+        self.remote_overlays = RemoteOverlays(self._forget_remote_overlay)
         self.forwarder: CallForwarder | None = None
         self.token_dir: Path = token_dir()
         self.ingest_token: str | None = None
@@ -485,7 +496,8 @@ class Monitor:
         also sends them to the primary's page (in the background: a slow primary never slows a tool)."""
         self.bus.update_phone(highlights=boxes, arrows=arrows, overlay_origin=None)
         if self.forwarder is not None and self.is_secondary():
-            self.forwarder.send_overlay_soon(boxes, arrows)
+            status = self.bus.phone.status
+            self.forwarder.send_overlay_soon(boxes, arrows, status.app_start_id if status is not None else None)
 
     def markings_changed(self, visible: bool) -> None:
         """Listener for `MarkingsChoice` (also a change through another server): the page hides or shows."""
@@ -501,15 +513,19 @@ class Monitor:
             call.summary = f"{'shown' if result.visible else 'hidden'}; phone: {result.phone}"
         self.bus.update_phone(markings_visible=result.visible, markings_phone=result.phone)
 
-    def remote_overlay(self, origin: str, boxes: list[OverlayBox], arrows: list[OverlayArrow], seq: int = 0) -> bool:
+    def remote_overlay(self, overlay: IngestOverlay) -> bool:
         """The boxes and arrows of a secondary server (the ingest route). False: an older change that came after a
         newer one (dropped)."""
-        if seq:
-            if seq <= self._remote_overlay_seq.get(origin, 0):
-                return False
-            self._remote_overlay_seq[origin] = seq
-        self.bus.update_phone(highlights=boxes, arrows=arrows, overlay_origin=origin)
+        if not self.remote_overlays.accept(overlay):
+            return False
+        self.bus.update_phone(highlights=overlay.boxes, arrows=overlay.arrows, overlay_origin=overlay.origin)
         return True
+
+    def _forget_remote_overlay(self, origin: str) -> None:
+        """The app forgot the boxes of this secondary (OVERLAY_TTL, or another app run): the page too."""
+        if self.bus.phone.overlay_origin == origin:
+            logger.info("the boxes of %s are gone on the phone: removed from the page", origin)
+            self.bus.update_phone(highlights=[], arrows=[], overlay_origin=None)
 
     # region: phone screen of a secondary
 
@@ -544,6 +560,8 @@ class Monitor:
 
     async def app_restarted(self, notice: RestartNotice | None) -> None:
         self.bus.update_phone(restart_notice=notice)
+        if notice is not None:
+            self.remote_overlays.app_run(notice.app_start_id)
 
     def remote_board(self) -> RemoteBoard | None:
         """The last board that another MCP server opened (its board_open call came to this page)."""
@@ -575,7 +593,9 @@ class Monitor:
 
     def _phone_status(self, structured: dict[str, Any]) -> None:
         try:
-            self.bus.update_phone(status=CameraStatus.model_validate(structured))
+            status = CameraStatus.model_validate(structured)
+            self.bus.update_phone(status=status)
+            self.remote_overlays.app_run(status.app_start_id)
         except ValidationError as exc:
             logger.warning("unexpected camera status: %s", exc)
 
@@ -586,6 +606,7 @@ class Monitor:
             logger.warning("unexpected phone_connect result: %s", exc)
             return
         self.bus.update_phone(serial=connected.serial, status=connected.status)
+        self.remote_overlays.app_run(connected.status.app_start_id)
         self._start_status_poll()
         remote = await self._use_primary_screen(connected.serial)
         if remote is not None:
@@ -616,6 +637,14 @@ class Monitor:
         return self.effective.webcam_crop
 
     def update_settings(self, saved: UiSettings) -> EffectiveSettings:
+        """Save the page settings (for code without an event loop; the routes use `save_settings`)."""
+        return self._apply_settings(self._store.update(self._keep_owned(saved)))
+
+    async def save_settings(self, saved: UiSettings) -> EffectiveSettings:
+        """`update_settings` on the event loop: the file lock wait runs in a worker thread (N3 of QA round 6)."""
+        return self._apply_settings(await self._store.update_async(self._keep_owned(saved)))
+
+    def _keep_owned(self, saved: UiSettings) -> Callable[[UiSettings], UiSettings]:
         # The values that other parts own (the flips, the camera choices, the Markings toggle, the selected phone)
         # come from the file under the lock, not from this page: a save of the other settings never writes an old
         # value of them (B-W9 and B-S8 of QA round 4). The owner's value is the fallback when the file has none.
@@ -635,8 +664,10 @@ class Monitor:
                 update={name: fallback if values[name] is None else values[name] for name, fallback in owned.items()}
             )
 
+        return keep_owned
+
+    def _apply_settings(self, saved: UiSettings) -> EffectiveSettings:
         old = self.effective
-        saved = self._store.update(keep_owned)
         self.saved = saved
         self.effective = self._start_settings.with_saved(saved)
         if self.stream is not None and old.webcam_warmup_frames != self.effective.webcam_warmup_frames:
@@ -923,6 +954,7 @@ class Monitor:
                 continue
             if status != self.bus.phone.status:
                 self.bus.update_phone(status=status)
+            self.remote_overlays.app_run(status.app_start_id)
 
     def screen_changed(self, state: ScreenState) -> None:
         """Listener for `PhoneScreen`: show the stream state on the page."""

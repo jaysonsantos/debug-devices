@@ -787,3 +787,142 @@ New findings (overlay and contract):
 2. Contract: N8 (return the `preview_region` null rule, or change the contract), and the text of C6 and C9 in `docs/phone-api.md`, `docs/phone-api.md:78` (C13), `mcp/README.md:17` (C16), and `mcp/README.md:110`.
 3. C11 (a) and (b): forget the boxes of a secondary server and of an old app after the TTL.
 4. On the real phone: `--after-start` and `--expect starting-race` after an app restart, when the user allows a restart.
+
+## Round 7: contract text after the final run
+
+The contract changed after `fe0ecdb`. I changed only `scripts/fake_phone.py`, `scripts/qa_contract.py`, and `docs/qa.md`. Not committed.
+
+- `overlay_region` can now be `null` while `preview_region` is set (the safe area is not measured yet). It must be `null` when `preview_region` is `null`.
+  - `qa_contract.py`: every status checks only the second rule now. The `--strict` check `overlay_region` waits up to 2 s for a value. When it stays `null`, the check passes with the note "the safe area is not measured".
+  - `fake_phone.py`: new mode `--safe-area-unmeasured` (and self-check mode "safe area unmeasured").
+- 500 `capture_failed` when the app cannot turn the still: app side only. The fake mode `--capture-fails` and `check_capture_failed` already cover the error code. No change.
+- `python3 scripts/fake_phone.py --self-check`: PASSED in 12 modes (the new mode 30/30). ruff is clean.
+- I wait for the check of `docs/briefs/qa-round6-followup.md`.
+
+### Round 7, part 2: an empty `overlay_region`
+
+The contract says: a measured safe area with no room gives `width` 0 or `height` 0, not `null`, and clients do not fall back to `preview_region`.
+
+- `qa_contract.py`: the region format check accepts a zero width or height for `overlay_region` only (`preview_region` must still have a size). The `--strict` check `overlay_region` still checks "inside `preview_region`"; for an empty region it does not ask for a move with a vertical flip, and it notes "empty (measured, no room)".
+- `fake_phone.py`: new mode `--safe-area-empty` (self-check mode "safe area empty"): the label band reaches the navigation bar, so `overlay_region` has height 0 (`{0.2, 0.94, 0.6, 0}`; with a vertical flip `{0.2, 0.06, 0.6, 0}`).
+- `python3 scripts/fake_phone.py --self-check`: PASSED in 13 modes. ruff is clean.
+
+## Round 8: follow-up check
+
+Date: 2026-09-28. Scope: `docs/briefs/qa-round6-followup.md` (all sections, with the B-E3 decision) and the contract changes (C6, C9, C13/N9, N8, empty `overlay_region`, C15 text). The working tree at `fe0ecdb` with the uncommitted follow-up fixes. All other agents had stopped editing. I did not change product code or my scripts. I corrected one row of my `docs/qa.md` (see C16). I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 909 passed, 1 skipped |
+| `nix develop --command boardview/tests/run.sh` | 13 passed, 1 skipped |
+| `nix develop --command prek run --all-files` (on a copy of the working tree, new files added in the copy only) | All hooks pass. No hook changed a file. |
+| `(cd android && nix develop .. --command ./gradlew --no-daemon assembleDebug testDebugUnitTest)` | BUILD SUCCESSFUL (`UP-TO-DATE`). Forced `testDebugUnitTest --rerun`: BUILD SUCCESSFUL, 165 tests in 15 suites, 0 failures. |
+
+### 2. QA scripts
+
+| Command | Result |
+|---|---|
+| `python3 scripts/fake_phone.py --self-check` | PASSED in 13 modes (default 30/30, "safe area unmeasured" 30/30, "safe area empty" 30/30) |
+| `python3 scripts/fake_phone.py --port 18896`, then `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18896 --strict --after-start` | 30/30 |
+| `uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` (server with `--no-ui`) | 15/15, with `fire-tv` ("no phone is selected", no command to the fake Fire TV) |
+
+### 3. Re-check of the follow-up items
+
+Three read-only agents re-checked every item against the code and the contract text. I checked the main findings in the code myself ("checked"). All fixes are in uncommitted files. Paths are in `mcp/debug_devices_mcp/` unless they start with another directory; `A/` and `AT/` are the Android source and test directories.
+
+#### Bench safety and meter (N5, N6, B-E2, B-E3, N7)
+
+`uv run pytest -q mcp/tests/test_bench_state.py mcp/tests/test_meter_frames.py mcp/tests/test_webcam_controls.py mcp/tests/test_qa_round6.py`: 114 passed. The reviewer also ran each QA case in memory (a temporary directory for the state file).
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N5 | fixed | `bench_state.py:44-50`, `:337-349`, `:419-423`, `:452`, `:464-465`; tests `test_bench_state.py:525`, `:542` | AC 0.01 V after isolation with the power-check step: recorded, note "residual check needs DC V", the step stays open, the gate stays closed. AC 0.60 V counts as unsafe and closes the gate. |
+| N6 | fixed | `bench_state.py:352-353`, `:441-451`, `:504-506`, tool `:699-703` (save, then refuse); tests `test_bench_state.py:557`, `:578`, `:591` | Both orders pass: "VBUS 5.10 V" with a resistance step is refused with "recorded without the step" and closes the gate; an unknown step first, then a safe reading elsewhere: gate closed. After a reload of the file, the point stays unsafe. See N13. |
+| B-E2 | fixed | `meter_frames.py:175-181`, `:190`; tests `test_meter_frames.py:201-226` | "DC -5.10" + "DC 5.10": disputed (both orders). "−5.10" (U+2212) + "5.10", "- 5.10" + "5.10", "-0.01" + "0.01": disputed. "-0.00" + "0.00": confirmed. |
+| B-E3 rule 1 (label = part.pin or net) | fixed, low gap | `bench_points.py:15-17`, `:41-42`, `:52-82`, `bench_state.py:375-387`, `:424`, `server.py:1385-1390`; tests `test_bench_state.py:619-654` | With a board: "C12.1", "c12 pin 1", "C12:1" give one key; a bare part, a missing pin, and free text are refused. Without a board, `is_generic` accepts "residual1", "test1", "point-A", ".", and "?" with a warning only (with a board they are refused). |
+| B-E3 rule 2 (the gate rule) | **partly** | `bench_state.py:185-190`, `:246-279`, `:535-545`, `:585-592`; tests `test_bench_state.py:344`, `:365`, `:414`, `:542` | The QA case "safe reading at another point after a new confirmation" passes (gate closed). Three cases still open the gate: (a) `:419-421`: confirm, capture "C12.1" 5.10 V, the user confirms again, then record that capture: "ok", but no unsafe point is kept; then "VBUS" 0.01 V opens the gate. (b) `:378-386`, the QA case "same generic label at two points": with a board, "residual" 5.10 V is refused and sets only `last_unsafe_at`, no point; after a new confirmation, "C12.1" 0.01 V opens the gate; a later record of the 5.10 V capture as "C12.2" is "ok" but adds no point (older than the confirmation). (c) `:250-252` replaces a point with no time check: 0.01 V at t1 and 5.10 V at t2, both at "C12.1"; record t2, then t1: the point becomes safe with the older reading; a new confirmation and "VBUS" 0.01 V open the gate. |
+| B-E3 rule 3 (user clears one point) | fixed | `bench_state.py:469-497`, `:633-634`, `:667-668`; test `test_bench_state.py:385` | An empty reason, an unknown point, or "residual" is refused. The clearance counts only for that point; the gate still needs a newer confirmation. |
+| N7 | fixed (QA case), low rest | `webcam_controls.py:66-74`, `:201`; test `test_qa_round6.py:181` | Auto on, then `exposure=900`: camera and file both manual 900, also after a restart. Rest: one call with `auto_exposure=true, exposure=900` sets the camera to auto but saves `exposure: 900` (`:70-74` has no case for both); a file from before the fix (`auto_exposure: true, exposure: 900`) is not migrated. |
+
+New findings (bench):
+
+- **N13 (safety, medium, checked): an unsafe voltage reading that is not "confirmed" does not close the gate.** `bench_state.py:412-416` refuses a result that is not confirmed before any gate logic, and `multimeter_read` does not change the bench state. Case: the gate is open after "C12.1" 0.01 V; then "VBUS" frames "DC -5.10" + "DC 5.10" (now disputed, because of the B-E2 fix) or "5.10" + "5.12" (uncertain): `bench_record_measurement` refuses, the gate stays open, and a resistance step is allowed. Before the B-E2 fix, the first case was a confirmed -5.1 V that closed the gate. Fix: a voltage result above the safe limit after the confirmation closes the gate (sets `last_unsafe_at` or an unsafe point, and saves), also when it is not confirmed.
+- **N14 (low): one capture can clear several points.** `bench_state.py:425` returns the stored measurement for a repeated capture id, and `:429-438` sets a point from the new label. Case: "C12.1" 5.10 V, new confirmation, a 0.01 V capture recorded as "VBUS", then the same capture recorded as "C12.1": gate open.
+- **N15 (design question): an unsafe reading from before the current confirmation never becomes a residual point** (`bench_state.py:419`). Case: power unknown, "C12.1" 12.00 V, isolate and confirm, then "VBUS" 0.01 V: gate open. Rule 2 says "every label whose latest reading was unsafe"; that can include a reading taken with power on.
+- **N16 (low): the net "GND" is a valid residual point** (`bench_points.py:67-69`). A reading at GND is always about 0 V, so it gives "one safe DC reading after the confirmation". Other unsafe points still block the gate.
+- **N17 (low): a refused step can open the gate but leave the power-check step open** (`bench_state.py:441-448` raises before `:464-465`). The refusal also says "do not record it again", so the step stays open until another reading.
+
+#### Android and contract (N8, N9/C13, N10, C6, C9, empty `overlay_region`)
+
+`uv run pytest -q mcp/tests/test_overlay_region.py mcp/tests/test_highlight.py mcp/tests/test_phone_api.py mcp/tests/test_pointing.py`: 48 passed. The Android tests pass in the Gradle run (1.).
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N9 + C13 | fixed | `A/JpegTurner.kt:26-39` (no turn: the same bytes; a failed decode, encode, or out-of-memory: `ApiException(CAPTURE_FAILED, "could not turn the still")`, `A/Constants.kt:154`), `A/CameraController.kt:781`; tests `AT/JpegTurnerTest.kt:20-54`. Contract `docs/phone-api.md:78-79` agrees (the old "can carry this as its EXIF orientation" is gone). Real phone: turned pixels, EXIF absent or 1. | The real `BitmapPixelTurner` has no unit test (the tests use fakes). The client still applies EXIF (`M/images.py:35`, `:97-115`), although `docs/phone-api.md:79` says that clients do not read it; no effect with the new app. |
+| N10 | fixed (status reads) | `A/OverlayLayout.kt:462-475` (no label band until the overlay has the width of the new orientation), `A/MainActivity.kt:106-132`, `A/CameraController.kt:620`; test `AT/OverlayLayoutTest.kt:218-230` | The MainActivity wiring has no test. New N11 below: the rotation POST response itself has `null`. |
+| N8 + empty region | fixed | App: `A/CameraController.kt:614-623`, `A/Overlay.kt:367` (no room: size 0, not `null`); test `AT/OverlayLogicTest.kt:288-291`. Client: `M/phone_api.py:158-161`, `M/server.py:464-466`, `:551-552`, `M/pointing.py:499-500`, `M/highlight.py:107-118` (size 0: not visible, warning), `M/pointer.py:128-132`, page `app.js:1199`; tests `mcp/tests/test_overlay_region.py:87`, `:117`, `:129`, `:137` | Edge: `A/OverlayLayout.kt:470` returns `null`, not size 0, when the window has a size but the insets use all of it (`A/MainActivity.kt:107-108`, a very small split window). Clients then use `preview_region`. See also N12. |
+| C6 | fixed | `docs/phone-api.md:95`, `:101`, `docs/overlay-layout.md:24` agree; `A/OverlayView.kt:68-97`, `A/OverlayLayout.kt:142-146`, `:487`; test `AT/OverlayLayoutTest.kt:242-249` | – |
+| C9 | partly (text) | `docs/phone-api.md:100`: the zoom and flips contradiction is gone ("rotation and the screen size") | The null rule is still there two times on `docs/phone-api.md:100`: "`null` before the camera is bound." and at the end "It is `null` before the camera is bound or while the preview has no size." Remove the first one. |
+
+New findings (Android and contract):
+
+- **N11 (low, confirmed on the S22): the `POST /v1/rotation` response has `overlay_region: null` for a change between portrait and sideways.** `A/CameraController.kt:741-746` reads the status in the same main-thread block, before the layout pass of the new orientation (`A/MainActivity.kt:225-250`), so `labelBand` returns `null` (`A/OverlayLayout.kt:473`). On the phone: `{"degrees": 90}` and `{"degrees": 0}` both returned `null`; a status 1 s later had a region. The contract allows `null` only "while the safe area is not measured yet (the window has no size)". The client stores this `null` (`M/server.py:1007-1009`) until the next status and then uses `preview_region` (`M/pointing.py:442`); `phone_snapshot` reads a fresh status first, so the effect is small. Fix: extend the contract text, or answer after the layout pass. `mcp/tests/test_overlay_region.py:94` uses a fake that returns a region here.
+- **N12 (low): an empty region from the app is at the top-left corner of the preview** (`A/Overlay.kt:367`: `{preview.x, preview.y, 0, 0}`). The client takes the arrow angles and distances from the centre of the view (`M/pointer.py:176-178`), which is now that corner. Case: the label covers the safe area and the target is in the middle of the still: the arrow points down-right with the full distance. My fake gives a region with the width and a real y (`{0.2, 0.94, 0.6, 0}`), so the fake and the app differ. The contract does not say where an empty region is.
+- Cosmetic: an old comment at `A/MainActivity.kt:98` stays above the new one; `M/phone_api.py:120-123` (`PreviewRegion.empty`) is used only in tests.
+- Note: on the S22, `overlay_region` also changes with the status label text. It was `{0.192, 0.109, 0.615, 0.829}` and `{0.192, 0.091, 0.615, 0.847}` at the same rotation and flips, a few seconds apart. The contract says to read it again after a flip or rotation change only.
+
+#### Server and page (C11, C16, N2, N3, N4, C15)
+
+`uv run pytest -q` on the 14 test files of this area: 131 passed.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| C11 | fixed, low edge | (a) `ui/forward.py:93`, `:96-139` (`RemoteOverlays`: forgets the boxes of a secondary server after `OVERLAY_TTL` and on a new app run), `ui/monitor.py:497-500`, `:516-528`, `:564`, `:598`, `:609`, `:957`, `server.py:343-344`. (b) `server.py:376-381`, `:411-418`, `:452-453` (the TTL follows the server's own record, also for an old app). Tests `test_qa_round6.py:42`, `:54`, `:65`, `:80` | The paths that call `app_run` (status tools, poll, restart notice) have no test. See N19. |
+| C16 | fixed | `mcp/README.md:17`, `:34`, `:199`, `:264`, `.env.example:31-33`, `config.py:120-123`, `AGENTS.md:55` agree | `docs/qa.md:203` still said "asks for `--adb-serial`" for several devices. My file: corrected in this round. |
+| N2 | **partly (checked)** | `ui/routes/ingest.py:96-106` (403 and a log line), `ui/setup.py:31`; tests `test_qa_round6.py:100-113`, `test_bench_feedback.py:142`, `:172` | With no selection, `selected` is `""` (`ingest.py:98`), so a body `{"serial": ""}` passes the check and calls `start_screen_for("")`. `PhoneScreen` has no empty-serial guard (`phone_screen.py:287-302` runs `adb -s "" push`, `forward`, `shell app_process`); `scrcpy.py:70` has one. The request needs the ingest token. I did not test what the real adb does with `-s ""` (the adb server has one device now, so it can reach it). Fix: refuse when nothing is selected, and add a test. |
+| N3 | fixed | `ui/settings.py:135-139` (`asyncio.to_thread`), all async callers (`camera_choice.py:70-75`, `orientation.py:219-227`, `devices.py:124-131`, `ui/monitor.py:643-645`, `ui/routes/settings.py:41`, `:49`, `server.py:426`, `:1052`, `:1098`, `:1112`, `ui/device_panel.py:117-123`); test `test_qa_round6.py:121-145` | See N20. |
+| N4 | fixed, one edge | `server.py:571-592`, `adb.py:185-195`, `:280-283`, `ui/monitor.py:932-938`; test `test_qa_round6.py:153-173` | "device offline" also clears the record (`adb.py:39` counts it as gone; `server.py:583-585`), but adb keeps the forward. The brief allows the clear only for "not found". The test makes `forward --list` fail, not `forward --remove`. |
+| C15 | fixed | `board/model.py:264-266`, `pointer.py:168-209`, `pointing.py:461`, `board/marking.py:70`, `:86`, `marking_readings.py:38`, `:43`, `board/tools.py:545`, `:554`, `:821`, `:984`, `model.py:349`; tests `test_side_labels_c15.py:63-114` (synthetic fixtures `sides.json`, `markings.json`, listed in the fixtures README) | Low, outside the brief: the page net search `ui/board.py:295` still orders parts by the label alone; in a mixed file, a part on the other side goes last and can be cut at 8 boxes. |
+
+adb rule re-audit: the only new adb call is `release_forward` (`forward --remove` of this server's own forward, after an owner check with `forward --list`). With no selection, only `devices -l` runs. The only gap is the N2 empty serial.
+
+New findings (server and page):
+
+- **N18 = N2 rest (see the table).**
+- **N19 (low): the app run that a secondary server sends with its boxes can be old** (`ui/monitor.py:497-500` reads `bus.phone.status`, which only the status tools, `phone_connect`, and its poll update). Case: a secondary without its own poll calls `phone_status` (run 1); the app restarts; `phone_snapshot` sees run 2; `phone_highlight` sends run 1; the primary poll sees run 2 and removes the new boxes from the page, while the phone still shows them. Fix: send the app run of the status of the overlay call (`server.py:378`).
+- **N20 (low): two flip changes at the same time can lose one.** `orientation.py:219-224` computes the new flips before it waits for the file lock. Case: the page "Flip H" and an agent's `phone_snapshot_orientation(flip_vertical=true)` at the same time: the second write drops the first flip. Fix: compute the flips inside the locked update.
+
+### 4. Real phone
+
+- Selected serial (`~/.local/state/debug-devices/ui-settings.json`, `adb_serial`): the Wi-Fi serial of the Samsung S22 (`SM_S901B`). `adb devices -l` listed only this device, in state `device`. I used the adb binary of the running adb server (`android-tools-37.0.0`).
+- Separate forward `tcp:18791 tcp:8765` on the selected serial only. Health 200. Status 200: the app is in the foreground, so the phone is unlocked.
+- `python3 scripts/qa_contract.py --base-url http://127.0.0.1:18791 --strict`: 29/29.
+  - Snapshot 3060x4080 at rotation 0 and 4080x3060 at 90 and 270 (turned pixels); EXIF `Orientation` absent, or 1 at 90; `X-Rotation-Degrees` equals the locked rotation.
+  - `preview_region` `{0.192, 0, 0.615, 1}`; turned at 90; zoom and flips keep it.
+  - `overlay_region` `{0.192, 0.109, 0.615, 0.829}`; a vertical flip moves it to y 0.062; inside `preview_region`.
+- After the run I sent `{"in_sensor_zoom": true}` again (the saved setting). Right after that call, `overlay_region` was `{0.192, 0.091, 0.615, 0.847}`. Within 3 s it was back to `{0.192, 0.109, 0.615, 0.829}`: the status label changed for a short time. Then every field (except `focus`) equalled the first status.
+- Later, to confirm N11, I made the same kind of forward again (`tcp:18791`) and sent `POST /v1/rotation {"degrees": 90}`, `{"degrees": 0}`, then `{"auto": true}`. Both locked rotations returned `overlay_region: null`; a status 1 s later had a region. The rotation is back to auto (0, not locked). At that time `overlay_region` was `{0.192, 0.091, 0.615, 0.847}` again: it follows the label text.
+- I removed the forward both times. Only the MCP server forward (18765) remains. No command went to another device.
+- Not tested: `--after-start` and `--expect starting-race` (they need an app restart).
+- Note: `overlay_region` follows the height of the status label, so it can change for a moment after a command that changes the label text. The contract says to read it again after a flip or rotation change; it does not mention label changes.
+
+### Summary
+
+- Tests: all pass (pytest 909, boardview 13, Android 165, prek, fake self-check 13 modes, contract 30/30 on the fake and 29/29 on the S22, MCP stdio 15/15).
+- Follow-up items: N5, N6, B-E2, N3, C6, C13/N9, N8, the empty `overlay_region`, C15, and C16 are fixed. B-E3 rule 1 and rule 3 are fixed. C11, N4, N7, and N10 are fixed with small open edges.
+- Not fully fixed:
+  - B-E3 rule 2 (the gate rule): three cases still open the gate (`bench_state.py:419-421`, `:378-386`, `:250-252`).
+  - N2: an empty serial passes the ingest check when nothing is selected (`ui/routes/ingest.py:98-106`).
+  - C9: the null sentence is still there two times (`docs/phone-api.md:100`).
+- New:
+  - Safety, medium: N13, an unsafe voltage that is not confirmed does not close the gate (`bench_state.py:412-416`).
+  - Low: N11 (confirmed on the S22), N12, N14 to N17, N19, and N20.
+
+### What to do next
+
+1. Safety: N13, then B-E3 rule 2 cases (a), (b), and (c), then N14 and the N15 decision.
+2. N2: refuse the ingest screen start when nothing is selected, and guard `PhoneScreen` against an empty serial.
+3. Contract text: C9 (one null sentence), N11 (the rotation response can have `null`, or answer after the layout pass), N12 (where an empty region is), and whether `overlay_region` follows the label text.
+4. When the user allows an app restart: `--after-start` and `--expect starting-race` on the S22.

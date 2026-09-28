@@ -346,7 +346,7 @@ class Board:
         near = [
             part
             for part in self.parts.values()
-            if part.name != exclude and on_side(part.side, side) and part.center.distance(center) <= radius_mm
+            if part.name != exclude and self.side_ok(part.side, side) and part.center.distance(center) <= radius_mm
         ]
         return sorted(near, key=lambda part: part.center.distance(center))
 

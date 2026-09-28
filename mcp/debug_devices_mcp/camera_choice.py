@@ -8,6 +8,7 @@ sends for `unsupported` or `fallback`: the phone cannot do it, and a new request
 import logging
 from collections.abc import Callable
 from http import HTTPStatus
+from typing import ClassVar
 
 from debug_devices_mcp.app_start import AppStartWatch
 from debug_devices_mcp.phone_api import (
@@ -21,15 +22,65 @@ from debug_devices_mcp.phone_api import (
     PhoneClient,
     PhoneError,
 )
-from debug_devices_mcp.ui.settings import SettingsStore
+from debug_devices_mcp.ui.settings import SettingsStore, UiSettings
 
 logger = logging.getLogger(__name__)
 
 type ChoiceListener = Callable[[bool], None]
 
 
-class InSensorZoomChoice:
+class StoredChoice[T]:
+    """One user choice in the settings file (field FIELD), shared by all MCP servers, with listeners.
+
+    `set` is for code without an event loop (the start, tests). `save` is for code on the event loop: the file lock
+    wait runs in a worker thread (N3 of QA round 6); the listeners (the page state) run on the event loop.
+    """
+
+    FIELD: ClassVar[str]
+    # For the log when the file cannot be written.
+    LABEL: ClassVar[str]
+
+    _store: SettingsStore | None
+    _value: T
+    _seen: T
+    _listeners: list[Callable[[T], None]]
+
+    def _change(self, value: T) -> Callable[[UiSettings], UiSettings]:
+        field_name = self.FIELD
+
+        def change(saved: UiSettings) -> UiSettings:
+            return saved.model_copy(update={field_name: value})
+
+        return change
+
+    def _tell(self, value: T) -> None:
+        self._value = value
+        self._seen = value
+        for listener in self._listeners:
+            listener(value)
+
+    def set(self, value: T) -> None:
+        if self._store is not None:
+            try:
+                self._store.update(self._change(value))
+            except OSError as exc:
+                logger.warning("cannot save the %s: %s", self.LABEL, exc)
+        self._tell(value)
+
+    async def save(self, value: T) -> None:
+        if self._store is not None:
+            try:
+                await self._store.update_async(self._change(value))
+            except OSError as exc:
+                logger.warning("cannot save the %s: %s", self.LABEL, exc)
+        self._tell(value)
+
+
+class InSensorZoomChoice(StoredChoice[bool]):
     """The choice (default off). It reads the settings file at start and saves each change there (also without UI)."""
+
+    FIELD = "in_sensor_zoom"
+    LABEL = "in-sensor zoom choice"
 
     def __init__(self, store: SettingsStore | None = None) -> None:
         self._store = store
@@ -54,17 +105,6 @@ class InSensorZoomChoice:
             self._seen = enabled
             for listener in self._listeners:
                 listener(enabled)
-
-    def set(self, enabled: bool) -> None:
-        self._value = enabled
-        self._seen = enabled
-        if self._store is not None:
-            try:
-                self._store.update(lambda saved: saved.model_copy(update={"in_sensor_zoom": enabled}))
-            except OSError as exc:
-                logger.warning("cannot save the in-sensor zoom choice: %s", exc)
-        for listener in self._listeners:
-            listener(enabled)
 
 
 class InSensorZoomSync:
@@ -120,8 +160,11 @@ AF_MODE_UNKNOWN_TO_APP = (
 AF_MODE_NOT_ON_PHONE = "this phone has no macro autofocus mode: the camera stays in continuous autofocus"
 
 
-class AfModeChoice:
+class AfModeChoice(StoredChoice[AfModeName]):
     """The autofocus mode choice (default continuous), saved in the settings file like the in-sensor zoom."""
+
+    FIELD = "af_mode"
+    LABEL = "autofocus mode choice"
 
     def __init__(self, store: SettingsStore | None = None) -> None:
         self._store = store
@@ -146,17 +189,6 @@ class AfModeChoice:
             self._seen = mode
             for listener in self._listeners:
                 listener(mode)
-
-    def set(self, mode: AfModeName) -> None:
-        self._value = mode
-        self._seen = mode
-        if self._store is not None:
-            try:
-                self._store.update(lambda saved: saved.model_copy(update={"af_mode": mode}))
-            except OSError as exc:
-                logger.warning("cannot save the autofocus mode choice: %s", exc)
-        for listener in self._listeners:
-            listener(mode)
 
 
 class AfModeUnknownToAppError(PhoneError):
@@ -226,8 +258,11 @@ class AfModeSync:
 type MarkingsListener = Callable[[bool], None]
 
 
-class MarkingsChoice:
+class MarkingsChoice(StoredChoice[bool]):
     """Show or hide the markings (default shown), saved in the settings file like the other choices."""
+
+    FIELD = "markings_visible"
+    LABEL = "markings choice"
 
     def __init__(self, store: SettingsStore | None = None) -> None:
         self._store = store
@@ -252,17 +287,6 @@ class MarkingsChoice:
             self._seen = visible
             for listener in self._listeners:
                 listener(visible)
-
-    def set(self, visible: bool) -> None:
-        self._value = visible
-        self._seen = visible
-        if self._store is not None:
-            try:
-                self._store.update(lambda saved: saved.model_copy(update={"markings_visible": visible}))
-            except OSError as exc:
-                logger.warning("cannot save the markings choice: %s", exc)
-        for listener in self._listeners:
-            listener(visible)
 
 
 class MarkingsSync:

@@ -274,26 +274,28 @@ class OverlayLogicTest {
     fun `overlay region is the preview region without the bars and the label`() {
         // Status bar and label band: 200 px at the top; navigation bar: 100 px at the bottom (2000 px high view).
         val safe = PixelRect(0f, 200f, 900f, 1900f)
-        val region = requireNotNull(OverlayLogic.overlayRegion(safe, tall))
+        val region = OverlayLogic.overlayRegion(safe, tall)
         assertEquals(0.2f, region.snapshotX, delta)
         assertEquals(0.6f, region.width, delta)
         assertEquals(0.1f, region.snapshotY, delta)
         assertEquals(0.85f, region.height, delta)
         // Flipped upside down, the snapshot top is at the screen bottom: the band moves.
-        val flipped = requireNotNull(OverlayLogic.overlayRegion(safe, tall.copy(mirroredY = true)))
+        val flipped = OverlayLogic.overlayRegion(safe, tall.copy(mirroredY = true))
         assertEquals(0.05f, flipped.snapshotY, delta)
         assertEquals(0.85f, flipped.height, delta)
         // The whole view is the preview region.
         assertEquals(OverlayLogic.previewRegion(tall), OverlayLogic.overlayRegion(PixelRect(0f, 0f, 900f, 2000f), tall))
-        // Nothing left: null.
-        assertEquals(null, OverlayLogic.overlayRegion(PixelRect(0f, 500f, 900f, 500f), tall))
+        // Nothing left (the label band covers the safe area): a zero-size region, not null (N8).
+        val empty = OverlayLogic.overlayRegion(PixelRect(0f, 500f, 900f, 500f), tall)
+        assertEquals(0f, empty.width, delta)
+        assertEquals(0f, empty.height, delta)
     }
 
     @Test
     fun `overlay region with a landscape still`() {
         // Phone sideways: the still is the surface (landscape); the preview is the surface turned 90.
         val sideways = tall.copy(snapshotRotation = 0, snapshotWidth = 4080f, snapshotHeight = 3060f)
-        val region = requireNotNull(OverlayLogic.overlayRegion(PixelRect(0f, 200f, 900f, 1900f), sideways))
+        val region = OverlayLogic.overlayRegion(PixelRect(0f, 200f, 900f, 1900f), sideways)
         // The view's vertical axis is the still's horizontal axis: x 0.1-0.95, y the preview band 0.2-0.8.
         assertEquals(0.1f, region.snapshotX, delta)
         assertEquals(0.85f, region.width, delta)

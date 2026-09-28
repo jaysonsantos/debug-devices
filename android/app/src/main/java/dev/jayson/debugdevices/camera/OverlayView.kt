@@ -21,11 +21,11 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
     var scene: (width: Float, height: Float, arrowInset: Float, arrowLength: Float) -> OverlayScene =
         { _, _, _, _ -> OverlayScene.EMPTY }
 
-    /** The system bar and cutout insets of this view, in screen pixels (left, top, right, bottom as a rect). */
-    var insets: () -> PixelRect = { NO_INSETS }
-
-    /** The height of the app's status label band at the viewer's top, in pixels (the label turns with the viewer). */
-    var labelBand: () -> Float = { 0f }
+    /**
+     * The measured phone view: the system bar and cutout insets and the status label band (the label turns with the
+     * viewer). Null while it is not measured; then the view draws nothing and waits for the next layout pass.
+     */
+    var phoneFrameInput: () -> PhoneFrameInput? = { null }
 
     private val density = resources.displayMetrics.density
 
@@ -61,7 +61,8 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
         if (current.boxes.isEmpty() && current.arrows.isEmpty()) return
         val degrees = current.viewerDegrees
         // The phone view: the safe area without the status label, in the viewer's frame (screen pixels).
-        val frame = OverlayLayout.phoneFrame(screenWidth, screenHeight, insets(), degrees, labelBand())
+        val input = phoneFrameInput() ?: return
+        val frame = OverlayLayout.phoneFrame(screenWidth, screenHeight, input.insets, degrees, input.labelBand)
         val frameWidth = (frame.right - frame.left) / density
         val frameHeight = (frame.bottom - frame.top) / density
         val boxes = current.boxes.map { item ->
@@ -219,7 +220,6 @@ class OverlayView(context: Context, attrs: AttributeSet? = null) : View(context,
 
         /** A rectangle for a hidden box: only its tag and colour count, the layout does not place it. */
         val HIDDEN = PixelRect(0f, 0f, 0f, 0f)
-        val NO_INSETS = PixelRect(0f, 0f, 0f, 0f)
         val BADGE_TEXT = Color.BLACK
     }
 }

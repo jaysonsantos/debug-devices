@@ -26,6 +26,7 @@ from debug_devices_mcp.pointer import PointResult
 from debug_devices_mcp.server import MARKINGS_HIDDEN, build_server
 from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.constants import ingest
+from debug_devices_mcp.ui.forward import IngestOverlay
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore
 
@@ -270,12 +271,12 @@ def test_an_older_overlay_that_comes_late_is_dropped(tmp_path: Path) -> None:
     monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
     newer = [OverlayBox(snapshot_x=0.5, snapshot_y=0.5, width=0.1, height=0.1, label="new")]
     older = [OverlayBox(snapshot_x=0.1, snapshot_y=0.1, width=0.1, height=0.1, label="old")]
-    assert monitor.remote_overlay("codex 1", newer, [], seq=2)
-    assert not monitor.remote_overlay("codex 1", older, [], seq=1)
+    assert monitor.remote_overlay(IngestOverlay(origin="codex 1", boxes=newer, arrows=[], seq=2))
+    assert not monitor.remote_overlay(IngestOverlay(origin="codex 1", boxes=older, arrows=[], seq=1))
     assert [box.label for box in monitor.bus.phone.highlights] == ["new"]
     # Another secondary has its own numbers; a sender without numbers is always taken.
-    assert monitor.remote_overlay("claude 2", older, [], seq=1)
-    assert monitor.remote_overlay("old server", newer, [])
+    assert monitor.remote_overlay(IngestOverlay(origin="claude 2", boxes=older, arrows=[], seq=1))
+    assert monitor.remote_overlay(IngestOverlay(origin="old server", boxes=newer, arrows=[]))
 
 
 # endregion: B-F6, B-F9 a secondary server

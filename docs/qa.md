@@ -86,7 +86,7 @@ The script restores the zoom ratio and the torch state that it found at the star
 - `PUT /v1/zoom` and `DELETE /v1/status` give 405 `method_not_allowed`.
 - Rotation bodies `-90`, `360`, `"degrees": null`, and `"auto": null` give 400 `bad_request`.
 - `preview_region` at rotation 90 is the region at rotation 0 turned: width and height swap (2 % tolerance). A zoom to max and both preview flips do not change it.
-- `overlay_region` is inside `preview_region` (2 % tolerance), with no flip and with a vertical flip, and a vertical preview flip moves it (by more than 0.001). Every status also checks that `overlay_region` has the format of a region and is `null` exactly when `preview_region` is `null`.
+- `overlay_region` is inside `preview_region` (2 % tolerance), with no flip and with a vertical flip, and a vertical preview flip moves it (by more than 0.001). Every status also checks that `overlay_region` has the format of a region and is `null` when `preview_region` is `null`. It can be `null` alone while the safe area is not measured yet: the strict check waits up to 2 s for a value, and else passes with a note. The fake mode `--safe-area-unmeasured` gives this case. A measured safe area with no room gives `width` 0 or `height` 0 (not `null`): the checks accept a zero size for `overlay_region` only, and the strict check then does not ask for a move with the flip. The fake mode `--safe-area-empty` gives this case.
 - One `POST /v1/camera` body with both `in_sensor_zoom` and `af_mode` gives 200 and sets both.
 - A preview flip does not change the snapshot: the same displayed size and the same EXIF orientation.
 - `POST /v1/focus` on the screen edges (`screen_x` 0.5, `screen_y` 0 and 1): 200 when the preview covers the edge, else 400 `bad_request` with a message that contains "outside the preview". The app layout decides which one, so the script notes a 200.
@@ -200,7 +200,7 @@ npx @modelcontextprotocol/inspector --cli uv run debug-devices-mcp --method tool
 | Capture fails | `--capture-fails` | A tool error with `capture_failed` |
 | Phone down | fake phone stopped | A tool error that says that the phone is not reachable. The server does not crash. |
 | ADB forward | any | `FAKE_ADB_LOG` shows `forward tcp:18765 tcp:8765` with the serial `fake-phone-0001` |
-| Several ADB devices | real adb, no serial set | A tool error that asks for `--adb-serial`. No command goes to a device. |
+| No phone selected | real adb or fake adb, no serial set, one or more devices | A tool error "no phone is selected" that asks to select the phone in the page (or `--adb-serial`). Only `adb devices -l` runs; no command goes to a device (groups `fire-tv` and `real-adb`). |
 | Webcam frame | `/dev/video0` | Image content, 1920x1080 JPEG |
 | Webcam busy or missing | `--webcam /dev/video9` | A tool error with the device path |
 | Multimeter, no key | `OPENROUTER_API_KEY` empty | A tool error that names the variable. No network call. |

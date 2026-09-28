@@ -6,13 +6,14 @@ angle on the true-orientation snapshot image (docs/phone-api.md: 0 = right, 90 =
 """
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from pydantic import BaseModel
 
 from debug_devices_mcp.board.dump import Side
-from debug_devices_mcp.board.model import Part
+from debug_devices_mcp.board.model import Part, on_side
 from debug_devices_mcp.constants import phone
 from debug_devices_mcp.highlight import BoxVisibility, PixelBox
 from debug_devices_mcp.images import SnapshotOrientation
@@ -23,6 +24,10 @@ from debug_devices_mcp.tracking import Matrix, apply
 OTHER_SIDE_MESSAGE = "on the other side: isolate the power before you turn the board"
 IN_VIEW_MESSAGE = "in view: green box"
 OUT_OF_VIEW_MESSAGE = "outside the view: follow the arrow, {distance} away on the board"
+# A part that the file labels on the other side, in a file with mixed side labels: it is not ruled out.
+MIXED_LABEL_NOTE = " (the file labels it {side}, but its side labels are mixed: check it in the photo)"
+
+type SideRule = Callable[[Side, Side | None], bool]
 # A box around a tiny part is at least this large (snapshot pixels), so it stays visible.
 MIN_BOX_PX = 8.0
 MM_PER_CM = 10
@@ -121,6 +126,9 @@ def view_bounds(frame: ImageFrame) -> tuple[np.ndarray, np.ndarray]:
 
 
 def in_view(point: np.ndarray, low: np.ndarray, high: np.ndarray) -> bool:
+    """A view with no area (a zero-size overlay_region) shows nothing: every target gets an arrow."""
+    if high[0] <= low[0] or high[1] <= low[1]:
+        return False
     return bool(low[0] <= point[0] <= high[0] and low[1] <= point[1] <= high[1])
 
 
@@ -157,17 +165,23 @@ def follow_boxes(boxes: list[PixelBox], matrix: Matrix, frame: ImageFrame) -> tu
     return shown, arrows
 
 
-def plan(parts: list[Part], registered_side: Side, matrix: Matrix, frame: ImageFrame) -> PointPlan:
-    """A part is in view when its center is in the view; else an arrow from the view center, at the view edge."""
+def plan(
+    parts: list[Part], registered_side: Side, matrix: Matrix, frame: ImageFrame, side_ok: SideRule = on_side
+) -> PointPlan:
+    """A part is in view when its center is in the view; else an arrow from the view center, at the view edge.
+
+    `side_ok` decides if a part can be on the registered side: Board.side_ok, so that a file with mixed side labels
+    does not rule a part out by its label."""
     orientation = frame.orientation
     low, high = view_bounds(frame)
     center = (low + high) / 2
     inverse = np.linalg.inv(matrix)
     boxes, arrows, targets = [], [], []
     for part in parts:
-        if part.side not in {registered_side, Side.BOTH}:
+        if not side_ok(part.side, registered_side):
             targets.append(TargetState(refdes=part.name, side=part.side, in_view=None, message=OTHER_SIDE_MESSAGE))
             continue
+        note = "" if on_side(part.side, registered_side) else MIXED_LABEL_NOTE.format(side=part.side)
         target = apply(matrix, np.array([(part.center.x, part.center.y)]))[0]
         if in_view(target, low, high):
             corners = part_box(part, matrix)
@@ -176,7 +190,7 @@ def plan(parts: list[Part], registered_side: Side, matrix: Matrix, frame: ImageF
             if len(boxes) < phone.OVERLAY_MAX_BOXES:
                 label = part.name[: phone.OVERLAY_MAX_LABEL]
                 boxes.append(PixelBox(x=box_low[0], y=box_low[1], width=size_px[0], height=size_px[1], label=label))
-            targets.append(TargetState(refdes=part.name, side=part.side, in_view=True, message=IN_VIEW_MESSAGE))
+            targets.append(TargetState(refdes=part.name, side=part.side, in_view=True, message=IN_VIEW_MESSAGE + note))
             continue
         edge = edge_point(center, target, low, high)
         edge_mm, target_mm = apply(inverse, np.array([edge, target]))
@@ -192,7 +206,7 @@ def plan(parts: list[Part], registered_side: Side, matrix: Matrix, frame: ImageF
                 in_view=False,
                 angle_deg=round(angle, 1),
                 distance_cm=round(distance_mm / MM_PER_CM, 1),
-                message=OUT_OF_VIEW_MESSAGE.format(distance=distance_label(distance_mm)),
+                message=OUT_OF_VIEW_MESSAGE.format(distance=distance_label(distance_mm)) + note,
             )
         )
     return PointPlan(boxes=boxes, arrows=arrows, targets=targets)

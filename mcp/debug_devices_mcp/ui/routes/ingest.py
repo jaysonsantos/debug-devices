@@ -4,6 +4,7 @@ Only a request with the token of this page gets in (a file with mode 600, see `u
 middleware also checks the host and the origin, as for every route.
 """
 
+import logging
 import secrets
 from uuid import UUID
 
@@ -18,7 +19,10 @@ from debug_devices_mcp.ui.remote_screen import ScreenStart
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
 
 BAD_REQUEST = 400
+logger = logging.getLogger(__name__)
+
 FORBIDDEN = 403
+NOT_SELECTED = "{serial} is not the phone that the user selected in this page: no adb command goes to it"
 NOT_FOUND = 404
 TOO_LARGE = 413
 UNSUPPORTED_MEDIA_TYPE = 415
@@ -77,7 +81,7 @@ async def post_overlay(request: Request) -> Response:
         data = IngestOverlay.model_validate_json(await request.body())
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
-    monitor_of(request).remote_overlay(data.origin, data.boxes, data.arrows, data.seq)
+    monitor_of(request).remote_overlay(data)
     return Response(status_code=NO_CONTENT)
 
 
@@ -89,7 +93,17 @@ async def post_screen_start(request: Request) -> Response:
         data = ScreenStart.model_validate_json(await request.body())
     except ValidationError as exc:
         return error_response(str(exc), BAD_REQUEST)
-    return json_response(await monitor_of(request).start_screen_for(data.serial))
+    monitor = monitor_of(request)
+    # adb commands go only to the phone that the user selected (N2 of QA round 6), also for a secondary's request.
+    selected = monitor.selected_serial() if monitor.selected_serial is not None else ""
+    if data.serial != selected:
+        logger.warning(
+            "a secondary server asked to stream %s, but the selected phone is %s: refused",
+            data.serial,
+            selected or "none",
+        )
+        return error_response(NOT_SELECTED.format(serial=data.serial), FORBIDDEN)
+    return json_response(await monitor.start_screen_for(data.serial))
 
 
 async def get_frame(request: Request) -> Response:

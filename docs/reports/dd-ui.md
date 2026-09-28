@@ -1753,3 +1753,40 @@ The contract now has `CameraStatus.overlay_region`: `preview_region` without the
 
 - A correction to round 41: `scripts/fake_phone.py` in the working tree already sends the snapshot headers (dd-qa round 5). dd-qa adds `overlay_region` to it now.
 - No real phone check: the phone is not connected. On the S22, check that the frame and the warnings follow the bars in portrait and at rotation 90.
+
+## Round 43: follow-up of the final QA run (QA round 6, dd-ui part)
+
+I read `docs/phone-api.md` again first (C6, C9, C13/N9, N8; and the orchestrator's note: a zero-size `overlay_region`).
+
+### What I did
+
+- **C11 (a), the boxes of a secondary server on the primary page**: `forward.RemoteOverlays` keeps, per secondary origin, the order (B-F9), a timer of `OVERLAY_TTL`, and the app run that the secondary saw (`IngestOverlay.app_start_id`, new; a secondary sends the `app_start_id` of its page status). The primary forgets that origin's boxes on its page (only when the page still shows them) after `OVERLAY_TTL` from the last change, and when a phone status of the primary (status poll, a tool result, `phone_connect`, or its restart notice) shows another app run. This also works after the secondary exited.
+- **C11 (b), an old app with hidden markings**: the lifetime now follows our record, not what went to the phone. `send_overlay` starts the timer for the boxes of the record, also when the old app got `[]`. When the markings are shown again, the new call to the app starts the timer again.
+- **C16**: `mcp/README.md:17` now says "Always select the phone: in the monitor page (Devices), or set `DEBUG_DEVICES_ADB_SERIAL`", and without a selection the phone tools send nothing, also with one device. `:198` says that the server never picks a device by itself, also not the only one.
+- **N2, the screen of a secondary**: `POST /api/ingest/screen/start` accepts only the serial that the user selected on the primary (page, then config; `Monitor.selected_serial`, set by `connect_services`). Another serial, or no selection: 403 and a log warning. No adb command goes to it.
+- **N3, the settings lock and the event loop**: `SettingsStore.update_async` runs the lock wait and the file work in a worker thread. The async callers use it:
+  - the camera choices (`StoredChoice.save`, a small base class for the in-sensor zoom, autofocus, and Markings choices);
+  - `OrientationState.save` and `PhoneSelection.save`;
+  - the page settings save (`Monitor.save_settings`), and the tools.
+  - The listeners (the page state) still run on the event loop. The sync `set` and `update` stay for code without an event loop (the start, tests).
+- **N4, the forward record**: `release_forward` forgets `forwarded_serial` only when the forward is gone: removed, not there, another phone's now, or the device is gone. A passing adb failure keeps the record, so a later stop tries again. A new `phone_connect` during the adb calls keeps its own record.
+- **N7, saved webcam controls**: `WebcamControls.following(changes)`: a fixed exposure saves `auto_exposure: false`, and auto exposure on removes the saved fixed time. After a restart, the camera gets the same values.
+- **Zero-size `overlay_region`** (the orchestrator's contract note): only a missing `overlay_region` falls back to `preview_region` (`visible_region()` checks for None, not truthiness). A zero-size region (`PreviewRegion.empty`) means that nothing shows on the phone: every box is "not" visible with a warning, and the pointing gives arrows (a view with no area has no target in view). The page uses `??`, so it keeps a zero-size region too.
+
+### Tests
+
+- New `mcp/tests/test_qa_round6.py` (8 tests):
+  - a secondary's boxes after the TTL, and the newer boxes of another origin stay;
+  - another app run removes them;
+  - hidden boxes of an old app expire;
+  - the screen start refuses a serial that is not selected, and a request without a selection;
+  - a held lock for 0.3 s: the event loop ran (at least 10 ticks of 10 ms) and the save worked;
+  - a passing removal failure keeps the forward record, and the next stop removes it;
+  - the saved webcam controls after "auto", then "exposure 900", then "auto".
+- `test_overlay_region.py`: 3 more tests (a zero-size region: not visible and no fallback; arrows, not boxes; only a missing region falls back).
+- `test_bench_feedback.py`: the primary's user selected the phone (N2). `test_overlay_sync_round4.py`: the new `remote_overlay(IngestOverlay)` form.
+- `uv run pytest`: 883 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+### Notes
+
+- One run of the full suite had one failure in `test_bench_state.py` during dd-mcp's work on N5/N6; alone it passed (38 passed), and the next full runs passed.

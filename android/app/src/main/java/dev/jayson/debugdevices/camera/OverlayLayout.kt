@@ -10,6 +10,9 @@ import kotlin.math.sin
 // test vectors `docs/overlay-layout-vectors.json`. The unit is a dp on the phone (an image pixel for the server).
 // Text is not measured: sizes come from the character count.
 
+/** The measured phone view: the system bar and cutout insets (screen pixels) and the status label band. */
+data class PhoneFrameInput(val insets: PixelRect, val labelBand: Float)
+
 /** A box in layout units: top-left `x`, `y`, size, an optional tag, and the label. */
 data class LayoutBoxInput(
     val x: Float,
@@ -449,6 +452,26 @@ object OverlayLayout {
         val safe = PixelRect(insets.left, insets.top, screenWidth - insets.right, screenHeight - insets.bottom)
         val viewer = toViewer(safe, viewerDegrees, screenWidth, screenHeight)
         return viewer.copy(top = minOf(viewer.top + labelBand, viewer.bottom))
+    }
+
+    /**
+     * The status label band for the phone view, or null while it is not measured for the current orientation:
+     * the safe area has no size yet (N8), or the turned overlay container is still laid out for the old orientation
+     * ([laidOutWidth] is not the viewer-frame width of the safe area for [viewerDegrees], N10). All values in pixels.
+     */
+    fun labelBand(
+        laidOutWidth: Int,
+        safeWidth: Int,
+        safeHeight: Int,
+        viewerDegrees: Int,
+        labelBottom: Int,
+        gap: Float
+    ): Float? {
+        if (safeWidth <= 0 || safeHeight <= 0) return null
+        val sideways = Math.floorMod(viewerDegrees, 2 * Constants.Orientation.BUCKET_DEGREES) != 0
+        val expectedWidth = if (sideways) safeHeight else safeWidth
+        if (laidOutWidth != expectedWidth) return null
+        return labelBottom + gap
     }
 
     /** The inverse of [toViewer]: a viewer-frame rectangle back in screen pixels. */

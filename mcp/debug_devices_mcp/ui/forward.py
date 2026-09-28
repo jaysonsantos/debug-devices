@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel
 
+from debug_devices_mcp.constants import phone
 from debug_devices_mcp.phone_api import OverlayArrow, OverlayBox
 from debug_devices_mcp.remote_webcam import RemoteMonitor
 from debug_devices_mcp.ui.constants import STATE_DIR_NAME, defaults, env, http, ingest, tools
@@ -87,6 +88,55 @@ class IngestOverlay(BaseModel):
     # Counts the overlay changes of this secondary: the primary drops an older one that comes late (B-F9 of QA round
     # 4). 0: a secondary from before the number (always taken).
     seq: int = 0
+    # The app run that the secondary saw (CameraStatus.app_start_id): the primary forgets these boxes when the phone
+    # shows another run (C11 of QA round 6). None: not known.
+    app_start_id: str | None = None
+
+
+class RemoteOverlays:
+    """The boxes and arrows of secondary servers on this (primary) page. In order (B-F9 of QA round 4), and forgotten
+    at the same times as the app forgets them (C11 of QA round 6): OVERLAY_TTL after the last change of that origin,
+    and when the phone shows another app run than the one that the secondary saw (also after the secondary exited)."""
+
+    def __init__(self, forget: Callable[[str], None]) -> None:
+        self._forget = forget
+        self._seqs: dict[str, int] = {}
+        self._timers: dict[str, asyncio.TimerHandle] = {}
+        self._app_runs: dict[str, str] = {}
+
+    def accept(self, overlay: IngestOverlay) -> bool:
+        """False: an older change that came after a newer one (dropped)."""
+        origin = overlay.origin
+        if overlay.seq:
+            if overlay.seq <= self._seqs.get(origin, 0):
+                return False
+            self._seqs[origin] = overlay.seq
+        self._drop(origin)
+        if overlay.boxes or overlay.arrows:
+            with contextlib.suppress(RuntimeError):  # no running loop (a test without one): no timer
+                loop = asyncio.get_running_loop()
+                self._timers[origin] = loop.call_later(phone.OVERLAY_TTL.total_seconds(), self._expire, origin)
+            if overlay.app_start_id is not None:
+                self._app_runs[origin] = overlay.app_start_id
+        return True
+
+    def app_run(self, app_start_id: str | None) -> None:
+        """A phone status of this server shows this app run: the boxes of another run are gone on the phone."""
+        if app_start_id is None:
+            return
+        for origin, run in list(self._app_runs.items()):
+            if run != app_start_id:
+                self._expire(origin)
+
+    def _drop(self, origin: str) -> None:
+        timer = self._timers.pop(origin, None)
+        if timer is not None:
+            timer.cancel()
+        self._app_runs.pop(origin, None)
+
+    def _expire(self, origin: str) -> None:
+        self._drop(origin)
+        self._forget(origin)
 
 
 def redacted(event: ToolCallEvent) -> ToolCallEvent:
@@ -232,19 +282,24 @@ class CallForwarder:
             if not await self._post(path, image.jpeg, http.JPEG_MEDIA_TYPE, params):
                 return
 
-    def send_overlay_soon(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
+    def send_overlay_soon(
+        self, boxes: list[OverlayBox], arrows: list[OverlayArrow], app_start_id: str | None = None
+    ) -> None:
         """Send in the background: a slow or gone primary never slows a tool call. The number is taken now, in the
         order of the changes, so the primary keeps the newest one when two sends overtake each other."""
         self._overlay_seq += 1
-        task = asyncio.create_task(self.send_overlay(boxes, arrows, self._overlay_seq), name="overlay-forward")
+        send = self.send_overlay(boxes, arrows, self._overlay_seq, app_start_id)
+        task = asyncio.create_task(send, name="overlay-forward")
         self._overlay_tasks.add(task)
         task.add_done_callback(self._overlay_tasks.discard)
 
-    async def send_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow], seq: int = 0) -> bool:
+    async def send_overlay(
+        self, boxes: list[OverlayBox], arrows: list[OverlayArrow], seq: int = 0, app_start_id: str | None = None
+    ) -> bool:
         """The boxes and arrows of this server, for the primary's page (drawn on its snapshot with our origin)."""
         if not self._is_secondary() or not await self._find_primary():
             return False
-        overlay = IngestOverlay(origin=self._origin(), boxes=boxes, arrows=arrows, seq=seq)
+        overlay = IngestOverlay(origin=self._origin(), boxes=boxes, arrows=arrows, seq=seq, app_start_id=app_start_id)
         body = overlay.model_dump_json().encode()
         return await self._post(ingest.OVERLAY_PATH, body, http.JSON_MEDIA_TYPE)
 

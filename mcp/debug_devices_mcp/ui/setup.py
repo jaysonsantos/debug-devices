@@ -28,6 +28,7 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
     monitor.device_panel = DevicePanel(services, monitor)
     monitor.phone_selection = services.selection
+    monitor.selected_serial = lambda: services.selection.effective(services.settings.adb_serial)[0]
     monitor.markings_setter = services.set_markings
     monitor.bus.update_phone(markings_visible=services.markings.visible)
     services.markings.add_listener(monitor.markings_changed)

@@ -114,10 +114,10 @@ class DevicePanel:
             note = f"{FORWARD_NOT_REMOVED}: {exc}"
         steps.append(Step(step="stop the old phone", ok=True, detail=note))
 
-    def _save_selection(self, steps: list[Step], name: str, serial: str | None, detail: str) -> None:
+    async def _save_selection(self, steps: list[Step], name: str, serial: str | None, detail: str) -> None:
         """A failed save is a failed step (B-W8 of QA round 4): the choice did not change."""
         try:
-            self._access.selection.set(serial)
+            await self._access.selection.save(serial)
         except SelectionNotSavedError as exc:
             steps.append(Step(step=name, ok=False, detail=str(exc)))
             raise StepFailed from exc
@@ -132,7 +132,7 @@ class DevicePanel:
             state = device.state if device is not None else "not connected"
             steps.append(Step(step="select", ok=False, detail=f"{serial} is {state}"))
             raise StepFailed
-        self._save_selection(steps, "select", serial, serial)
+        await self._save_selection(steps, "select", serial, serial)
         await self._stop_old_phone(steps)
         if connect:
             await self._step(steps, "phone_connect", self._connect())
@@ -155,7 +155,7 @@ class DevicePanel:
         async def work(steps: list[Step]) -> None:
             await self._stop_old_phone(steps)
             config = self._access.settings.adb_serial or "none (select a phone)"
-            self._save_selection(steps, "clear the selection", None, f"back to the config: {config}")
+            await self._save_selection(steps, "clear the selection", None, f"back to the config: {config}")
 
         return await self._action(tools.ADB_DISCONNECT, {}, work)
 

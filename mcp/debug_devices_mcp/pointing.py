@@ -458,7 +458,7 @@ class Pointing:
         matrix = self.tracker.board_to_current() if tracking and self.tracker else self._board_to_snapshot(registration)
         parts = [session.part(name) for name in target.refdes]
         frame = ImageFrame((geometry.width, geometry.height), geometry.orientation, self._view(geometry))
-        return plan(parts, registration.side, matrix, frame), tracking
+        return plan(parts, registration.side, matrix, frame, session.current().side_ok), tracking
 
     async def _refresh(self, *, force: bool) -> tuple[PointPlan, bool, CameraStatus | None]:
         async with self._lock:
@@ -496,7 +496,8 @@ class Pointing:
         geometry = self._host.last_snapshot
         assert geometry is not None
         boxes = [overlay_box(box, geometry) for box in point_plan.boxes]
-        region = (status.visible_region() if status is not None else None) or self._host.overlay_region
+        fresh = status.visible_region() if status is not None else None
+        region = fresh if fresh is not None else self._host.overlay_region
         seen, warning = visibility(boxes, region)
         return PointResult(
             visibility=seen,
