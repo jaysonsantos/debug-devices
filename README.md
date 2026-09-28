@@ -196,7 +196,8 @@ uv run --with playwright python scripts/record_demo.py --fake-phone docs/images/
 ```
 
 - `scripts/make_demo_meter.py` takes a webcam frame of the running monitor. It keeps only the multimeter area and draws a 7-segment reading ("4.70 kΩ") on the LCD.
-- With `--fake-phone`, the recorder starts `scripts/fake_phone.py` with that photo as the snapshot. It also starts a separate demo MCP server with the fake adb and its own settings. The demo server takes the webcam frames from the monitor on port 18766.
+- With `--fake-phone`, the recorder starts `scripts/fake_phone.py` with that photo as the snapshot. It also starts a separate demo MCP server with the fake adb and its own settings, with its page on a free port. The demo server takes the webcam frames from the monitor on port 18766 (that monitor needs a crop box).
+- Without `--fake-phone`, `--url` is required: the recorder then clicks through the page at that URL. Only you run it against your own monitor page; it has no default URL.
 - The script clicks Connect, zooms, sets the torch on and off, takes a snapshot, scrolls, and reads the multimeter from the phone snapshot. This sends one request to OpenRouter, and one more if the first fails.
 - The webcam can see more than the multimeter. Outside the crop box, the recorder darkens the view by 82% and blurs it. It also hides the log rows from before the recording.
 - Turn on the room light, and look at the frames before you publish a new recording.

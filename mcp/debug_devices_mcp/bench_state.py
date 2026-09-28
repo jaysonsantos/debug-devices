@@ -512,8 +512,9 @@ class BenchStateStore:
     async def save_unsaved_at_exit(self) -> None:
         """One more try at exit (a stop, Ctrl-C, SIGTERM, or a reload): a kept unsafe reading is in memory only.
 
-        The MCP shutdown cancels the lifespan, so the save runs shielded, with a limit. It never raises: a busy lock
-        or a file error (a full disk, a read-only folder) goes to the log.
+        The MCP shutdown cancels the lifespan, so the save runs shielded, with a limit. A busy lock or a file error (a
+        full disk, a read-only folder) goes to the log. A shield does not stop a second interrupt (a native cancel,
+        or the runner's KeyboardInterrupt): then the log says that the save was cut, and the interrupt goes on (N65).
         """
         if self._flush_task is not None:
             self._flush_task.cancel()
@@ -524,6 +525,13 @@ class BenchStateStore:
                 await self.update_async(lambda _state: None)
             except (ToolError, OSError) as exc:
                 logger.warning("%s unsafe readings are not in the bench state file at exit: %s", self.unsaved, exc)
+            except BaseException as exc:
+                logger.warning(
+                    "%s unsafe readings may not be in the bench state file: a second interrupt cut the exit save (%s)",
+                    self.unsaved,
+                    type(exc).__name__,
+                )
+                raise
         if scope.cancelled_caught:
             logger.warning(
                 "%s unsafe readings are not in the bench state file at exit: the save did not end in %g s",

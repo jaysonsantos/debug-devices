@@ -32,11 +32,18 @@ def _force_exit(exit_function: ExitFunction) -> None:
     exit_function(EXIT_CODE)
 
 
-def route_sigterm_to_ctrl_c() -> None:
+def route_sigterm_to_ctrl_c() -> bool:
     """SIGTERM (for example from the dev reload or a process manager) takes the Ctrl-C path: the event loop cancels
     the server, so the lifespan cleanup runs (the last save of kept unsafe readings, N33). Without this, SIGTERM ends
-    the process with no cleanup."""
+    the process with no cleanup.
+
+    Only with the default SIGINT handler: a process that starts with SIGINT ignored (a background job of a script)
+    keeps the default SIGTERM, which stops it at once (N67). True when SIGTERM goes through SIGINT.
+    """
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        return False
     signal.signal(signal.SIGTERM, _as_ctrl_c)
+    return True
 
 
 def _as_ctrl_c(_signum: int, _frame: object) -> None:

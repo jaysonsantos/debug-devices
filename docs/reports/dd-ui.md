@@ -1898,3 +1898,17 @@ Base: `2e6793c`.
 - New `mcp/tests/test_qa_round14.py` (2 tests, a real local HTTP responder that answers `/api/whoami` after 0.5 s, and a probe of 0.2 s): on the own port (the primary lookup) it is found; as another port of the webcam sharing, the probe cuts it.
 - `scripts/record_demo.py` imports and `free_port()` gives a port that is not 18766. I did not record a demo: that needs the real webcam and the running monitor.
 - `uv run pytest`: 1096 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 49: QA round 15, the last fix round (dd-ui part)
+
+Base: `fe66f61`.
+
+### What I did
+
+1. **N70, `scripts/record_demo.py`**: no default URL any more. Without `--fake-phone`, `--url` is required; without both, the script stops at once with "give --fake-phone (a demo server), or --url of a page that you run (only the user records the real page)" (exit 2), before it starts anything. The `--url` help, the module docstring, and the root `README.md` ("Record the demo") say that only the user runs it against the real monitor page, because the script clicks through that page. The demo server's page is on a free port (round 48).
+2. **N71, `test_ui_app.py`**: the `build_monitor` test also patches `defaults.PORT` to a free port. The test checks that `other_monitor_ports()` does not list 18766 (the user's page port), so the webcam lookup of that monitor never asks the running dev monitor.
+
+### Tests
+
+- `scripts/record_demo.py` without arguments: exit 2 with the message above (checked with `uv run --with playwright`); `--help` shows the new `--url` text.
+- `uv run pytest`: 1103 passed, 1 skipped. ruff and `prek run --files` on my files (`scripts/record_demo.py`, `mcp/tests/test_ui_app.py`, `README.md`): pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

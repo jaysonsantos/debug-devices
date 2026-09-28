@@ -19,6 +19,8 @@ from debug_devices_mcp.phone_screen import ScreenState, ScreenStatus
 from debug_devices_mcp.remote_webcam import RemoteMonitor, SharedWebcam
 from debug_devices_mcp.server import build_server
 from debug_devices_mcp.ui.app import create_app
+from debug_devices_mcp.ui.constants import defaults as ui_defaults
+from debug_devices_mcp.ui.forward import other_monitor_ports
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts, bind_socket
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
 from debug_devices_mcp.ui.setup import build_monitor
@@ -153,12 +155,19 @@ def test_bind_socket_falls_back_to_a_free_port() -> None:
         first.close()
 
 
+# The user's page port (the default before a test patches it).
+USER_PAGE_PORT = ui_defaults.PORT
+
+
 def test_build_monitor_takes_over_the_webcam_and_the_model(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     # A free port, never the user's 18766: a later request of this monitor must not reach the running dev monitor.
     settings = settings.model_copy(update={"ui_port": free_port()})
+    # The webcam lookup also asks the default page port: a free one here too, so it never lists 18766 (N71).
+    monkeypatch.setattr(ui_defaults, "PORT", free_port())
+    assert USER_PAGE_PORT not in other_monitor_ports()
     services = make_services(settings, FakePhone(), no_vision())
     monitor = build_monitor(settings, services)
     assert monitor.stream is not None

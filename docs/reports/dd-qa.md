@@ -1541,3 +1541,72 @@ Older open items (low, from rounds 11-13) stay in the backlog as written there, 
 1. Fix now: N65 and N66 together (the exit save before `monitor.stop()` or in its own `finally`, log a cancelled save), N70 (`--url` required in `scripts/record_demo.py`), N71 (patch `defaults.PORT` in `test_ui_app.py`).
 2. Then a short re-check of these 4 items only (tests, prek, and the S22 contract run).
 3. The backlog items when there is time.
+
+## Round 15: check
+
+Date: 2026-09-29. A short check. Scope: `docs/briefs/qa-round15.md`; the reports dd-mcp "QA round 15" (N65, N66, N67) and dd-ui round 49 (N70, N71); the N72 and N73 contract text in `docs/phone-api.md` line 75. The working tree at `fe66f61` with the uncommitted changes. dd-mcp and dd-ui had stopped editing. No Gradle run and no phone run (no Android change). I did not change product code or my scripts, and I did not commit. Nothing contacted the user's monitor on 18766.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1107 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file (318 files) and `git status --porcelain` before and after | All 15 hooks pass; hashes and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. dd-ui items and the contract text (checked by me)
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N70 | fixed | `scripts/record_demo.py`: `DEFAULT_URL` removed; `--url` has no default and is required without `--fake-phone` (`parser.error`); the docstring and the `--url` help say that only the user runs it against the real page | With a stub `playwright` module (no download, no browser): no arguments gives exit 2 and "give --fake-phone (a demo server), or --url of a page that you run (only the user records the real page)", before any network or browser action. The only 18766 left in the script is the documented webcam sharing (docstring `:11`, comment `:49`). |
+| N71 | fixed | `mcp/tests/test_ui_app.py`: `monkeypatch.setattr(ui_defaults, "PORT", free_port())` and `assert USER_PAGE_PORT not in other_monitor_ports()`; `ui/forward.py:58-61` reads `defaults.PORT` at call time; the token dir is private in the tests (`conftest.py`) | – |
+| N72 | fixed (text) | `docs/phone-api.md:75`: "Clients retry ... until their snapshot deadline ends (the MCP server uses the longer of its app start timeout and its snapshot timeout)"; the code: `server.py:650-654` (`max(app_start_timeout, phone_snapshot_timeout)`) | – |
+| N73 | fixed (text), small rest | `docs/phone-api.md:75`: "A second snapshot first waits for the running snapshot ... Then the snapshot waits for a running change, at most 5 s (`SNAPSHOT_READY_WAIT`, counted from the end of the first wait)"; the code: `A/CameraController.kt:764-768` (capture lock, then `gate.snapshot`) | The later sentence still says that "a snapshot that starts more than `SNAPSHOT_READY_WAIT` before the bind ends gets 503"; for a queued second snapshot, the count starts later, so it can still get 200 (N74, backlog). |
+
+### 3. dd-mcp items (N65, N66, N67)
+
+A read-only agent ran the real entry point in a subprocess (with a kept unsafe reading injected), the real `DevReloadProxy`, and `uv run` with process-group signals, each with a private HOME, XDG state and runtime dir, free ports, and `scripts/fake_adb.py` (0 adb calls; nothing on 18765 or 18766). It also ran the new tests against a copy with the old code. `uv run pytest -q mcp/tests/test_exit_save.py mcp/tests/test_shutdown.py mcp/tests/test_devreload.py`: 17 passed.
+
+| Id | Status | Evidence | Remaining / case |
+|---|---|---|---|
+| N65 | partly | The save runs first, in its own `try` (`server.py:1474-1476`); the monitor stop and `aclose` are in nested `finally` blocks (`:1477-1483`); `after_stop` in the outer `finally` (`:1484-1487`); a cut save is logged (`bench_state.py:528-534`); test `test_exit_save.py:131-151` (fails with the old code) | Fixed for direct signals: SIGTERM then SIGINT 0.2 s later, with the lock free or busy 3 s: saved (after a logged warning when cut), clients closed, `after_stop` called. The real dev reload with the lock busy 7 s: saved; busy 12 s: SIGKILL, not saved, but the loss is logged. **Not fixed: the `uv run` shape (watchexec in `scripts/dev-monitor.sh`)**: a group SIGTERM, then a group SIGINT 0.2 s later, lock busy 3 s: in 4 of 4 runs not saved, no log line, clients not closed, no `after_stop`, exit 130. Cause (measured): uv passes each group signal to the server two times; the second SIGTERM starts the cleanup inside `Runner.close()`, and the group SIGINT then drops the lifespan coroutine at `bench_state.py:525`, so the `except` at `:528` never runs. `mcp/README.md` "a cut save goes to the log" is false for this case. |
+| N66 | fixed | `server.py:1477-1483`; test `test_exit_save.py:154-163` (through the lifespan; fails with the old code) | A monitor stop that raises: saved, phone and vision closed, `after_stop` called (with EOF, with SIGTERM, and with the lock busy 2 s). |
+| N67 | fixed (as the brief asks) | `shutdown.py:43-46`, `__main__.py:18`; test `test_exit_save.py:180-193` (a direct call) | With SIGINT ignored at start, SIGTERM ends the process in 0.02 s again (round 14: still alive after 8 s). But a kept reading is then lost with no log line (N79). |
+| Tests | partly | See the rows above | The N65 test uses a free lock, so the cut-save path is not tested through the lifespan; it checks only `after_stop`, not the client closes; the log test calls `save_unsaved_at_exit` directly; the N67 test runs no SIG_IGN process; no test covers the `uv run` group-signal shape. |
+
+New findings:
+
+- **N75 (low; safety risk: fix now; also in `fe66f61`): one group SIGTERM through `uv run` can hang the exit and lose the kept reading with no log line.** Case: `uv run`, one group SIGTERM, monitor stop 0.5 s, lock busy 1 s: 2 of 14 runs still alive at 8 s (1 of 5 earlier runs at 20 s); not saved, no log, the cleanup never started; the main thread spins in `anyio/_backends/_asyncio.py:623` under `Runner.close()`. Cause: uv forwards the SIGTERM, so a second `_as_ctrl_c` (`shutdown.py:49-50`) runs inside the first `Runner._on_sigint`. Without uv, two SIGTERMs at once never hung (0 of 14). Fix idea: act only on the first SIGTERM (set SIGTERM to `SIG_IGN` in `_as_ctrl_c` before `raise_signal`), ignore SIGINT and SIGTERM during the cleanup, or use `loop.add_signal_handler`.
+- **N79 (low; safety risk: fix now): with SIGINT ignored at start, SIGTERM loses a kept reading with no log line** (the N67 remainder; `mcp/README.md` does not say it). Fix idea: in that case, a SIGTERM handler that raises `KeyboardInterrupt`, so `Runner.close()` runs the cleanup.
+- N76 (low: backlog): after a second interrupt, the cleanup runs in `Runner.close()` with no guard; a third interrupt drops the lifespan, `after_stop` is not called, and the process then waits in `threading._shutdown` for the stdin thread (case: SIGTERM, SIGINT at 0.2 s and 0.4 s: still alive at 20 s).
+- N77 (low: backlog): the exit save runs two times (the lifespan, `server.py:1476`, and again in `Services.aclose`, `:773`): with the lock busy 30 s, two warnings (5 s and 10 s) and exit at 12 s.
+- N78 (cosmetic: backlog): the warning says that the readings "may not be in the bench state file", but no line follows when the save succeeds 2-3 s later.
+
+Context for the fix-now items N65 (rest), N75, and N79: a kept reading exists only after an earlier lock timeout (another process held the bench-state lock for more than 5 s when the reading came), so all three need that rare state first. A simpler design removes the whole exit path: write a kept unsafe reading at once to a small separate journal file (no shared lock), and merge it at the next load; then no exit handling is needed.
+
+### Summary
+
+- Tests: pytest 1107 passed, 1 skipped; prek passes and leaves the tree unchanged (318 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18766.
+- Fixed: N66, N67 (as briefed), N70, N71, N72, N73 (text, small rest). Partly: N65 (direct signals fixed; the `uv run` group-signal shape is not).
+
+### New findings and remaining items: fix now or backlog
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N65 (rest) | low | safety (a kept unsafe reading lost with no log) | **fix now** | `bench_state.py:525-534`, `server.py:1474-1487`, `shutdown.py` |
+| N75 | low | safety (same record; the exit can also hang) | **fix now** | `shutdown.py:49-50` |
+| N79 | low | safety (same record) | **fix now** | `shutdown.py:43-46` |
+| N74 | cosmetic (text) | none | backlog | `docs/phone-api.md:75` ("starts more than `SNAPSHOT_READY_WAIT` before" is not exact for a queued second snapshot) |
+| N76 | low | none | backlog | `server.py` lifespan, `Runner.close()` |
+| N77 | low | none | backlog | `server.py:773`, `:1476` |
+| N78 | cosmetic | none | backlog | `bench_state.py:528-534` |
+
+All three fix-now items need a rare state first (a reading kept in memory after a 5 s lock timeout) and an exit through `uv run` group signals or with SIGINT ignored. The simplest fix for all three: write a kept unsafe reading at once to a small separate journal file (no shared lock) and merge it at the next load, so no exit handling is needed.
+
+The backlog of rounds 11-14 stays as written there.
+
+### What to do next
+
+1. Decide: fix N65 (rest), N75, and N79 now with the journal file (one change removes the exit dependency), or accept them as known limits in `mcp/README.md` (the kept reading can be lost at an exit through `uv run` or with SIGINT ignored).
+2. Then the backlog when there is time.

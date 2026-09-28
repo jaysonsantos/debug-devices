@@ -1471,9 +1471,16 @@ def build_server(
         finally:
             try:
                 expiry.cancel()
-                if monitor is not None:
-                    await monitor.stop()
-                await services.aclose()
+                try:
+                    # The kept unsafe readings first: a slow or failed monitor stop cannot skip their save (N65).
+                    await services.bench.save_unsaved_at_exit()
+                finally:
+                    try:
+                        if monitor is not None:
+                            await monitor.stop()
+                    finally:
+                        # Also when the monitor stop raises (N66).
+                        await services.aclose()
             finally:
                 # The exit watchdog (shutdown.py) runs also when the cleanup fails (N57).
                 if after_stop is not None:

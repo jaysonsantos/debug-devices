@@ -9,8 +9,9 @@ Firefox is necessary: the phone screen uses WebCodecs H.264. Run it from the rep
 With `--fake-phone`, the script starts scripts/fake_phone.py with that photo as the snapshot and a separate demo
 MCP server (fake adb, its own state folder, no phone screen). The demo server serves its page on a free port and
 takes the webcam frames of the monitor on port 18766 (the webcam sharing asks that port too), so a monitor must run
-there, with a crop box. Without `--fake-phone`, the script records the page at `--url` and uses
-the real phone of that monitor.
+there, with a crop box. Without `--fake-phone`, `--url` is required: the script records (and drives) the page at
+that URL and uses the real phone of that monitor. Only the user runs it against the real monitor page; there is no
+default URL, so it never drives the user's page by itself.
 
 PRIVACY: the webcam can see more than the multimeter. Outside the crop box, the recorder darkens and blurs the
 view. It hides the webcam while there is no crop box, and it hides the log rows from before the recording (their
@@ -43,7 +44,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FAKE_PHONE = REPO_ROOT / "scripts" / "fake_phone.py"
 FAKE_ADB = REPO_ROOT / "scripts" / "fake_adb.py"
 FAKE_SERIAL = "fake-phone-0001"
-DEFAULT_URL = "http://127.0.0.1:18766/"
 DEFAULT_WEBP = REPO_ROOT / "docs" / "images" / "monitor-demo.webp"
 DEFAULT_MP4 = REPO_ROOT / "docs" / "images" / "monitor-demo.mp4"
 # The demo server binds a free port for its own page (never the user's 18766); it finds the webcam owner on 18766
@@ -126,7 +126,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 @dataclass(frozen=True)
 class Options:
-    url: str
+    # None with --fake-phone: the demo server gives the URL.
+    url: str | None
     webp: Path
     mp4: Path
     headed: bool
@@ -340,7 +341,11 @@ def convert(video: Path, options: Options) -> None:
 
 def parse_args() -> tuple[Options, Path | None]:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--url", default=DEFAULT_URL, help="page to record without --fake-phone")
+    parser.add_argument(
+        "--url",
+        help="the page to record, required without --fake-phone. Only the user runs this against the real monitor "
+        "page: the script clicks through it (N70 of QA round 14).",
+    )
     parser.add_argument("--fake-phone", type=Path, help="start a fake phone with this snapshot and a demo server")
     parser.add_argument("--demo-crop", default=DEFAULT_DEMO_CROP, help="x,y,w,h crop of the demo page")
     parser.add_argument("--webp", type=Path, default=DEFAULT_WEBP)
@@ -348,6 +353,10 @@ def parse_args() -> tuple[Options, Path | None]:
     parser.add_argument("--keep-video", type=Path, help="also copy the raw Playwright video here")
     parser.add_argument("--headed", action="store_true", help="show the browser window")
     args = parser.parse_args()
+    if args.fake_phone is None and args.url is None:
+        parser.error(
+            "give --fake-phone (a demo server), or --url of a page that you run (only the user records the real page)"
+        )
     options = Options(
         url=args.url,
         webp=args.webp,
@@ -367,6 +376,7 @@ def main() -> None:
                 print(f"demo page: {url}")
                 video = record(options, url, Path(directory))
         else:
+            assert options.url is not None  # parse_args requires it without --fake-phone
             video = record(options, options.url, Path(directory))
         if keep_video is not None:
             shutil.copy(video, keep_video)

@@ -1227,3 +1227,26 @@ I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.
 ### Checks
 
 - `uv run pytest`: 1103 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## QA round 15 (dd-mcp section of `docs/briefs/qa-round15.md`, the last fix round)
+
+### What I did
+
+- N65 and N66 (`server.py`, the lifespan cleanup):
+  - The save of kept unsafe readings (`services.bench.save_unsaved_at_exit()`) now runs first, in its own `try`, before `monitor.stop()`. So a slow monitor stop (up to 15 s) or a failed one cannot skip or delay it.
+  - `monitor.stop()` has its own `try`, so `services.aclose()` (the phone and vision clients) runs also when the monitor stop raises.
+  - `after_stop` (the exit watchdog) stays in the outer `finally`.
+- N65, a cut save (`bench_state.py`): a shield does not stop a second interrupt (a native cancel, or the runner's `KeyboardInterrupt`). `save_unsaved_at_exit` now logs it at warning level ("N unsafe readings may not be in the bench state file: a second interrupt cut the exit save (CancelledError)"), then lets the interrupt go on. A busy lock, an `OSError`, and the time limit are logged as before.
+- N67 (`shutdown.py`): `route_sigterm_to_ctrl_c` sends SIGTERM through SIGINT only when the SIGINT handler is the default one, and returns True in that case. A process that starts with SIGINT ignored (a background job of a script) keeps the default SIGTERM, which stops it at once, as before round 14.
+- Docs: the exit sentence in the "Bench state" bullet of `mcp/README.md`.
+
+### Tests (`mcp/tests/test_exit_save.py`, through the lifespan)
+
+- N65: SIGTERM, then SIGINT 0.2 s later (as `uv run` with watchexec sends them), with a monitor stop of 3 s: `KeyboardInterrupt`, the kept reading is in the file, and `after_stop` runs. Before the fix, the SIGINT cut the save, because it ran after the monitor stop.
+- N66: a monitor stop that raises: the error comes out of the lifespan; the reading is saved, the phone and vision clients are closed, and `after_stop` runs.
+- N65 log: a native cancel of the save while the lock is busy gives the warning line.
+- N67: with SIGINT ignored, SIGTERM keeps `SIG_DFL`; with the default SIGINT handler, SIGTERM is routed.
+
+### Checks
+
+- `uv run pytest`: 1107 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
