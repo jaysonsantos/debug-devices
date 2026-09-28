@@ -21,14 +21,20 @@ PAGE_PORT = 40123
 OTHER_PID = os.getpid() + 1
 
 
-def whoami(port: int, *, pid: int = OTHER_PID, streaming: bool = True, device: Path = DEVICE) -> dict:
+# The owner's crop box: frames of another monitor are taken only with it (N51 of QA round 12).
+OWNER_CROP = {"x": 10, "y": 20, "width": 300, "height": 120}
+
+
+def whoami(
+    port: int, *, pid: int = OTHER_PID, streaming: bool = True, device: Path = DEVICE, crop: dict | None = OWNER_CROP
+) -> dict:
     return {
         "app": APP_NAME,
         "pid": pid,
         "url": f"http://127.0.0.1:{port}/",
         "webcam": str(device),
         "webcam_running": streaming,
-        "webcam_crop": None,
+        "webcam_crop": crop,
     }
 
 
@@ -38,10 +44,12 @@ class Monitors:
     def __init__(self, identities: dict[int, dict]) -> None:
         self.identities = identities
         self.ports_asked: list[int] = []
+        self.paths_asked: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         port = request.url.port
         self.ports_asked.append(port)
+        self.paths_asked.append(request.url.path)
         if port not in self.identities:
             raise httpx.ConnectError("refused", request=request)
         if request.url.path == remote.WHOAMI_PATH:

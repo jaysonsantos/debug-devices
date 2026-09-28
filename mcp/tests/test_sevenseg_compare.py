@@ -2,6 +2,7 @@
 stability.py, dataset.py, evaluate.py). The local reading never changes the vision result."""
 
 import json
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from debug_devices_mcp.sevenseg.compare import (
     failed,
 )
 from debug_devices_mcp.sevenseg.constants import DATASET_DIR_NAME, LCD_SUFFIX, PROFILE_FILE_NAME, LocalDecoderMode
-from debug_devices_mcp.sevenseg.dataset import Dataset, DatasetEntry, SavedImage, VisionFields, new_entry
+from debug_devices_mcp.sevenseg.dataset import Dataset, DatasetEntry, SavedImage, VisionFields, entry_id_of, new_entry
 from debug_devices_mcp.sevenseg.decode import Gray, decode_jpeg, decode_with_lcd, read_image, warp_size
 from debug_devices_mcp.sevenseg.evaluate import evaluate, load_entries
 from debug_devices_mcp.sevenseg.profile import ProfileError, Symbol, load_profile, save_profile
@@ -333,32 +334,88 @@ def test_the_dataset_keeps_the_newest_entries(tmp_path: Path) -> None:
     assert saved_files(tmp_path) == {"json": 3, "lcd": 3, "other": 0}
 
 
-def test_old_webcam_frames_and_orphan_images_are_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def names(directory: Path) -> set[str]:
+    return {path.name for path in directory.iterdir()}
+
+
+def test_the_writer_removes_old_webcam_frames_and_orphan_images(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     directory = tmp_path / DATASET_DIR_NAME
     directory.mkdir()
-    # The format of the first version: a webcam crop as .jpg next to an entry without the image fields.
+    # The format of the first version: a webcam crop as <uuid>.jpg next to an entry without the image fields.
     old, _ = entry(vision(), FIVE_TEN)
     (directory / f"{old.entry_id}.json").write_text(old.model_dump_json(exclude={"image", "note"}))
     (directory / f"{old.entry_id}.jpg").write_bytes(FIVE_TEN)
-    (directory / "0000-orphan.lcd.png").write_bytes(b"image without an entry")
+    orphan = f"{uuid.uuid7()}{LCD_SUFFIX}"
+    (directory / orphan).write_bytes(b"image without an entry")
+    before = names(directory)
 
+    # N53: evaluate only reads.
     profile = tmp_path / PROFILE_FILE_NAME
     save_profile(PROFILE, profile)
     main(["evaluate", "--dataset", str(directory), "--redecode", "--profile", str(profile)])
-    out = capsys.readouterr().out
-    assert "removed 1 webcam frames of an older version" in out
-    assert "decoded again: 0 of 1 entries" in out
-    assert saved_files(directory) == {"json": 1, "lcd": 0, "other": 0}
-    assert [(saved.entry_id, saved.image, path) for saved, path in Dataset(directory).entries()] == [
-        (old.entry_id, SavedImage.NONE, None)
+    assert "decoded again: 0 of 1 entries" in capsys.readouterr().out
+    assert names(directory) == before
+
+    # The compare writer prunes its own folder.
+    item, lcd = entry(vision(), FIVE_TEN)
+    Dataset(directory).add(item, lcd)
+    assert names(directory) == {f"{old.entry_id}.json", f"{item.entry_id}.json", f"{item.entry_id}{LCD_SUFFIX}"}
+    assert [(saved.entry_id, saved.image) for saved, _ in Dataset(directory).entries()] == [
+        (old.entry_id, SavedImage.NONE),
+        (item.entry_id, SavedImage.LCD),
     ]
 
 
-def test_a_new_entry_also_removes_old_webcam_frames(tmp_path: Path) -> None:
-    (tmp_path / "0000-old.jpg").write_bytes(FIVE_TEN)
-    item, lcd = entry(vision(), FIVE_TEN)
-    Dataset(tmp_path).add(item, lcd)
-    assert saved_files(tmp_path) == {"json": 1, "lcd": 1, "other": 0}
+def test_other_files_in_the_folder_stay(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """N53: a wrong --dataset folder, or a file of the user in the dataset folder, loses nothing."""
+    (tmp_path / "holiday1.jpg").write_bytes(FIVE_TEN)
+    (tmp_path / "holiday2.lcd.png").write_bytes(b"not an entry")
+    # A UUID of another version is not an entry name either.
+    (tmp_path / f"{uuid.uuid4()}.jpg").write_bytes(FIVE_TEN)
+    for index in range(503):
+        (tmp_path / f"notes-{index:03d}.json").write_text("{}")
+    before = names(tmp_path)
+
+    main(["evaluate", "--dataset", str(tmp_path)])
+    assert "entries: 0" in capsys.readouterr().out
+    assert names(tmp_path) == before
+
+    dataset = Dataset(tmp_path, max_entries=3)
+    added = [entry(vision(), FIVE_TEN) for _ in range(5)]
+    for item, lcd in added:
+        dataset.add(item, lcd)
+    kept = {f"{item.entry_id}{suffix}" for item, _ in added[2:] for suffix in (".json", LCD_SUFFIX)}
+    assert names(tmp_path) == before | kept
+
+
+def test_entry_names_are_uuid_v7() -> None:
+    entry_id = str(uuid.uuid7())
+    assert entry_id_of(Path(f"{entry_id}.json"), ".json") == entry_id
+    assert entry_id_of(Path(f"{entry_id}{LCD_SUFFIX}"), LCD_SUFFIX) == entry_id
+    assert entry_id_of(Path(f"{entry_id.upper()}.json"), ".json") is None
+    assert entry_id_of(Path(f"{uuid.uuid4()}.json"), ".json") is None
+    assert entry_id_of(Path("holiday1.jpg"), ".jpg") is None
+
+
+async def test_a_dataset_write_error_keeps_the_local_reading(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """N54: a full disk or a folder without write access costs the dataset entry, never the local reading."""
+    save_profile(PROFILE, tmp_path / PROFILE_FILE_NAME)
+    (tmp_path / DATASET_DIR_NAME).write_text("a file where the dataset folder must be")
+    meter = LocalMeter(tmp_path)
+    frames = meter_frames((FIVE_TEN, raw()), (FIVE_TEN, raw()))
+
+    comparison = meter.compare(vision_result(), frames, crop_set=True)
+    assert (comparison.local_reading.status, comparison.local_reading.display_text) == (LocalStatus.READ, "5.10")
+    assert comparison.local_agrees is True
+    assert "dataset not saved" in comparison.log_line
+    assert "was not saved" in caplog.text
+
+    compared = await compare_local(vision_result(), MeterSource.WEBCAM, frames, crop_set=True, meter=meter)
+    assert compared.local_reading is not None
+    assert compared.local_reading.status is LocalStatus.READ
+    assert compared.local_agrees is True
 
 
 def test_the_evaluation_counts_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

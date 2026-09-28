@@ -121,6 +121,9 @@ class remote:
     # ffmpeg writes "Device or resource busy" when another process reads the V4L2 device.
     BUSY_MARKER = "resource busy"
     ERROR_PREVIEW_CHARS = 300
+    # A `/api/whoami` probe waits at most this long: a stale page port that accepts but never answers must not make
+    # each lookup wait the full webcam timeout (QA round 13).
+    PROBE_TIMEOUT = timedelta(seconds=2)
 
 
 class screen:

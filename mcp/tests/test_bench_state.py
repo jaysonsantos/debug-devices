@@ -1163,20 +1163,21 @@ async def test_the_refusal_asks_for_a_step_that_fits(bench: Bench) -> None:
 
 
 @pytest.mark.parametrize(
-    ("display_text", "user_diode", "model_read_volts", "note"),
+    ("display_text", "user_diode", "model_volt_mode", "note"),
     [
-        ("2.50", True, True, "the model read DC V symbols"),
-        ("2.50", True, False, "above a typical diode drop (1 V)"),
-        ("0.62", True, True, "the model read DC V symbols"),
-        ("0.62", True, False, None),  # a diode drop that the user confirmed
-        ("2.50", False, False, None),  # an LED test from the LCD
-        ("5.10", False, False, "above the diode test voltage of 3 V"),
+        ("2.50", True, MeterMode.DC_VOLTAGE, "the model read DC V symbols"),
+        ("2.50", True, None, "above a typical diode drop (1 V)"),
+        ("0.62", True, MeterMode.DC_VOLTAGE, "the model read DC V symbols"),
+        ("0.62", True, MeterMode.AC_VOLTAGE, "the model read AC V symbols"),
+        ("0.62", True, None, None),  # a diode drop that the user confirmed
+        ("2.50", False, None, None),  # an LED test from the LCD
+        ("5.10", False, None, "above the diode test voltage of 3 V"),
     ],
 )
 def test_a_user_confirmed_diode_mode_does_not_hide_a_voltage(
-    display_text: str, user_diode: bool, model_read_volts: bool, note: str | None
+    display_text: str, user_diode: bool, model_volt_mode: MeterMode | None, note: str | None
 ) -> None:
-    context = DiodeContext(user_diode=user_diode, model_read_volts=model_read_volts)
+    context = DiodeContext(user_diode=user_diode, model_volt_mode=model_volt_mode)
     voltage = diode_voltage(display_text, "V", MeterMode.DIODE, context)
     if note is None:
         assert voltage is None
@@ -1259,6 +1260,77 @@ async def test_the_next_write_saves_an_unsaved_reading(tmp_path: Path, monkeypat
     assert saved.photo_ids == ["photo-1"]
     assert [point.point for point in saved.residual_points] == [f"unknown point {unsafe.capture_id}"]
     assert store.unsaved == 0
+
+
+# endregion
+
+
+# region: QA round 13 (N32 gaps, the N33 save at exit)
+
+
+async def read_with_user_diode(settings: Settings, *answers_: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    services = make_services(settings, FakePhone(), answers(*answers_))
+    async with Client(build_server(services)) as client:
+        await confirm_mode(client, "diode")
+        read = await call(client, "multimeter_read")
+        state = await call(client, "bench_state")
+    return read, state
+
+
+async def test_the_model_mode_of_every_frame_counts(settings: Settings) -> None:
+    # N32 (a): frame 1 is a diode drop for the model, frame 2 shows DC V symbols.
+    drop = {**READING, "mode": "diode", "unit": "V", "display_text": "0.62", "value": 0.62}
+    read, state = await read_with_user_diode(settings, drop, {**drop, "mode": "dc_voltage"})
+
+    assert [frame["model_mode"] for frame in read["frames"]] == ["diode", "dc_voltage"]
+    assert "the model read DC V symbols" in read["bench_notice"]
+    assert state["state"]["residual_points"][0]["safe"] is False
+
+
+async def test_an_unreadable_unit_with_a_user_diode_mode_counts(settings: Settings) -> None:
+    # N32 (b): no unit symbol, the model reads DC V "5.10" in both frames.
+    no_unit = {**READING, "mode": "dc_voltage", "unit": "unknown", "display_text": "5.10", "value": 5.1}
+    read, state = await read_with_user_diode(settings, no_unit)
+
+    assert (read["status"], read["mode"]) == ("uncertain", "diode")
+    assert "5.10 (unit not readable, counted as V) is above the safe residual limit" in read["bench_notice"]
+    assert state["gate"]["unpowered_tests_allowed"] is False
+
+
+@pytest.mark.usefixtures("short_lock")
+async def test_a_kept_unsafe_reading_is_saved_at_exit(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # N33 limit: the background retry did not run; the server stops.
+    monkeypatch.setattr(bench_state, "FLUSH_ATTEMPTS", 0)
+    services = make_services(settings, FakePhone(), no_vision())
+    path = tmp_path / "bench-state.json"
+    services.bench = BenchStateStore(path)
+    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
+    with other_writer(path):
+        await note_meter_reading(services.bench, unsafe)
+    assert BenchStateStore(path).load().residual_points == []
+    await services.aclose()
+    assert [point.point for point in BenchStateStore(path).load().residual_points] == [
+        f"unknown point {unsafe.capture_id}"
+    ]
+
+
+@pytest.mark.usefixtures("short_lock")
+async def test_a_busy_lock_at_exit_logs_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = tmp_path / "bench-state.json"
+    store = BenchStateStore(path)
+    with other_writer(path):
+        await note_meter_reading(store, meter("dc_voltage", "V", 7.0, "7.00"))
+        await store.save_unsaved_at_exit()
+    assert "1 unsafe readings are not in the bench state file at exit" in caplog.text
+    assert BenchStateStore(path).load().residual_points == []
+
+
+def test_an_unreadable_unit_in_diode_mode_counts_above_the_diode_limit() -> None:
+    # N32 (b) without a user mode: the diode rule with the number as volts.
+    assert lcd_voltage("5.10", "", MeterMode.DIODE) is not None
+    assert lcd_voltage("0.62", "", MeterMode.DIODE) is None
 
 
 # endregion

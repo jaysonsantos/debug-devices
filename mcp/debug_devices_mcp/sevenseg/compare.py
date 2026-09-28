@@ -11,6 +11,7 @@ from enum import StrEnum
 from functools import cache
 from pathlib import Path
 
+import cv2
 from pydantic import BaseModel
 
 from debug_devices_mcp.multimeter import (
@@ -113,6 +114,7 @@ class Comparison(BaseModel):
 
 NOT_COMPARED = "not compared"
 UNREADABLE_TEXT = "unreadable"
+DATASET_NOT_SAVED = "dataset not saved (see the server log)"
 FAILED_PROBLEM = "the local decoder failed: {error}"
 # One meter frame: the JPEG that the vision model read, and its reading.
 type MeterFrame = tuple[bytes, MultimeterReading]
@@ -174,14 +176,14 @@ class LocalMeter:
         visions = [VisionFields.of_result(result), *(VisionFields.of_reading(reading) for reading in readings)]
         differ = list(dict.fromkeys(name for seen in visions for name in differences(seen, local)))
         agreed = all(agrees(seen, local) for seen in visions)
-        if self.save_frames:
-            self._save(result, readings, decoded_frames, profile, crop_set)
+        saved = self._save(result, readings, decoded_frames, profile, crop_set) if self.save_frames else True
         elapsed = sum(frame.elapsed.total_seconds() for frame in decoded)
+        line = log_line(local, agreed, differ, elapsed)
         return Comparison(
             local_reading=local,
             local_agrees=agreed,
             differences=differ,
-            log_line=log_line(local, agreed, differ, elapsed),
+            log_line=line if saved else f"{line}; {DATASET_NOT_SAVED}",
         )
 
     def _save(
@@ -191,8 +193,27 @@ class LocalMeter:
         frames: Sequence[tuple[DecodedFrame, Gray | None]],
         profile: MeterProfile,
         crop_set: bool,
+    ) -> bool:
+        """One entry per frame: the warped LCD image only when a crop is set and the frame matches the profile.
+
+        A write error (a full disk, a folder without write access) is logged; the local reading stays valid. False
+        when an entry was not saved.
+        """
+        try:
+            self._write(result, readings, frames, profile, crop_set)
+        except (OSError, cv2.error) as exc:
+            logger.warning("the local meter dataset in %s was not saved: %s", self.dataset.directory, exc)
+            return False
+        return True
+
+    def _write(
+        self,
+        result: MeterResult,
+        readings: Sequence[MultimeterReading],
+        frames: Sequence[tuple[DecodedFrame, Gray | None]],
+        profile: MeterProfile,
+        crop_set: bool,
     ) -> None:
-        """One entry per frame: the warped LCD image only when a crop is set and the frame matches the profile."""
         captures = [*result.frames, *[None] * len(frames)][: len(frames)]
         for reading, (frame, lcd), capture in zip(readings, frames, captures, strict=True):
             entry = new_entry(

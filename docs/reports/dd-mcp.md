@@ -1162,3 +1162,38 @@ I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.
 ### Checks
 
 - `uv run pytest`: 1077 passed, 1 skipped. ruff and prek on `server.py` and the new test file: pass. Nothing committed.
+
+## QA round 13 (dd-mcp section of `docs/briefs/qa-round13.md`)
+
+### What I did
+
+- N32 gaps (`bench_state.py`, and one field in `multimeter.py` and `meter_frames.py`):
+  - (a) `FrameReading` has the new field `model_mode` (the model's own mode of the frame, filled by `frame_of`). `result_voltage` uses the model mode of the result and of every frame. So a DC V frame after a diode frame counts with a user diode mode.
+  - (b) With an unreadable unit, a diode mode (the user's or the model's) now counts the number as volts and goes through the diode rule. Before this fix, the user mode hid it. Above `--max-diode-voltage` it counts, and with a user diode mode also by the DC V and diode-drop rules. The notice shows the reading as "5.10 (unit not readable, counted as V)".
+  - (c) The note names the symbols that the model read: "DC V" or "AC V" (`DiodeContext.model_volt_mode`, `VOLT_SYMBOLS`).
+- N45 (`server.py`, `snapshot_when_ready`):
+  - A hard deadline (`asyncio.timeout(app_start_timeout)`, as `wait_until_ready` has). It also stops a request that is still running.
+  - The final error keeps the app's code and message and adds `SNAPSHOT_RETRY_HINT`: "the server retried the snapshot for N s (the camera was not ready): bring the app to the front, or call phone_connect".
+  - When no answer came before the deadline: `SNAPSHOT_NO_ANSWER` ("the phone did not answer the snapshot in N s: ...").
+- N52 (`server.py`):
+  - `bench_measure` has the new field `warning`. `photo_delay_warning` sets it when the photo comes more than `PHOTO_LATE_LIMIT` (5 s) after the last meter frame.
+  - `BENCH_MEASURE_NOTE` now says: the value and the photo belong together when `warning` is empty; when the photo is late, measure again.
+- N33 limit: `BenchStateStore.save_unsaved_at_exit` stops the background retry and tries one more save. `Services.aclose` calls it (the lifespan end of the server). When the lock is still busy, it logs a warning.
+- Rename: N44 is N45 in `server.py` and `mcp/tests/test_snapshot_retry.py`.
+- Docs: `mcp/README.md` ("Bench measure", the new "Snapshot during a camera change" bullet, and the save at exit).
+
+### Tests
+
+- `test_bench_state.py` ("QA round 13"):
+  - N32 (a): diode frame 0.62 V, then a DC V frame 0.62 V, with a user diode mode: the frames keep their model modes, the notice names DC V, and the point is unsafe.
+  - N32 (b): no unit, the model reads DC V "5.10", with a user diode mode: uncertain, with a notice, and the gate is closed. Without a user mode, "5.10" with no unit counts and "0.62" does not.
+  - N32 (c): the AC V case in the `diode_voltage` table.
+  - N33: a kept reading is saved at `Services.aclose`. A busy lock at exit logs a warning.
+- `test_snapshot_retry.py`:
+  - The timeout error has the retry time and the hint.
+  - A hanging request is stopped by the deadline, after one 503 and with no answer at all, in less than 3 s.
+  - N52: three 503 answers 100 ms apart, with a 100 ms limit, give the late-photo warning. A photo in time gives no warning, and the note has the new text.
+
+### Checks
+
+- `uv run pytest`: 1094 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

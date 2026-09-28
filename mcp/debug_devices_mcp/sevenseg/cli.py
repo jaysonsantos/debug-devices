@@ -135,7 +135,10 @@ class Read(BaseModel):
 
 
 class Evaluate(BaseModel):
-    """The agreement rate per field between the vision model and the local decoder in the compare-mode dataset."""
+    """The agreement rate per field between the vision model and the local decoder in the compare-mode dataset.
+
+    It only reads: it never deletes or changes a file.
+    """
 
     dataset: Path = Field(default_factory=lambda: default_dir() / DATASET_DIR_NAME)
     redecode: bool = Field(
@@ -145,11 +148,8 @@ class Evaluate(BaseModel):
     max_disagreements: int = Field(default=MAX_DISAGREEMENTS, ge=0)
 
     def cli_cmd(self) -> None:
+        # Read only: evaluate never deletes a file (the compare writer prunes its own folder).
         dataset = Dataset(self.dataset)
-        # An older version saved webcam frames: remove them before anything else.
-        removed = dataset.prune()
-        if removed.legacy_frames:
-            print(f"removed {removed.legacy_frames} webcam frames of an older version from {dataset.directory}")
         profile = load_profile(self.profile) if self.redecode else None
         entries, redecoded = load_entries(dataset, profile)
         if profile is not None:

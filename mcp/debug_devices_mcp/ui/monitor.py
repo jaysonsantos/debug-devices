@@ -32,7 +32,7 @@ from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, transf
 from debug_devices_mcp.orientation import OrientationState
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError, Still
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState, ScreenStatus
-from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
+from debug_devices_mcp.remote_webcam import MonitorIdentity, RemoteMonitor, SharedWebcam
 from debug_devices_mcp.scene import SceneWatcher
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
 from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
@@ -256,6 +256,9 @@ class Monitor:
     markings_setter: Callable[[bool], Awaitable[Any]] | None = None
     # The MCP client name from initialize (for example "codex").
     client_name: str | None = None
+    # Finds the primary (the page on this server's own --ui-port) and nothing else; setup sets it. The webcam lookup
+    # (`shared.remote`) also asks other page ports, so it must not decide primary or secondary (N50 of QA round 12).
+    primary_lookup: RemoteMonitor | None = None
     # The serial of the phone that the user selected (page, then config); setup sets it. The ingest route streams only
     # this phone for a secondary server.
     selected_serial: Callable[[], str] | None = None
@@ -762,18 +765,26 @@ class Monitor:
     async def _find_primary(self) -> MonitorIdentity | None:
         """The server with the page on the configured port. A secondary waits a short time for it (a dev monitor
         reload takes about 2 s), so it does not take the port while the primary restarts."""
-        if self.shared is None:
+        lookup = self._primary_lookup()
+        if lookup is None:
             return None
         waited = self.primary_url is not None
         deadline = self._clock() + (defaults.PRIMARY_RESTART_GRACE.total_seconds() if waited else 0)
         while True:
-            primary = await self.shared.remote.find_monitor()
+            primary = await lookup.find_monitor()
             if primary is not None or self._clock() >= deadline:
                 return primary
             await asyncio.sleep(defaults.PRIMARY_POLL.total_seconds())
 
     async def _other_monitor_runs(self) -> bool:
-        return self.shared is not None and await self.shared.remote.find_monitor() is not None
+        lookup = self._primary_lookup()
+        return lookup is not None and await lookup.find_monitor() is not None
+
+    def _primary_lookup(self) -> RemoteMonitor | None:
+        """The own-port lookup; without one (a test), the webcam lookup (it has only the own port there)."""
+        if self.primary_lookup is not None:
+            return self.primary_lookup
+        return self.shared.remote if self.shared is not None else None
 
     async def open_browser(self) -> str | None:
         """Open the page in a new browser window. Return the program, or None when none started."""
@@ -1026,6 +1037,8 @@ class Monitor:
             await self.forwarder.stop()
         if self.shared is not None:
             await self.shared.remote.aclose()
+        if self.primary_lookup is not None:
+            await self.primary_lookup.aclose()
 
     # endregion: lifecycle
 

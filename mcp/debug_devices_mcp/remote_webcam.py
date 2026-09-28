@@ -41,6 +41,17 @@ class RemoteUnavailableError(WebcamError):
     """No other debug-devices monitor answers, or it cannot give a frame."""
 
 
+class RemoteCropMissingError(WebcamError):
+    """The monitor that owns the webcam has no crop box: its frames are whole webcam frames (N51 of QA round 12).
+    Not a RemoteUnavailableError: this process must not read the webcam itself instead."""
+
+
+REMOTE_CROP_MISSING = (
+    "the webcam belongs to the debug-devices monitor at {url}, and it has no crop box: set the crop box on the page "
+    "that owns the webcam. No frame was sent anywhere (a whole webcam frame can show people)."
+)
+
+
 def is_busy(error: WebcamError) -> bool:
     return remote.BUSY_MARKER in str(error).lower()
 
@@ -75,7 +86,9 @@ class RemoteMonitor:
 
     async def _whoami(self, port: int) -> MonitorIdentity | None:
         try:
-            response = await self._http.get(f"{self._url(port)}{remote.WHOAMI_PATH}")
+            response = await self._http.get(
+                f"{self._url(port)}{remote.WHOAMI_PATH}", timeout=remote.PROBE_TIMEOUT.total_seconds()
+            )
             identity = MonitorIdentity.model_validate_json(response.content) if response.status_code == OK else None
         except httpx.HTTPError, ValidationError:
             return None
@@ -94,6 +107,9 @@ class RemoteMonitor:
                 self.base_url = self._url(port)
                 self._http.base_url = self.base_url
                 return identity
+        # None found: the next request is for the own port again (not the port of a monitor that is gone).
+        self.base_url = self._url(self.port)
+        self._http.base_url = self.base_url
         return None
 
     async def find_monitor(self) -> MonitorIdentity | None:
@@ -197,4 +213,7 @@ class SharedWebcam:
         if identity is None:
             raise RemoteUnavailableError(f"no debug-devices monitor answers on {self.remote.base_url} anymore")
         self.remote_identity = identity
+        if identity.webcam_crop is None:
+            # Frames of another monitor only with its crop box (N51 of QA round 12): no whole frame leaves.
+            raise RemoteCropMissingError(REMOTE_CROP_MISSING.format(url=identity.url))
         return await self.remote.capture_jpeg()

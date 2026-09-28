@@ -93,6 +93,8 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             af_mode=services.af_mode,
         ),
     )
+    # The primary is the page on this server's own --ui-port only (N50 of QA round 12).
+    monitor.primary_lookup = RemoteMonitor(settings.ui_port, settings.webcam_timeout)
     monitor.bus.update_phone(in_sensor_zoom_choice=services.in_sensor_zoom.enabled)
     services.in_sensor_zoom.add_listener(monitor.in_sensor_zoom_changed)
     monitor.bus.update_phone(af_mode_choice=services.af_mode.mode)

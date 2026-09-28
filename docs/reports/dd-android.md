@@ -659,6 +659,29 @@ Order: dd-orchestrator, after N42. Contract: `docs/phone-api.md`, the new rule a
   - `in_sensor_zoom: true` is the value that the MCP server sets after an app start. On the S22 the state stays `unsupported`.
   - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward (`tcp:18775`). The MCP forward `tcp:18765` stays.
 
+### Round: QA round 13 (N46, N47, N45 rename, N48 check)
+
+Brief: `docs/briefs/qa-round13.md`, dd-android-2. QA: `docs/reports/dd-qa.md`, "Round 12: check". Base commit: `3a2fd23`.
+
+- **N46 (lock leak in the snapshot wait):** `ControlGate.snapshot` sets a flag after `lock.lock()` returns, inside `withTimeoutOrNull`. The timeout can fire after `lock()` returned, right before the wait block ends. Then `withTimeoutOrNull` returns `null`, but the flag says that this snapshot owns the lock. In that case the snapshot runs, and `finally` unlocks. Before, the snapshot got a 503 and the lock stayed taken. A cancel inside `lock()` does not need the flag: `Mutex.lock` frees the lock itself before it throws.
+- **N47:** `ServerHost` catches `Throwable` in the start and in the stop. An `Error` is logged and the start is tried again, as for an exception. `ApiServer.startEngine` also catches `Throwable` when it stops a failed engine, then throws it again.
+- **N45 rename:** "N44" becomes "N45" in `ControlGate.kt`, `Constants.kt`, `CameraController.kt`, `ControlGateTest.kt`, and `ApiServerTest.kt`. No "N44" is left in `android/app/src`. The `CameraController` class KDoc now says that the camera changes (zoom, torch, focus, overlay, preview flips, rotation, new binds), the start state, and the snapshots go through one `ControlGate`.
+- **N48 check (`docs/phone-api.md` lines 73 and 75):** the app matches the text.
+  - Line 73: until the port is bound, the client gets a refused connection. The app tries again every 2 s (`Constants.Server.START_RETRY_MILLIS = 2_000`).
+  - Line 75: `gate.control` covers `updateZoom`, `setTorch`, `focusAt`, `setOverlay`, `setOverlayVisible`, `setPreviewFlip`, `setRotation`, and `setCameraSettings` (with its new bind). It also covers `setInSensorZoom` from the intent. The start state runs in `gate.start`.
+  - A snapshot checks the start state first (503 at once), then waits at most `SNAPSHOT_READY_WAIT_MILLIS` (5000) for a change, then gets 503 "camera change still running".
+  - A second snapshot waits for `captureLock` with no limit.
+  - A new bind with in-sensor zoom `on` includes the 4 s session check (`SESSION_CHECK_MILLIS`), so it can take more than 5 s.
+  - One detail that the text does not say: the snapshot holds the gate only for the camera capture. The JPEG pixel turn (C13) runs after the gate is free, so a change can run during the turn. The still and its `X-Rotation-Degrees` are already fixed then.
+- **N49:** no change (the MCP server retries).
+- New unit tests, 189 in total, all pass (`--no-daemon`):
+  - `ControlGateTest` +1: a timeout right after the lock does not leak the lock. The test mutex returns from `lock()` only after the snapshot timeout, without a cancel check. The snapshot runs, the lock is free after it, and a change runs. `ControlGate` has a new optional `Mutex` argument for this test.
+  - `ApiServerTest` +1: an `ExceptionInInitializerError` in a start is logged one time and tried again, and the second start works.
+  - Both tests fail with the old code (the old wait; `catch (Exception)` in the start). The server and gate tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked, my own forward `tcp:18775`): 3 app starts. In each, after the first status 200, I sent `POST /v1/camera {"in_sensor_zoom":true}` and a snapshot 50 ms later. All 3 snapshots gave 200 (2.0-2.7 s). In these runs the snapshot took the lock first, and the new bind waited for it. The log of run 3 shows the capture from 27.916 to 29.203, then the new bind (709 ms) ended at 30.039. The round N45 check showed the other order (the snapshot waited for the new bind). No crash. End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward. The MCP forward `tcp:18765` stays.
+- Not in this brief, not changed: the notes (a), (b), and (c) in the N45 row of the Round 12 check (a total failure of a new bind, a pause during a new bind, a pause during `takePicture`).
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

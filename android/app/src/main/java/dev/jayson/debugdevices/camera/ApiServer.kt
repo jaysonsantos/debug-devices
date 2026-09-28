@@ -46,7 +46,9 @@ interface HostedServer {
  * thread to end).
  *
  * A failed start or stop does not end the app: [log] gets it, and a failed start runs again every [retryMillis]
- * until it works, or until a stop or a newer start comes (for example while another app holds the port).
+ * until it works, or until a stop or a newer start comes (for example while another app holds the port). It catches
+ * every [Throwable] (N47): the executor would hide an [Error] (for example from a class that fails to load) with no
+ * log and no retry.
  */
 class ServerHost(
     private val lifecycle: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(::lifecycleThread),
@@ -75,7 +77,7 @@ class ServerHost(
         if (wanted !== server) return
         try {
             server.startEngine()
-        } catch (cause: Exception) {
+        } catch (cause: Throwable) {
             if (failedStarts++ == 0) log(Constants.Messages.SERVER_START_FAILED + retryMillis, cause)
             lifecycle.schedule({ tryStart(server) }, retryMillis, TimeUnit.MILLISECONDS)
             return
@@ -88,7 +90,7 @@ class ServerHost(
         running = null
         try {
             server.stopEngine()
-        } catch (cause: Exception) {
+        } catch (cause: Throwable) {
             log(Constants.Messages.SERVER_STOP_FAILED, cause)
         }
     }
@@ -146,7 +148,7 @@ class ApiServer(
         val next = newEngine()
         try {
             next.start(wait = false)
-        } catch (cause: Exception) {
+        } catch (cause: Throwable) {
             next.stop(0L, 0L)
             throw cause
         }

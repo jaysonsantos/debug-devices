@@ -396,6 +396,8 @@ class FrameReading(BaseModel):
     value: float | None
     confidence: float
     status: MeterStatus
+    # With a user-confirmed mode (the checked `mode`): the mode that the model read in this frame.
+    model_mode: MeterMode | None = None
 
 
 class MeterResult(BaseModel):

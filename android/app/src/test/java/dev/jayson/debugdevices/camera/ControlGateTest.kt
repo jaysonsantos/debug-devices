@@ -1,11 +1,15 @@
 package dev.jayson.debugdevices.camera
 
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -82,7 +86,7 @@ class ControlGateTest {
     private fun snapshotError(error: Throwable?) = (error as ApiException).let { it.code to it.message }
 
     @Test
-    fun `a snapshot waits for a running change, then runs (N44)`() = runTest {
+    fun `a snapshot waits for a running change, then runs (N45)`() = runTest {
         val gate = ControlGate().apply { start {} }
         var changeDone = false
         launch {
@@ -98,7 +102,7 @@ class ControlGateTest {
     }
 
     @Test
-    fun `a change longer than the wait gives the snapshot 503, and the change still ends (N44)`() = runTest {
+    fun `a change longer than the wait gives the snapshot 503, and the change still ends (N45)`() = runTest {
         val gate = ControlGate().apply { start {} }
         val wait = Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS
         var changeDone = false
@@ -119,7 +123,7 @@ class ControlGateTest {
     }
 
     @Test
-    fun `a change waits for a running snapshot (N44)`() = runTest {
+    fun `a change waits for a running snapshot (N45)`() = runTest {
         val gate = ControlGate().apply { start {} }
         var snapshotDone = false
         launch {
@@ -145,9 +149,46 @@ class ControlGateTest {
         start.join()
     }
 
+    /**
+     * A mutex whose lock() returns only after the snapshot timeout fired, and without a cancel check: the case of N46
+     * (the timeout fires right before the wait block returns, while the lock is already taken).
+     */
+    private class LateMutex(
+        private val scope: CoroutineScope,
+        private val lateMillis: Long,
+        private val delegate: Mutex = Mutex()
+    ) : Mutex by delegate {
+        var late = false
+
+        override suspend fun lock(owner: Any?) {
+            delegate.lock(owner)
+            if (!late) return
+            suspendCoroutine { continuation ->
+                scope.launch {
+                    delay(lateMillis)
+                    continuation.resume(Unit)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a timeout right after the lock does not leak the lock (N46)`() = runTest {
+        val wait = Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS
+        val mutex = LateMutex(backgroundScope, wait + SLOW_CHANGE_MILLIS)
+        val gate = ControlGate(mutex).apply { start {} }
+        mutex.late = true
+        // The timeout fired, but this snapshot owns the lock: it runs, then it frees the lock.
+        assertEquals(STILL, gate.snapshot(wait) { STILL })
+        mutex.late = false
+        assertFalse(mutex.isLocked)
+        assertEquals(1, gate.control { 1 })
+    }
+
     private companion object {
         const val CONCURRENT_REQUESTS = 20
         const val STEP_DELAY_MILLIS = 10L
         const val SLOW_CHANGE_MILLIS = 1_000L
+        const val STILL = "still"
     }
 }

@@ -63,7 +63,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * CameraX back camera behind [CameraPort]. Every CameraX call runs on the main thread.
- * Zoom, torch, and the start state go through one [ControlGate].
+ * The camera changes (zoom, torch, focus, overlay, preview flips, rotation, new binds), the start state, and the
+ * snapshots go through one [ControlGate] (N45).
  */
 class CameraController(
     private val context: Context,
@@ -763,7 +764,7 @@ class CameraController(
     override suspend fun capture(): Snapshot = captureLock.withLock {
         // The rotation that this still uses, read next to the capture (C12: the header, not an older status).
         var rotationDegrees = 0
-        // N44: one at a time with the camera changes, so a new bind never makes the still fail.
+        // N45: one at a time with the camera changes, so a new bind never makes the still fail.
         val jpeg = gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) {
             withContext(Dispatchers.Main) {
                 activeCamera()

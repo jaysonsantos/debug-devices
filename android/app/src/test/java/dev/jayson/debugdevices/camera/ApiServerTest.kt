@@ -126,7 +126,7 @@ class ApiServerTest {
                 .also { status = it }
         }
 
-        /** Like the real camera: one at a time with the changes (N44). */
+        /** Like the real camera: one at a time with the changes (N45). */
         var snapshotWaitMillis = Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS
 
         override suspend fun capture(): Snapshot = gate.snapshot(snapshotWaitMillis) {
@@ -620,7 +620,7 @@ class ApiServerTest {
     }
 
     @Test
-    fun `a snapshot during a slow change waits, then 200 (N44)`() {
+    fun `a snapshot during a slow change waits, then 200 (N45)`() {
         val entered = CompletableDeferred<Unit>()
         val order = CopyOnWriteArrayList<String>()
         val camera = ready(ready).apply {
@@ -645,7 +645,7 @@ class ApiServerTest {
     }
 
     @Test
-    fun `a change longer than the snapshot wait gives 503 camera change still running (N44)`() {
+    fun `a change longer than the snapshot wait gives 503 camera change still running (N45)`() {
         val entered = CompletableDeferred<Unit>()
         val camera = ready(ready).apply {
             snapshotWaitMillis = SHORT_SNAPSHOT_WAIT_MILLIS
@@ -1156,17 +1156,41 @@ class ApiServerTest {
     }
 
     /** A server without sockets, for the host rules. */
-    private class FakeServer(private val stopError: Exception? = null) : HostedServer {
+    private class FakeServer(
+        private val stopError: Throwable? = null,
+        private val startErrors: ArrayDeque<Throwable> = ArrayDeque()
+    ) : HostedServer {
+        @Volatile
         var starts = 0
         var stops = 0
 
         override fun startEngine() {
             starts++
+            startErrors.removeFirstOrNull()?.let { throw it }
         }
 
         override fun stopEngine() {
             stops++
             stopError?.let { throw it }
+        }
+    }
+
+    @Test
+    fun `an Error in a start is logged and tried again (N47)`() {
+        val lifecycle = Executors.newSingleThreadScheduledExecutor()
+        try {
+            val host = ServerHost(lifecycle, RETRY_MILLIS) { message, cause -> hostLog += message to cause }
+            // For example a Ktor class that fails to load: not an Exception.
+            val error = ExceptionInInitializerError("engine class")
+            val server = FakeServer(startErrors = ArrayDeque(listOf(error)))
+            host.start(server)
+            waitUntil { server.starts == 2 }
+            lifecycle.submit {}.get(SERVER_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            assertEquals(Constants.Messages.SERVER_START_FAILED + RETRY_MILLIS to error, hostLog.first())
+            assertTrue(hostLog.last().first.startsWith(Constants.Messages.SERVER_STARTED_AFTER_RETRY))
+            assertEquals(2, hostLog.size)
+        } finally {
+            lifecycle.shutdownNow()
         }
     }
 

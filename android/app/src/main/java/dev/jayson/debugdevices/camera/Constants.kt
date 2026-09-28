@@ -148,7 +148,7 @@ object Constants {
         const val HEADER_ROTATION_DEGREES = "X-Rotation-Degrees"
         const val HEADER_APP_START_ID = "X-App-Start-Id"
 
-        /** How long a snapshot waits for a running camera change (N44, `SNAPSHOT_READY_WAIT` in the contract). */
+        /** How long a snapshot waits for a running camera change (N45, `SNAPSHOT_READY_WAIT` in the contract). */
         const val SNAPSHOT_READY_WAIT_MILLIS = 5_000L
     }
 

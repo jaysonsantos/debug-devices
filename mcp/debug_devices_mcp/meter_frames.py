@@ -135,6 +135,7 @@ def frame_of(result: MeterResult) -> FrameReading:
         value=result.value,
         confidence=result.confidence,
         status=result.status,
+        model_mode=result.model_mode,
     )
 
 

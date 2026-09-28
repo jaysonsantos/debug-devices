@@ -194,3 +194,37 @@ What changed:
 - N41: an AC/DC change is unstable; 1 readable frame of 2 is unreadable; 2 readable frames of 3 that agree are read.
 - CLI: 10 user errors give one line on stderr, exit code 1, and no traceback.
 - `uv run pytest mcp/tests/test_sevenseg_*.py`: 87 passed. The full suite: 1074 passed, 1 skipped. `prek` on my files: passed.
+
+## QA round 13 (`docs/briefs/qa-round13.md`, section dd-meter)
+
+Base commit: `3a2fd23`. Not committed.
+
+### N53 (data loss): the prune deleted files in any folder
+
+What happened: `evaluate` ran `Dataset.prune` first. The prune deleted every `*.jpg`, every `*.json` after the newest 500, and every `*.lcd.png` without an entry, in any `--dataset` folder.
+
+What changed:
+
+- `evaluate` only reads. It never deletes or changes a file.
+- Only the compare writer (`Dataset.add` from `LocalMeter`) prunes, and only its own folder (`<state>/sevenseg/dataset`).
+- The dataset reads, counts, and deletes only files with a UUID v7 entry name: `<uuid>.json`, `<uuid>.lcd.png`, and `<uuid>.jpg` (a webcam frame of the first version). The name must be a canonical UUID v7 (`entry_id_of` in `sevenseg/dataset.py`). All other files stay, also a UUID v4 name.
+- The 500 limit counts only entry files.
+
+### N54: a dataset write error replaced a valid local reading
+
+What happened: a write error (for example a full disk) raised inside `LocalMeter.compare`. `compare_local` then replaced the valid local reading with "the local decoder failed".
+
+What changed: `LocalMeter._save` catches `OSError` and `cv2.error`. It logs a warning ("the local meter dataset in <folder> was not saved"), and the log line gets "; dataset not saved (see the server log)". The local reading and `local_agrees` stay. The vision result does not change.
+
+### N44 and N45
+
+My files have no "N44" or "N45" text. No rename.
+
+### Tests
+
+- A folder with `holiday1.jpg`, `holiday2.lcd.png`, a UUID v4 `.jpg`, and 503 other `.json` files: `evaluate` changes no file and counts 0 entries. The writer (limit 3) then adds 5 entries: every other file stays, and only the newest 3 entries remain.
+- An entry of the first version with its `<uuid>.jpg` and an orphan `<uuid>.lcd.png`: `evaluate --redecode` changes no file. The next write removes only the old `.jpg` and the orphan image.
+- `entry_id_of`: a UUID v7 name is an entry; an upper-case UUID, a UUID v4, and `holiday1.jpg` are not.
+- A dataset path that is a file (the write fails): the local reading stays `read` with "5.10", `local_agrees` is true, the log line says "dataset not saved", and the server log has the warning. The same through `compare_local`.
+- `uv run pytest mcp/tests/test_sevenseg_*.py`: 89 passed. `prek` on my files: passed.
+- The full suite: 1079 passed, 1 skipped, 1 failed. The failure is `test_remote_ports.py::test_a_busy_webcam_uses_the_running_monitor_on_the_default_port`: it tests `remote_webcam.py`, which dd-ui changes in this round (N50, N51). It fails alone too, and it does not use the sevenseg code.

@@ -3,8 +3,11 @@
 It lives in the state folder, never in the repo. It never keeps a webcam frame: an entry has the warped LCD image
 only (the LCD area of the profile), and only when a webcam crop is set and the frame matches the profile. Otherwise
 the entry has the text results and a note. At most `max_entries` entries stay: the oldest go first (the ids are
-UUID v7, so the name order is the time order). A prune also removes webcam frames of an older version (`*.jpg`) and
-images without an entry.
+UUID v7, so the name order is the time order). A prune also removes webcam frames of an older version and images
+without an entry.
+
+Only files with a UUID v7 entry name (`<uuid>.json`, `<uuid>.lcd.png`, `<uuid>.jpg`) belong to the dataset. The
+dataset never reads, counts, or deletes any other file, so a wrong `--dataset` folder loses nothing.
 """
 
 import logging
@@ -100,11 +103,33 @@ def new_entry(
     )
 
 
+UUID_V7 = 7
+
+
+def entry_id_of(path: Path, suffix: str) -> str | None:
+    """The entry id of a dataset file: a canonical UUID v7 before `suffix`. None for any other file."""
+    if not path.name.endswith(suffix):
+        return None
+    stem = path.name.removesuffix(suffix)
+    try:
+        parsed = uuid.UUID(stem)
+    except ValueError:
+        return None
+    return stem if parsed.version == UUID_V7 and str(parsed) == stem else None
+
+
+def dataset_files(directory: Path, suffix: str) -> list[Path]:
+    """The files of the dataset with this suffix (UUID v7 names only), oldest first."""
+    if not directory.is_dir():
+        return []
+    return sorted(path for path in directory.glob(f"*{suffix}") if entry_id_of(path, suffix) is not None)
+
+
 class Pruned(BaseModel):
     """What a prune removed."""
 
     entries: int
-    # Webcam frames (`*.jpg`) of an older version: the dataset keeps only LCD images now.
+    # Webcam frames (`<uuid>.jpg`) of an older version: the dataset keeps only LCD images now.
     legacy_frames: int
     orphan_images: int
 
@@ -139,22 +164,24 @@ class Dataset:
         return entry
 
     def entry_paths(self) -> list[Path]:
-        if not self.directory.is_dir():
-            return []
-        return sorted(self.directory.glob(f"*{JSON_SUFFIX}"))
+        return dataset_files(self.directory, JSON_SUFFIX)
 
     def prune(self) -> Pruned:
-        """Keep the newest `max_entries` entries. Remove older webcam frames (`*.jpg`) and images without an entry."""
+        """Keep the newest `max_entries` entries. Remove older webcam frames and images without an entry.
+
+        Only the compare writer calls it, for its own folder. It touches only files with a UUID v7 entry name.
+        """
         paths = self.entry_paths()
         old_entries = paths[: max(0, len(paths) - self.max_entries)]
         for path in old_entries:
             path.unlink(missing_ok=True)
-        entry_ids = {path.name.removesuffix(JSON_SUFFIX) for path in self.entry_paths()}
-        legacy = sorted(self.directory.glob(f"*{LEGACY_FRAME_SUFFIX}")) if self.directory.is_dir() else []
+        entry_ids = {entry_id_of(path, JSON_SUFFIX) for path in self.entry_paths()}
+        legacy = dataset_files(self.directory, LEGACY_FRAME_SUFFIX)
         for path in legacy:
             path.unlink(missing_ok=True)
-        images = sorted(self.directory.glob(f"*{LCD_SUFFIX}")) if self.directory.is_dir() else []
-        orphans = [path for path in images if path.name.removesuffix(LCD_SUFFIX) not in entry_ids]
+        orphans = [
+            path for path in dataset_files(self.directory, LCD_SUFFIX) if entry_id_of(path, LCD_SUFFIX) not in entry_ids
+        ]
         for path in orphans:
             path.unlink(missing_ok=True)
         return Pruned(entries=len(old_entries), legacy_frames=len(legacy), orphan_images=len(orphans))

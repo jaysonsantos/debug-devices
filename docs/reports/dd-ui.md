@@ -1858,3 +1858,26 @@ The problem (found by dd-meter): a test or a second MCP server started with `--u
   - a busy local webcam uses the running monitor on the default port.
 - `uv run pytest`: 1053 passed, 1 skipped, 7 failed. The 7 failures are in `test_sevenseg_compare.py`, during dd-meter's work on N37 (`sevenseg/` and `config.py` changed during the run). That file alone: 28 passed.
 - ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 47: QA round 13 (dd-ui part)
+
+Base: `3a2fd23`. No "N44" is in my files (the rename is for dd-mcp and dd-android-2).
+
+### What I did
+
+1. **N50, the primary lookup**: the monitor has its own `RemoteMonitor` for its own page port only (`Monitor.primary_lookup`, set by `ui/setup.py`). `_find_primary` and `_other_monitor_runs` use it; they no longer use the webcam lookup, which also asks other page ports. Only the webcam sharing (`shared.remote`) uses the other ports. The lookup is closed at stop. Without `primary_lookup` (a test that builds a monitor directly), the webcam lookup is used, which there has only the own port.
+2. **N51, frames of another monitor**: `SharedWebcam` takes frames of another monitor only with that monitor's crop box. Without one, it raises `RemoteCropMissingError`: "the webcam belongs to the debug-devices monitor at <url>, and it has no crop box: set the crop box on the page that owns the webcam. No frame was sent anywhere". It asks for no frame from the owner.
+   - The error is not a "remote unavailable" error, so the server does not read the webcam itself instead.
+   - It is in the shared capture path, so `multimeter_read`, `bench_measure`, and `webcam_snapshot` refuse such frames too.
+   - The server's own webcam without a crop is as before (the user's own choice).
+3. **The stale port**: each `/api/whoami` probe waits at most `remote.PROBE_TIMEOUT` (2 s), not the webcam timeout (20 s). After a lookup that finds nothing, `RemoteMonitor.base_url` goes back to the own port (the cosmetic point of Round 12).
+4. **`mcp/README.md`**: only the webcam sharing asks the other ports, and the primary or secondary decision, the forwarding, and the secondary screen use only the own port. It also has the crop rule for another monitor's frames, and the 2 s probe.
+
+### Tests
+
+- New `mcp/tests/test_qa_round13.py` (5 tests):
+  - N50, both cases of the check: a server on port 40111 while a monitor runs on 18766 serves its own page and still shares the webcam of 18766; the user's server on 18766 while another page runs serves its own page;
+  - N51: a remote monitor without a crop is refused (no frame asked); `multimeter_read` fails with the message, and the vision fake got no request;
+  - a stale port (a real local socket that accepts and never answers): the lookup ends within 2 s with a probe timeout of 0.3 s, while the webcam timeout is 20 s.
+- `test_remote_ports.py`: the owner in these tests has a crop box now; the fake also records the asked paths.
+- `uv run pytest`: 1092 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

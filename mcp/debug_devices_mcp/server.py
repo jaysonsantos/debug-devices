@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -160,6 +160,14 @@ TOOL_GUIDE = (
 
 
 PHONE_SOURCE = "phone"
+# The last error of a snapshot that got 503 camera_not_ready until the app start timeout ended (N45).
+SNAPSHOT_RETRY_HINT = (
+    "the server retried the snapshot for {seconds:g} s (the camera was not ready): bring the app to the front, or "
+    "call phone_connect"
+)
+SNAPSHOT_NO_ANSWER = (
+    "the phone did not answer the snapshot in {seconds:g} s: bring the app to the front, or call phone_connect"
+)
 NO_SNAPSHOT_YET = "take a phone_snapshot first: {what} are pixels in the last phone_snapshot image"
 NO_OWN_FORWARD = "stopped (no adb forward of this server)"
 OVERLAY_EXPIRED_NOTE = "the boxes and arrows were older than 10 minutes: the phone app removed them"
@@ -629,16 +637,26 @@ class Services:
 
     async def snapshot_when_ready(self) -> Still:
         """One still. During a camera rebind the app answers 503 camera_not_ready (after its own wait): try again every
-        poll interval until the app start timeout ends, then raise that error. Other errors do not retry (N44)."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.settings.app_start_timeout.total_seconds()
-        while True:
-            try:
-                return await self.phone.snapshot()
-            except PhoneApiError as exc:
-                if exc.error.error != ApiErrorCode.CAMERA_NOT_READY or loop.time() >= deadline:
-                    raise
-            await asyncio.sleep(self.settings.poll_interval.total_seconds())
+        poll interval until the app start timeout ends (a hard deadline, as in wait_until_ready: it also stops a
+        request that is still running), then raise that error with the retry time and a hint. Other errors do not
+        retry (N45)."""
+        seconds = self.settings.app_start_timeout.total_seconds()
+        last: PhoneApiError | None = None
+        try:
+            async with asyncio.timeout(seconds):
+                while True:
+                    try:
+                        return await self.phone.snapshot()
+                    except PhoneApiError as exc:
+                        if exc.error.error != ApiErrorCode.CAMERA_NOT_READY:
+                            raise
+                        last = exc
+                    await asyncio.sleep(self.settings.poll_interval.total_seconds())
+        except TimeoutError:
+            if last is None:
+                raise PhoneError(SNAPSHOT_NO_ANSWER.format(seconds=seconds)) from None
+            message = f"{last.error.message}; {SNAPSHOT_RETRY_HINT.format(seconds=seconds)}"
+            raise PhoneApiError(last.status, last.error.model_copy(update={"message": message})) from None
 
     async def phone_snapshot(self) -> tuple[bytes, ImageTransform]:
         """One phone still, shown like the monitor preview: turned by the remaining turn, then the user's flips.
@@ -723,6 +741,8 @@ class Services:
         )
 
     async def aclose(self) -> None:
+        # An unsafe reading that this server could not save yet (the lock was busy) gets one more try (N33).
+        await self.bench.save_unsaved_at_exit()
         await self.phone.aclose()
         await self.vision.aclose()
 
@@ -1291,12 +1311,33 @@ class BenchMeasurement(BaseModel):
     # Seconds from the first meter frame to the phone photo (both start at the same time).
     gap_seconds: float
     note: str
+    # The photo came too late after the last meter frame (for example after a snapshot retry), or None.
+    warning: str | None = None
 
 
+# A phone photo that comes later than this after the last meter frame does not show the probes of the value (N52).
+PHOTO_LATE_LIMIT = timedelta(seconds=5)
 BENCH_MEASURE_NOTE = (
-    "The meter value and the photo belong together: name both capture ids (meter.capture_id, photo.capture_id) "
-    'when you report the value and where the probes touch. Only a meter status "confirmed" is a measurement.'
+    "The meter value and the photo belong together when `warning` is empty: name both capture ids "
+    "(meter.capture_id, photo.capture_id) when you report the value and where the probes touch. When the photo comes "
+    f"more than {PHOTO_LATE_LIMIT.total_seconds():g} s after the last meter frame (for example after a snapshot "
+    'retry), `warning` says so: then measure again. Only a meter status "confirmed" is a measurement.'
 )
+
+
+def photo_delay_warning(meter: MeterResult, photo: SnapshotInfo, limit: timedelta) -> str | None:
+    """A warning when the photo comes more than `limit` after the last meter frame, else None."""
+    times = [frame.captured_at for frame in meter.frames] or [meter.captured_at]
+    last = max((time for time in times if time is not None), default=None)
+    if photo.captured_at is None or last is None:
+        return None
+    late = (photo.captured_at - last).total_seconds()
+    if late <= limit.total_seconds():
+        return None
+    return (
+        f"the photo came {late:.1f} s after the last meter frame (limit {limit.total_seconds():g} s): the probes can "
+        "have moved, so the value and the photo do not belong together; measure again (bench_measure)"
+    )
 
 
 def register_bench_measure_tools(server: MCPServer, services: Services) -> None:
@@ -1337,6 +1378,7 @@ def register_bench_measure_tools(server: MCPServer, services: Services) -> None:
             photo=photo,
             gap_seconds=round(gap, 2),
             note=BENCH_MEASURE_NOTE,
+            warning=photo_delay_warning(meter, photo, PHOTO_LATE_LIMIT),
         )
         content: list[ContentBlock] = [TextContent(type="text", text=result.model_dump_json()), photo_content[1]]
         if include_meter_images:

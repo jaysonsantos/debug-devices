@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import logging
 import math
 import os
 import tempfile
@@ -48,6 +49,8 @@ from debug_devices_mcp.multimeter import (
     unit_parts,
 )
 
+logger = logging.getLogger(__name__)
+
 STATE_VERSION = 1
 # A residual voltage at or below this is safe for a resistance, continuity, or diode test (a board without power).
 SAFE_RESIDUAL_VOLTS = 0.5
@@ -69,6 +72,8 @@ USER_REPORT = "user_report"
 SKIPPED = "skipped"
 MAX_CANDIDATES = 20
 VOLTAGE_MODES = frozenset({MeterMode.DC_VOLTAGE, MeterMode.AC_VOLTAGE})
+VOLT_SYMBOLS = {MeterMode.DC_VOLTAGE: "DC V", MeterMode.AC_VOLTAGE: "AC V"}
+UNREADABLE_UNIT = "(unit not readable, counted as V)"
 # A silicon diode or a MOSFET body diode drops less than this. With a user-confirmed diode mode, a higher value counts
 # as a voltage for the gate (fail safe: an LED test then needs a new DC reading or a clear).
 TYPICAL_DIODE_DROP_MAX = 1.0
@@ -286,8 +291,8 @@ class DiodeContext(BaseModel):
     max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE
     # The mode is diode because the user confirmed it (multimeter.ModeSource.USER), not from the LCD.
     user_diode: bool = False
-    # The model itself read a voltage mode (DC V or AC V symbols) while the user mode says diode.
-    model_read_volts: bool = False
+    # The voltage mode (DC V or AC V symbols) that the model itself read in the result or in any frame, or None.
+    model_volt_mode: MeterMode | None = None
 
 
 def lcd_voltage(
@@ -304,8 +309,11 @@ def diode_rule(volts: float, context: DiodeContext) -> str | None:
             f"a diode reading above the diode test voltage of {context.max_diode_volts:g} V counts as a voltage: the "
             "dial is probably on DC V"
         )
-    if context.user_diode and context.model_read_volts:
-        return "the user confirmed diode mode, but the model read DC V symbols: it counts as a voltage (fail safe)"
+    if context.user_diode and context.model_volt_mode is not None:
+        symbols = VOLT_SYMBOLS[context.model_volt_mode]
+        return (
+            f"the user confirmed diode mode, but the model read {symbols} symbols: it counts as a voltage (fail safe)"
+        )
     if context.user_diode and abs(volts) > TYPICAL_DIODE_DROP_MAX:
         return (
             f"the user confirmed diode mode, but the value is above a typical diode drop ({TYPICAL_DIODE_DROP_MAX:g} "
@@ -327,11 +335,12 @@ def diode_voltage(display_text: str, unit: str, mode: MeterMode, context: DiodeC
     family, prefix = unit_parts(unit)
     if family is UnitFamily.VOLTAGE:
         factor = PREFIX_FACTORS.get(prefix, 1.0)
-    elif family is UnitFamily.UNKNOWN and mode in UNKNOWN_UNIT_VOLT_MODES:
+    elif family is UnitFamily.UNKNOWN and (mode in UNKNOWN_UNIT_VOLT_MODES or mode is MeterMode.DIODE):
+        # An unreadable unit: the number counts as volts; a diode reading then goes through `diode_rule`.
         factor = 1.0
     else:
         return None
-    text = f"{display_text} {unit}".strip()
+    text = f"{display_text} {unit}".strip() if family is UnitFamily.VOLTAGE else f"{display_text} {UNREADABLE_UNIT}"
     overload = is_overload(display_text)
     digits, point = signature(display_text)
     if mode is MeterMode.DIODE:
@@ -350,10 +359,11 @@ def diode_voltage(display_text: str, unit: str, mode: MeterMode, context: DiodeC
 def result_voltage(result: MeterResult, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> LcdVoltage | None:
     """The highest voltage on the LCD of the result and of each frame, each with its own mode (one frame can show a
     misread point, or another mode). A diode mode that the user confirmed must not hide a DC reading."""
+    model_modes = [result.model_mode, *(frame.model_mode for frame in result.frames)]
     context = DiodeContext(
         max_diode_volts=max_diode_volts,
         user_diode=result.mode_source is ModeSource.USER and result.mode is MeterMode.DIODE,
-        model_read_volts=result.model_mode in VOLTAGE_MODES,
+        model_volt_mode=next((mode for mode in model_modes if mode in VOLTAGE_MODES), None),
     )
     readings = [diode_voltage(result.display_text, result.unit, result.mode, context)]
     readings += [diode_voltage(frame.display_text, frame.unit, frame.mode, context) for frame in result.frames]
@@ -495,6 +505,17 @@ class BenchStateStore:
         """Start one background retry that saves the unsaved readings (a few tries, then the next write does it)."""
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.get_running_loop().create_task(self._flush())
+
+    async def save_unsaved_at_exit(self) -> None:
+        """One more try at exit (a stop or a reload of the server): a kept unsafe reading is in memory only."""
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+        if not self.unsaved:
+            return
+        try:
+            await self.update_async(lambda _state: None)
+        except ToolError as exc:
+            logger.warning("%s unsafe readings are not in the bench state file at exit: %s", self.unsaved, exc)
 
     async def _flush(self) -> None:
         for _ in range(FLUSH_ATTEMPTS):
