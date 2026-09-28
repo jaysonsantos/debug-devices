@@ -137,3 +137,67 @@ I did not add the GenCAD 1.4 specification example. The only copy that I found i
 - The FZ and Altium ASCII rotation lines are not tested: no open sample files exist. The FZ change only reads a field that OBV already skipped.
 - XZZ, CAE, and FZ with real keys are not tested (no open samples, no keys).
 - `.pre-commit-config.yaml` was not in the path list of this brief. I created that file in task 1, and the change is one `exclude` line.
+
+## Bench feedback 2: items 10 and 11 (dd-research-2)
+
+Date: 2026-09-27. Brief: `docs/briefs/bench-feedback-2.md`, section "dd-research part". Bench rule kept: no phone, no webcam, no install, no server restart. Only fakes and a generated PDF.
+
+### Item 10: `schematic_find`
+
+- New module `mcp/debug_devices_mcp/schematic.py`:
+  - `pdftotext -bbox <pdf> -` gives every word with its box (PDF points, origin top left). The server keeps this index until the file size or time changes.
+  - Match order: exact word, then a name inside a joined word (`U7301,U7302`, `PP3V3(S5)`), then a part of a longer word (`R19` in `R190`). The last kind is listed only when there is no exact or joined hit; `other_contains_hits` counts it otherwise.
+  - Each hit: page, word, box, page size, and the nearby text (the other words in the crop area, in reading order).
+  - The first 3 hits get a PNG crop: `pdftoppm -f N -l N -r 150 -x -y -W -H -png -singlefile` (PNG on stdout). The margin is the named constant `defaults.MARGIN_PT` (72 pt). The hit has a red outline.
+  - Errors say what to do: no schematic set (how to set it), a missing file, a query with spaces, a poppler failure.
+  - Local only: the result says so (`local_only`). The server never sends the PDF, its text, or the crops to a web service.
+- Configuration (`config.py`, `.env.example`): `DEBUG_DEVICES_SCHEMATIC` / `--schematic` (empty = none), `DEBUG_DEVICES_PDFTOTEXT_PATH`, `DEBUG_DEVICES_PDFTOPPM_PATH`, `DEBUG_DEVICES_SCHEMATIC_TIMEOUT` (60 s).
+- `bench_instructions` returns `schematic` (the file that `schematic_find` reads, and a note when the file is missing). I did not add an MCP resource: the note in `bench_instructions` reaches every client.
+- `flake.nix`: `pkgs.poppler-utils` (poppler 26.06.0) in the MCP group. The old name `poppler_utils` is a removed alias in nixpkgs.
+- Tests: `mcp/tests/test_schematic.py` (16 tests). `mcp/tests/minimal_pdf.py` writes a small PDF with invented text; no real schematic is in the repository. The poppler tests skip when `pdftotext` or `pdftoppm` is not on `PATH`. A fake-runner test checks the exact poppler commands and that nothing else runs.
+- `mcp/README.md`: a row in the tool table and a "Schematic" section.
+
+### Item 11: rotated markings and SMD value codes
+
+- New module `board/rotation.py`: the one table for a marking read upside down. Pairs that turn into each other: 6/9, 3/E, 7/L, n/u, d/p, b/q, M/W, m/w. Characters that stay the same: 0 O o 1 I l 8 S s Z z X x N H 5 2 (and space, dash, underscore). One way only: a turned 1 is read as T. `read_rotated_180` reverses the text and turns each character. A character without an upright form (for example `R`) gives no rotated reading.
+- New module `board/value_code.py`: `decode_value_marking(text)` gives every value-code reading, each marked `interpretation_only`:
+  - EIA 3-digit (`100` = 10 Ω, `472` = 4.7 kΩ, `000` = 0 Ω) and EIA 4-digit (`1002` = 10 kΩ). The last digit is the power of ten, 0-7.
+  - R/K/M as the decimal point (`4R7` = 4.7 Ω, `R19` = 0.19 Ω, `4K7` = 4.7 kΩ). The note says that on an inductor, R codes are µH.
+  - EIA-96 (`01C` = 10 kΩ, `68X` = 49.9 Ω), and a single `0` as a jumper.
+  - An ambiguous code gives all readings (`47R`: 3.01 Ω as EIA-96, 47 Ω as R notation).
+- New module `board/marking_readings.py`: `lookup_marking` matches the marking as seen and, with `try_rotations`, its rotated reading. The rotated reading wins only when its match level is better (exact < prefix < contains < confusion < none). The message says which reading matched and lists the value-code interpretations.
+- `board_match_marking` gets `try_rotations` (default true). The result has three new fields: `reading` (`as_seen` or `rotated_180`), `rotated_reading`, and `value_interpretations`. With the bench example, `"00T"` gives `rotated_reading: "100"` and `100` = 10 Ω (EIA 3-digit, interpretation only).
+- Tests: `mcp/tests/test_marking_rotation.py` (33 tests): the table (every pair turns both ways, every character has one role), the readings, the value codes, the lookup, and the MCP tool.
+
+### For dd-mcp-2: my edits in your area
+
+`board/marking.py` and `board/tools.py` are dd-mcp's files. My edits there are small:
+
+- `board/marking.py`: 2 imports, and 3 new fields with defaults at the end of `MarkingMatch` (`reading`, `rotated_reading`, `value_interpretations`). No change to `find_marking_parts` or `message`.
+- `board/tools.py`: 1 import; `match_marking` gets `try_rotations: bool = True` and calls `lookup_marking` instead of `find_marking_parts`; the new fields go into `MarkingMatch`; the tool gets `try_rotations` and 4 more lines of description.
+- The logic is in my new modules (`board/rotation.py`, `board/value_code.py`, `board/marking_readings.py`), so later changes in your files do not need to touch it.
+- Also: `config.py` (a `schematic` region and `_none_if_empty`), `instructions.py` (the `schematic` field and one optional parameter), and `server.py` (one import and 11 lines in `build_server`).
+
+### Checks
+
+| Check | Command | Result |
+|---|---|---|
+| New tests | `uv run pytest mcp/tests/test_schematic.py mcp/tests/test_marking_rotation.py` | 49 passed |
+| Related tests | the above plus `test_board_marking.py`, `test_instructions.py`, `test_config.py` | 74 passed |
+| All Python tests | `uv run pytest` | 670 passed, 1 skipped (2026-09-27 about 22:45, with the other agents' changes of that time) |
+| Lint | `ruff check` and `ruff format --check` on my files | pass |
+| Hooks | `prek run --files` on my files, `flake.nix`, `.env.example`, `mcp/README.md` | pass |
+| Poppler | `nix develop --command pdftotext -v` | 26.06.0 |
+
+### Notes
+
+- **Dev reload.** Several `debug-devices-mcp-dev` processes run. The reload proxy restarts its server when a `.py` file in `mcp/debug_devices_mcp/` changes. Other agents changed package files at the same time (22:08-22:35), so the reloads were already happening. I did not start, stop, or restart a server myself. If the live bench server is a `-dev` process, it reloaded with each change.
+- I ran `git add -N` (intent to add, no content) on my new files, so that the hooks see them. I did not commit.
+- The schematic path is read at server start. A new path needs a server restart (after "bench done").
+
+### Open
+
+- Rotation covers 180 degrees only. A marking read at 90 degrees needs another table (most characters have no 90-degree reading).
+- An upper-case `U` in a turned photo (a turned `n`) has no entry, because the table keeps only the lower-case pair `n`/`u`.
+- Value codes cover resistors only. Capacitor codes (pF with the 3-digit code) and the EIA 3-digit multipliers 8 and 9 are not decoded.
+- `schematic_find` needs a PDF with text. A scanned schematic (images only) gives no hits. OCR is not in scope.

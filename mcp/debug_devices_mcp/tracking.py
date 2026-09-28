@@ -8,6 +8,9 @@ mm -> current snapshot pixels map is then
     inv(snapshot_to_frame) @ motion @ snapshot_to_frame @ board_to_snapshot
 
 The snapshot and the preview crop the sensor around the same center, so this also follows a zoom change.
+
+Plain highlight boxes (phone_highlight, no registration) use the same tracker with the identity matrix in place of
+`board_to_snapshot`: then `board_to_current()` maps pixels of the snapshot at phone_highlight to a snapshot taken now.
 """
 
 import io
@@ -64,6 +67,8 @@ class MatchResult:
     matrix: Matrix | None
     inliers: int
     matches: int
+    # The RMS reprojection error of the inliers (in the pixels of the matched images), when there is a matrix.
+    error_px: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -98,6 +103,12 @@ def features(image: np.ndarray, mask: np.ndarray | None = None) -> Features:
     return Features(image=image, keypoints=keypoints, descriptors=descriptors)
 
 
+def frame_features(frame_jpeg: bytes) -> Features:
+    """The features of one phone screen frame (only its camera preview part). Several trackers share them."""
+    frame, _ = gray(frame_jpeg)
+    return features(frame, preview_mask(frame.shape))
+
+
 def plausible(matrix: Matrix) -> bool:
     """No mirror, no collapse, no wild perspective."""
     linear = matrix[:2, :2] / matrix[2, 2]
@@ -125,7 +136,26 @@ def match(source: Features, target: Features) -> MatchResult:
     trusted = (
         matrix is not None and inliers >= MIN_INLIERS and inliers >= MIN_INLIER_RATIO * len(good) and plausible(matrix)
     )
-    return MatchResult(matrix=matrix if trusted else None, inliers=inliers, matches=len(good))
+    error = None
+    if matrix is not None and inliers:
+        chosen = inlier_mask.ravel().astype(bool)
+        moved = apply(matrix, src.reshape(-1, 2)[chosen])
+        error = float(np.sqrt(np.mean(np.sum((moved - dst.reshape(-1, 2)[chosen]) ** 2, axis=1))))
+    return MatchResult(matrix=matrix if trusted else None, inliers=inliers, matches=len(good), error_px=error)
+
+
+def match_photos(source_jpeg: bytes, target_jpeg: bytes) -> MatchResult:
+    """Two photos of the same board (the whole images): the homography source pixels -> target pixels, with its
+    quality. The error is in target pixels."""
+    source, source_scale = gray(source_jpeg)
+    target, target_scale = gray(target_jpeg)
+    found = match(features(source), features(target))
+    if found.matrix is None:
+        error = found.error_px / target_scale if found.error_px is not None else None
+        return MatchResult(matrix=None, inliers=found.inliers, matches=found.matches, error_px=error)
+    full = np.linalg.inv(scale_matrix(target_scale)) @ found.matrix @ scale_matrix(source_scale)
+    error = found.error_px / target_scale if found.error_px is not None else None
+    return MatchResult(matrix=full, inliers=found.inliers, matches=found.matches, error_px=error)
 
 
 def scale_matrix(factor: float) -> Matrix:
@@ -142,6 +172,7 @@ def apply(matrix: Matrix, points: np.ndarray) -> np.ndarray:
 class LiveTracker:
     """Follows one registration. `board_to_snapshot`: board mm -> pixels of the agent's snapshot at registration."""
 
+    # The followed registration, or the id of a set of plain highlight boxes.
     registration_id: str
     board_to_snapshot: Matrix
     snapshot_to_frame: Matrix
@@ -183,11 +214,16 @@ class LiveTracker:
         """Match one new frame. Returns True when the tracking was lost with this frame."""
         if not self.following:
             return False
-        frame, _ = gray(frame_jpeg)
-        current = features(frame, preview_mask(frame.shape))
-        found = match(self.reference, current) if frame.shape == self.reference.image.shape else None
+        return self.follow(frame_features(frame_jpeg))
+
+    def follow(self, current: Features) -> bool:
+        """`update` with the features of the frame (from `frame_features`)."""
+        if not self.following:
+            return False
+        shape = current.image.shape
+        found = match(self.reference, current) if shape == self.reference.image.shape else None
         motion = found.matrix if found is not None and found.ok else None
-        if motion is None and self.last is not None and frame.shape == self.last.image.shape:
+        if motion is None and self.last is not None and shape == self.last.image.shape:
             # Far from the reference: chain through the last good frame.
             step = match(self.last, current)
             if step.ok:

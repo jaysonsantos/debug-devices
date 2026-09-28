@@ -80,17 +80,42 @@ class SnapshotOrientation(BaseModel):
 
 
 def orient_jpeg(jpeg: bytes, orientation: SnapshotOrientation) -> bytes:
-    """Apply the EXIF rotation, then the flips. With no flip, the source bytes come back unchanged.
+    """Apply the EXIF rotation, then the flips. With no flip, the source bytes come back unchanged."""
+    return transform_jpeg(jpeg, 0, orientation.flip_horizontal, orientation.flip_vertical)
 
-    The result has no EXIF orientation. It is not larger than the source, like `downscale_jpeg`.
+
+FULL_TURN = 360
+# PIL turns counterclockwise: these give a clockwise turn of the key in degrees.
+CLOCKWISE = {90: PilImage.Transpose.ROTATE_270, 180: PilImage.Transpose.ROTATE_180, 270: PilImage.Transpose.ROTATE_90}
+
+
+# The EXIF orientation values that need no turn (no tag, or "normal").
+NO_EXIF_TURN = frozenset({None, 1})
+EXIF_ORIENTATION_TAG = 0x0112
+
+
+def exif_orientation(jpeg: bytes) -> int | None:
+    with PilImage.open(io.BytesIO(jpeg)) as opened:
+        return opened.getexif().get(EXIF_ORIENTATION_TAG)
+
+
+def transform_jpeg(jpeg: bytes, turn_degrees: int, flip_horizontal: bool, flip_vertical: bool) -> bytes:
+    """Apply the EXIF rotation, then a clockwise quarter turn, then the flips (orientation.ImageTransform).
+
+    With no turn, no flip, and no EXIF rotation, the source bytes come back unchanged. An EXIF rotation is always
+    applied, so the width and height of the result are the ones that a viewer shows. The result has no EXIF
+    orientation. It is not larger than the source, like `downscale_jpeg`.
     """
-    if orientation.unchanged:
+    turn = turn_degrees % FULL_TURN
+    if not (turn or flip_horizontal or flip_vertical) and exif_orientation(jpeg) in NO_EXIF_TURN:
         return jpeg
     with PilImage.open(io.BytesIO(jpeg)) as opened:
         image = ImageOps.exif_transpose(opened)
-        if orientation.flip_horizontal:
+        if turn:
+            image = image.transpose(CLOCKWISE[turn])
+        if flip_horizontal:
             image = ImageOps.mirror(image)
-        if orientation.flip_vertical:
+        if flip_vertical:
             image = ImageOps.flip(image)
         rgb = image.convert(images.JPEG_MODE)
     data = b""

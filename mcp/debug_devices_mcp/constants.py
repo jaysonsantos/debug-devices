@@ -20,6 +20,11 @@ class env:
     ADB_SERIAL = f"{PREFIX}ADB_SERIAL"
     METER_MODEL = f"{PREFIX}METER_MODEL"
     INSTRUCTIONS = f"{PREFIX}INSTRUCTIONS"
+    BENCH_STATE_FILE = f"{PREFIX}BENCH_STATE_FILE"
+    MAX_VOLTAGE = f"{PREFIX}MAX_VOLTAGE"
+    MAX_CURRENT = f"{PREFIX}MAX_CURRENT"
+    METER_FRAME_INTERVAL = f"{PREFIX}METER_FRAME_INTERVAL"
+    METER_COUNTS = f"{PREFIX}METER_COUNTS"
 
 
 class defaults:
@@ -39,6 +44,12 @@ class defaults:
     ADB_TIMEOUT = timedelta(seconds=15)
     WEBCAM_TIMEOUT = timedelta(seconds=20)
     VISION_TIMEOUT = timedelta(seconds=90)
+    # Bench plausibility limits (a laptop or USB-C bench): a meter value above them is disputed.
+    MAX_VOLTAGE = 30.0
+    MAX_CURRENT = 10.0
+    METER_FRAME_INTERVAL = timedelta(seconds=1)
+    # The display counts of the meter (6000 for the Proster T21D). 0: unknown, no display check.
+    METER_COUNTS = 0
     POLL_INTERVAL = timedelta(milliseconds=500)
 
 
@@ -63,6 +74,7 @@ class phone:
     OVERLAY_MAX_BOXES = 8
     OVERLAY_MAX_ARROWS = 4
     OVERLAY_MAX_LABEL = 32
+    OVERLAY_MAX_TAG = 3
     PATH_SNAPSHOT = "/v1/snapshot"
 
 
@@ -80,6 +92,18 @@ class adb:
     AM_START = ("am", "start", "-n")
     DEVICES_HEADER = "List of devices attached"
     STATE_DEVICE = "device"
+    TCPIP = "tcpip"
+    CONNECT = "connect"
+    PAIR = "pair"
+    MDNS = ("mdns", "services")
+    MDNS_UNSUPPORTED_MARKER = "not supported"
+    PM_PATH = ("pm", "path")
+    PACKAGE_PREFIX = "package:"
+    WIFI_ADDRESS = ("ip", "-f", "inet", "addr", "show", "wlan0")
+    CONNECTED_MARKERS = ("connected to", "already connected to")
+    PAIRED_MARKER = "Successfully paired"
+    # The port for `adb tcpip`, and a device serial over Wi-Fi: <ip>:<port>.
+    TCPIP_PORT = 5555
 
 
 class ffmpeg:

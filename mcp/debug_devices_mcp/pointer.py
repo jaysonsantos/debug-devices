@@ -6,6 +6,7 @@ angle on the true-orientation snapshot image (docs/phone-api.md: 0 = right, 90 =
 """
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 from pydantic import BaseModel
@@ -13,8 +14,9 @@ from pydantic import BaseModel
 from debug_devices_mcp.board.dump import Side
 from debug_devices_mcp.board.model import Part
 from debug_devices_mcp.constants import phone
-from debug_devices_mcp.highlight import PixelBox
+from debug_devices_mcp.highlight import BoxVisibility, PixelBox
 from debug_devices_mcp.images import SnapshotOrientation
+from debug_devices_mcp.orientation import as_transform
 from debug_devices_mcp.phone_api import OverlayArrow, OverlayBox
 from debug_devices_mcp.tracking import Matrix, apply
 
@@ -60,31 +62,32 @@ class PointResult(BaseModel):
     overlay_boxes: int | None
     overlay_arrows: int | None
     note: str
+    # Per box: is it on the phone screen? And a warning for the boxes that the user cannot see there.
+    visibility: list[BoxVisibility] = []
+    warning: str | None = None
+    # Set while the user hides the markings in the monitor.
+    markings: str | None = None
 
 
 def true_angle(angle_deg: float, orientation: SnapshotOrientation) -> float:
-    """An angle in the flipped snapshot -> the same direction in the true-orientation snapshot."""
-    if orientation.flip_horizontal:
-        angle_deg = HALF_TURN - angle_deg
-    if orientation.flip_vertical:
-        angle_deg = -angle_deg
-    return angle_deg % FULL_TURN
+    """An angle in the shown snapshot (turned, flipped) -> the same direction in the still of the phone."""
+    return as_transform(orientation).angle_to_true(angle_deg)
 
 
 def shown_angle(angle_deg: float, orientation: SnapshotOrientation) -> float:
-    """The inverse of `true_angle` (a flip is its own inverse)."""
-    return true_angle(angle_deg, orientation)
+    """The inverse of `true_angle`."""
+    return as_transform(orientation).angle_from_true(angle_deg)
 
 
-def edge_point(center: np.ndarray, target: np.ndarray, width: float, height: float) -> np.ndarray:
-    """Where the ray from the image center to the target leaves the image."""
+def edge_point(center: np.ndarray, target: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+    """Where the ray from the view center to the target leaves the view (the rectangle low..high)."""
     direction = target - center
     limits = []
-    for axis, size in ((0, width), (1, height)):
+    for axis in (0, 1):
         if direction[axis] > 0:
-            limits.append((size - center[axis]) / direction[axis])
+            limits.append((high[axis] - center[axis]) / direction[axis])
         elif direction[axis] < 0:
-            limits.append(-center[axis] / direction[axis])
+            limits.append((low[axis] - center[axis]) / direction[axis])
     return center + direction * min(limits)
 
 
@@ -100,15 +103,64 @@ def part_box(part: Part, matrix: Matrix) -> np.ndarray:
     return apply(matrix, corners)
 
 
-def plan(
-    parts: list[Part],
-    registered_side: Side,
-    matrix: Matrix,
-    size: tuple[int, int],
-    orientation: SnapshotOrientation,
-) -> PointPlan:
-    width, height = size
-    center = np.array([width / 2, height / 2])
+@dataclass(frozen=True)
+class ImageFrame:
+    """The agent's image: its size and transform, and `view`: the part that the phone screen shows (x, y, width,
+    height in pixels). Without `view` (the app does not report it), the whole image."""
+
+    size: tuple[int, int]
+    orientation: SnapshotOrientation
+    view: tuple[float, float, float, float] | None = None
+
+
+def view_bounds(frame: ImageFrame) -> tuple[np.ndarray, np.ndarray]:
+    """The low and high corners of the view in pixels of the agent's image."""
+    width, height = frame.size
+    x0, y0, view_width, view_height = frame.view if frame.view is not None else (0.0, 0.0, float(width), float(height))
+    return np.array([x0, y0]), np.array([x0 + view_width, y0 + view_height])
+
+
+def in_view(point: np.ndarray, low: np.ndarray, high: np.ndarray) -> bool:
+    return bool(low[0] <= point[0] <= high[0] and low[1] <= point[1] <= high[1])
+
+
+def arrow_angle(center: np.ndarray, target: np.ndarray, orientation: SnapshotOrientation) -> float:
+    """The direction from the view center to the target, on the true-orientation still."""
+    return true_angle(math.degrees(math.atan2(target[1] - center[1], target[0] - center[0])), orientation)
+
+
+def corners_of(box: PixelBox) -> np.ndarray:
+    right, bottom = box.x + box.width, box.y + box.height
+    return np.array([(box.x, box.y), (right, box.y), (right, bottom), (box.x, bottom)])
+
+
+def follow_boxes(boxes: list[PixelBox], matrix: Matrix, frame: ImageFrame) -> tuple[list[PixelBox], list[OverlayArrow]]:
+    """Plain highlight boxes (pixels of the snapshot at phone_highlight) through `matrix` to a snapshot taken now.
+    A box whose center is in the view: the bounding box of its moved corners, with its label and tag. Else an
+    arrow from the view center toward it, with its label (or tag)."""
+    low, high = view_bounds(frame)
+    center = (low + high) / 2
+    shown, arrows = [], []
+    for box in boxes:
+        corners = apply(matrix, corners_of(box))
+        middle = apply(matrix, np.array([(box.x + box.width / 2, box.y + box.height / 2)]))[0]
+        if in_view(middle, low, high):
+            box_low = corners.min(axis=0)
+            size_px = np.maximum(corners.max(axis=0) - box_low, MIN_BOX_PX)
+            update = {"x": float(box_low[0]), "y": float(box_low[1]), "width": float(size_px[0])}
+            shown.append(box.model_copy(update={**update, "height": float(size_px[1])}))
+        elif len(arrows) < phone.OVERLAY_MAX_ARROWS:
+            angle = arrow_angle(center, middle, frame.orientation)
+            label = (box.label or box.tag or "")[: phone.OVERLAY_MAX_LABEL]
+            arrows.append(OverlayArrow(angle_deg=round(angle, 1), label=label))
+    return shown, arrows
+
+
+def plan(parts: list[Part], registered_side: Side, matrix: Matrix, frame: ImageFrame) -> PointPlan:
+    """A part is in view when its center is in the view; else an arrow from the view center, at the view edge."""
+    orientation = frame.orientation
+    low, high = view_bounds(frame)
+    center = (low + high) / 2
     inverse = np.linalg.inv(matrix)
     boxes, arrows, targets = [], [], []
     for part in parts:
@@ -116,19 +168,19 @@ def plan(
             targets.append(TargetState(refdes=part.name, side=part.side, in_view=None, message=OTHER_SIDE_MESSAGE))
             continue
         target = apply(matrix, np.array([(part.center.x, part.center.y)]))[0]
-        if 0 <= target[0] <= width and 0 <= target[1] <= height:
+        if in_view(target, low, high):
             corners = part_box(part, matrix)
-            low, high = corners.min(axis=0), corners.max(axis=0)
-            size_px = np.maximum(high - low, MIN_BOX_PX)
+            box_low, box_high = corners.min(axis=0), corners.max(axis=0)
+            size_px = np.maximum(box_high - box_low, MIN_BOX_PX)
             if len(boxes) < phone.OVERLAY_MAX_BOXES:
                 label = part.name[: phone.OVERLAY_MAX_LABEL]
-                boxes.append(PixelBox(x=low[0], y=low[1], width=size_px[0], height=size_px[1], label=label))
+                boxes.append(PixelBox(x=box_low[0], y=box_low[1], width=size_px[0], height=size_px[1], label=label))
             targets.append(TargetState(refdes=part.name, side=part.side, in_view=True, message=IN_VIEW_MESSAGE))
             continue
-        edge = edge_point(center, target, width, height)
+        edge = edge_point(center, target, low, high)
         edge_mm, target_mm = apply(inverse, np.array([edge, target]))
         distance_mm = float(np.linalg.norm(target_mm - edge_mm))
-        angle = true_angle(math.degrees(math.atan2(target[1] - center[1], target[0] - center[0])), orientation)
+        angle = arrow_angle(center, target, orientation)
         label = f"{part.name} {distance_label(distance_mm)}"[: phone.OVERLAY_MAX_LABEL]
         if len(arrows) < phone.OVERLAY_MAX_ARROWS:
             arrows.append(OverlayArrow(angle_deg=round(angle, 1), label=label))

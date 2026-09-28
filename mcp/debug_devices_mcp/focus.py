@@ -7,9 +7,10 @@ Pure math on `CameraStatus.focus` and `CameraStatus.optics` (docs/phone-api.md).
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from debug_devices_mcp.images import SnapshotOrientation
+from debug_devices_mcp.orientation import ImageTransform, as_transform
 from debug_devices_mcp.phone_api import CameraStatus, FocusCalibration, InSensorZoom, Optics, SnapshotFocusRequest
 
 CM_PER_METER = 100
@@ -164,11 +165,17 @@ class FocusSource(StrEnum):
 
 
 class SnapshotGeometry(BaseModel):
-    """The last phone_snapshot image as the agent saw it: its size and the flips in it."""
+    """The last phone_snapshot image as the agent saw it: its size and its transform (turn, then flips)."""
 
     width: int
     height: int
-    orientation: SnapshotOrientation
+    orientation: ImageTransform
+
+    @field_validator("orientation", mode="before")
+    @classmethod
+    def _flips_only(cls, value: object) -> object:
+        # Flips alone (a SnapshotOrientation) are a transform without a turn.
+        return as_transform(value) if isinstance(value, SnapshotOrientation) else value
 
 
 class PointOutsideError(ValueError):
@@ -176,14 +183,10 @@ class PointOutsideError(ValueError):
 
 
 def snapshot_focus_request(x: float, y: float, geometry: SnapshotGeometry) -> SnapshotFocusRequest:
-    """Pixels in the flipped, scaled image -> a point from 0 to 1 on the true-orientation snapshot of the phone."""
+    """Pixels in the shown image (turned, flipped, scaled) -> a point from 0 to 1 on the still of the phone."""
     if not (0 <= x <= geometry.width and 0 <= y <= geometry.height):
         raise PointOutsideError(f"({x:g}, {y:g}) is outside the last snapshot ({geometry.width}x{geometry.height} px)")
-    unit_x, unit_y = x / geometry.width, y / geometry.height
-    if geometry.orientation.flip_horizontal:
-        unit_x = 1 - unit_x
-    if geometry.orientation.flip_vertical:
-        unit_y = 1 - unit_y
+    unit_x, unit_y = geometry.orientation.point_to_true(x / geometry.width, y / geometry.height)
     return SnapshotFocusRequest(snapshot_x=unit_x, snapshot_y=unit_y)
 
 

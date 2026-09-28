@@ -15,6 +15,9 @@ interface CameraPort {
     /** Shows highlight boxes over the preview (not in snapshots). An empty list clears them. */
     suspend fun setOverlay(boxes: List<OverlayBox>, arrows: List<OverlayArrow>): CameraStatus
 
+    /** Hides or shows the overlay without changing its boxes and arrows. */
+    suspend fun setOverlayVisible(visible: Boolean): CameraStatus
+
     /** Focuses and meters on one point. The response comes at once; the focus state shows the progress. */
     suspend fun focusAt(target: FocusTarget): CameraStatus
 

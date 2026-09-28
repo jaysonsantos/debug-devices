@@ -58,6 +58,11 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
         env.ADB_SERIAL,
         env.METER_MODEL,
         env.INSTRUCTIONS,
+        env.BENCH_STATE_FILE,
+        env.MAX_VOLTAGE,
+        env.MAX_CURRENT,
+        env.METER_FRAME_INTERVAL,
+        env.METER_COUNTS,
     ):
         monkeypatch.delenv(name, raising=False)
     return Settings(
@@ -65,6 +70,8 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
         poll_interval=timedelta(milliseconds=1),
         app_start_timeout=timedelta(seconds=1),
         instructions_file=tmp_path / "instructions.md",
+        bench_state_file=tmp_path / "bench-state.json",
+        meter_frame_interval=timedelta(0),
     )
 
 

@@ -1,5 +1,6 @@
 """ADB commands: pick the device, forward the port, start the camera app."""
 
+import re
 from datetime import timedelta
 
 from pydantic import BaseModel
@@ -12,6 +13,28 @@ class AdbDevice(BaseModel):
     serial: str
     state: str
     description: str = ""
+
+    def detail(self, key: str) -> str:
+        """A `key:value` detail of `adb devices -l`, for example model or product."""
+        for token in self.description.split():
+            name, _, value = token.partition(":")
+            if name == key:
+                return value
+        return ""
+
+
+class MdnsService(BaseModel):
+    """A wireless-debugging phone that adb sees on the network (`adb mdns services`)."""
+
+    name: str
+    service: str
+    address: str
+
+
+MDNS_COLUMNS = 3
+INET_ADDRESS = re.compile(r"\binet (\d{1,3}(?:\.\d{1,3}){3})/")
+# `pm path` is quick; a phone that does not answer in this time shows "unknown".
+APP_CHECK_TIMEOUT = timedelta(seconds=3)
 
 
 class AdbError(Exception):
@@ -32,6 +55,21 @@ def parse_devices(output: str) -> list[AdbDevice]:
         serial, state, *rest = stripped.split(maxsplit=2)
         devices.append(AdbDevice(serial=serial, state=state, description="".join(rest)))
     return devices
+
+
+def parse_mdns(output: str) -> list[MdnsService]:
+    """Parse `adb mdns services`: name, service type, and address per line after the header."""
+    services = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) == MDNS_COLUMNS and ":" in parts[2]:
+            services.append(MdnsService(name=parts[0], service=parts[1], address=parts[2]))
+    return services
+
+
+def parse_wifi_address(output: str) -> str | None:
+    match = INET_ADDRESS.search(output)
+    return match.group(1) if match else None
 
 
 class Adb:
@@ -59,7 +97,8 @@ class Adb:
             raise AdbError(f"no ready adb device. Connected: {_describe(devices)}")
         if len(ready) > 1:
             raise AdbError(
-                f"several adb devices are connected; set --adb-serial or DEBUG_DEVICES_ADB_SERIAL to one of: "
+                "several adb devices are connected; select the phone in the monitor page (Devices), or set "
+                f"--adb-serial or DEBUG_DEVICES_ADB_SERIAL to one of: "
                 f"{_describe(ready)}"
             )
         return ready[0]
@@ -85,6 +124,60 @@ class Adb:
             raise AppNotInstalledError(_not_installed(serial))
         if adb.AM_ERROR_MARKER in output:
             raise AdbError(f"am start failed on {serial}: {output.strip()}")
+
+    # region: device list and Wi-Fi (only `devices`, `mdns`, `connect`, and `pair` go without -s)
+
+    async def mdns_services(self) -> list[MdnsService] | str:
+        """The wireless-debugging phones on the network, or why this adb cannot list them."""
+        try:
+            result = await self._run(*adb.MDNS)
+        except AdbError as exc:
+            return str(exc)
+        output = result.stdout.decode(errors="replace")
+        if adb.MDNS_UNSUPPORTED_MARKER in output:
+            return output.strip()
+        return parse_mdns(output)
+
+    async def app_installed(self, serial: str) -> bool | None:
+        """True when our camera app is on the device, None when the device does not answer."""
+        try:
+            result = await self._runner.run(
+                [self._adb_path, adb.SERIAL_FLAG, serial, adb.SHELL, *adb.PM_PATH, phone.PACKAGE], APP_CHECK_TIMEOUT
+            )
+        except CommandError:
+            return None
+        output = result.stdout.decode(errors="replace")
+        if adb.PACKAGE_PREFIX in output:
+            return True
+        return False if not result.stderr.strip() else None
+
+    async def wifi_address(self, serial: str) -> str:
+        result = await self._run(adb.SERIAL_FLAG, serial, adb.SHELL, *adb.WIFI_ADDRESS)
+        address = parse_wifi_address(result.stdout.decode(errors="replace"))
+        if address is None:
+            raise AdbError(f"{serial} has no Wi-Fi address (wlan0): connect the phone to the Wi-Fi first")
+        return address
+
+    async def tcpip(self, serial: str, port: int = adb.TCPIP_PORT) -> str:
+        result = await self._run(adb.SERIAL_FLAG, serial, adb.TCPIP, str(port))
+        return result.stdout.decode(errors="replace").strip()
+
+    async def connect(self, address: str) -> str:
+        """`adb connect` exits 0 also when it fails: the output says it."""
+        result = await self._run(adb.CONNECT, address)
+        output = result.stdout.decode(errors="replace").strip()
+        if not output.startswith(adb.CONNECTED_MARKERS):
+            raise AdbError(f"adb connect {address}: {output or 'no answer'}")
+        return output
+
+    async def pair(self, address: str, code: str) -> str:
+        result = await self._run(adb.PAIR, address, code)
+        output = result.stdout.decode(errors="replace").strip()
+        if adb.PAIRED_MARKER not in output:
+            raise AdbError(f"adb pair {address}: {output or 'no answer'}")
+        return output
+
+    # endregion: device list and Wi-Fi
 
     async def _run(self, *args: str) -> CommandResult:
         command = [self._adb_path, *args]

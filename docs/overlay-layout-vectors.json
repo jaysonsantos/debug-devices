@@ -1,0 +1,1721 @@
+{
+  "schema_version": 1,
+  "spec": "docs/overlay-layout.md (Geometry)",
+  "tolerance": 0.01,
+  "generated_by": "scripts/make_overlay_vectors.py (the Python reference layout)",
+  "cases": [
+    {
+      "name": "bench: two small pads 60 px apart (labels covered the other box)",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 700.0,
+            "y": 560.0,
+            "width": 14.0,
+            "height": 12.0,
+            "label": "C12 pad 1 (GND)",
+            "tag": null
+          },
+          {
+            "x": 760.0,
+            "y": 560.0,
+            "width": 14.0,
+            "height": 12.0,
+            "label": "C12 pad 2 (PP3V3)",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "C12 pad 1 (GND)",
+            "rect": {
+              "x": 691.0,
+              "y": 550.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "C12 pad 2 (PP3V3)",
+            "rect": {
+              "x": 751.0,
+              "y": 550.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 727.0,
+              "y": 557.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 787.0,
+              "y": 557.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 1388.0,
+            "y": 1120.0,
+            "width": 172.0,
+            "height": 48.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "C12 pad 1 (GND)",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "C12 pad 2 (PP3V3)",
+              "colour": "#00E5FF"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": {
+          "source": {
+            "x": 663.0,
+            "y": 523.0,
+            "width": 148.0,
+            "height": 86.0
+          },
+          "dest": {
+            "x": 8.0,
+            "y": 8.0,
+            "width": 392.0,
+            "height": 227.78
+          },
+          "scale": 2.65
+        },
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "four boxes in a cluster",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 760.0,
+            "y": 560.0,
+            "width": 40.0,
+            "height": 30.0,
+            "label": "U1",
+            "tag": null
+          },
+          {
+            "x": 806.0,
+            "y": 560.0,
+            "width": 40.0,
+            "height": 30.0,
+            "label": "U2",
+            "tag": null
+          },
+          {
+            "x": 760.0,
+            "y": 596.0,
+            "width": 40.0,
+            "height": 30.0,
+            "label": "U3",
+            "tag": null
+          },
+          {
+            "x": 806.0,
+            "y": 596.0,
+            "width": 40.0,
+            "height": 30.0,
+            "label": "U4",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "U1",
+            "rect": {
+              "x": 760.0,
+              "y": 559.0,
+              "width": 40.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "U2",
+            "rect": {
+              "x": 806.0,
+              "y": 559.0,
+              "width": 40.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "label": "U3",
+            "rect": {
+              "x": 760.0,
+              "y": 595.0,
+              "width": 40.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "label": "U4",
+            "rect": {
+              "x": 806.0,
+              "y": 595.0,
+              "width": 40.0,
+              "height": 32.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 739.0,
+              "y": 566.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 850.0,
+              "y": 566.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 739.0,
+              "y": 602.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 850.0,
+              "y": 602.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 8.0,
+            "width": 52.0,
+            "height": 84.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "U1",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "U2",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "C",
+              "label": "U3",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "D",
+              "label": "U4",
+              "colour": "#FF4081"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": {
+          "source": {
+            "x": 717.0,
+            "y": 517.0,
+            "width": 172.0,
+            "height": 152.0
+          },
+          "dest": {
+            "x": 1168.0,
+            "y": 8.0,
+            "width": 392.0,
+            "height": 346.42
+          },
+          "scale": 2.28
+        },
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "a box at each edge",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 700.0,
+            "y": 0.0,
+            "width": 60.0,
+            "height": 40.0,
+            "label": "top",
+            "tag": null
+          },
+          {
+            "x": 700.0,
+            "y": 1136.0,
+            "width": 60.0,
+            "height": 40.0,
+            "label": "bottom",
+            "tag": null
+          },
+          {
+            "x": 0.0,
+            "y": 560.0,
+            "width": 60.0,
+            "height": 40.0,
+            "label": "left",
+            "tag": null
+          },
+          {
+            "x": 1508.0,
+            "y": 560.0,
+            "width": 60.0,
+            "height": 40.0,
+            "label": "right",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "top",
+            "rect": {
+              "x": 700.0,
+              "y": 0.0,
+              "width": 60.0,
+              "height": 40.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "bottom",
+            "rect": {
+              "x": 700.0,
+              "y": 1136.0,
+              "width": 60.0,
+              "height": 40.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "label": "left",
+            "rect": {
+              "x": 0.0,
+              "y": 560.0,
+              "width": 60.0,
+              "height": 40.0
+            }
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "label": "right",
+            "rect": {
+              "x": 1508.0,
+              "y": 560.0,
+              "width": 60.0,
+              "height": 40.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 764.0,
+              "y": 11.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 764.0,
+              "y": 1147.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 64.0,
+              "y": 571.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 1487.0,
+              "y": 571.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 1084.0,
+            "width": 84.0,
+            "height": 84.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "top",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "bottom",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "C",
+              "label": "left",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "D",
+              "label": "right",
+              "colour": "#FF4081"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": null,
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "a box under every corner: the legend goes outside",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 10.0,
+            "y": 10.0,
+            "width": 120.0,
+            "height": 60.0,
+            "label": "J1",
+            "tag": null
+          },
+          {
+            "x": 1438.0,
+            "y": 10.0,
+            "width": 120.0,
+            "height": 60.0,
+            "label": "J2",
+            "tag": null
+          },
+          {
+            "x": 10.0,
+            "y": 1106.0,
+            "width": 120.0,
+            "height": 60.0,
+            "label": "J3",
+            "tag": null
+          },
+          {
+            "x": 1438.0,
+            "y": 1106.0,
+            "width": 120.0,
+            "height": 60.0,
+            "label": "J4",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "J1",
+            "rect": {
+              "x": 10.0,
+              "y": 10.0,
+              "width": 120.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "J2",
+            "rect": {
+              "x": 1438.0,
+              "y": 10.0,
+              "width": 120.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "label": "J3",
+            "rect": {
+              "x": 10.0,
+              "y": 1106.0,
+              "width": 120.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "label": "J4",
+            "rect": {
+              "x": 1438.0,
+              "y": 1106.0,
+              "width": 120.0,
+              "height": 60.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 134.0,
+              "y": 31.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 1417.0,
+              "y": 31.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 134.0,
+              "y": 1127.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 1417.0,
+              "y": 1127.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 1184.0,
+            "width": 52.0,
+            "height": 84.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "J1",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "J2",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "C",
+              "label": "J3",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "D",
+              "label": "J4",
+              "colour": "#FF4081"
+            }
+          ],
+          "outside": true
+        },
+        "arrows": [],
+        "inset": null,
+        "extra_height": 100.0
+      }
+    },
+    {
+      "name": "one box and an arrow",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 900.0,
+            "y": 400.0,
+            "width": 50.0,
+            "height": 50.0,
+            "label": "U7301",
+            "tag": null
+          }
+        ],
+        "arrows": [
+          {
+            "angle_deg": 200.0,
+            "label": "J4 ~4 cm",
+            "tag": null
+          }
+        ],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "U7301",
+            "rect": {
+              "x": 900.0,
+              "y": 400.0,
+              "width": 50.0,
+              "height": 50.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 954.0,
+              "y": 416.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 1120.0,
+            "width": 100.0,
+            "height": 48.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "U7301",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "J4 ~4 cm",
+              "colour": "#00E5FF"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "J4 ~4 cm",
+            "angle_deg": 200.0,
+            "anchor": [
+              28.0,
+              312.84
+            ]
+          }
+        ],
+        "inset": null,
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "arrows only",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [],
+        "arrows": [
+          {
+            "angle_deg": 0.0,
+            "label": "TP9 ~2 cm",
+            "tag": null
+          },
+          {
+            "angle_deg": 270.0,
+            "label": "U2 ~6 cm",
+            "tag": null
+          }
+        ],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [],
+        "badges": [],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 8.0,
+            "width": 108.0,
+            "height": 48.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "TP9 ~2 cm",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "U2 ~6 cm",
+              "colour": "#00E5FF"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "TP9 ~2 cm",
+            "angle_deg": 0.0,
+            "anchor": [
+              1540.0,
+              588.0
+            ]
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "U2 ~6 cm",
+            "angle_deg": 270.0,
+            "anchor": [
+              784.0,
+              28.0
+            ]
+          }
+        ],
+        "inset": null,
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "given tags and free letters",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 300.0,
+            "y": 300.0,
+            "width": 80.0,
+            "height": 60.0,
+            "label": "voltage regulator",
+            "tag": "U1"
+          },
+          {
+            "x": 600.0,
+            "y": 300.0,
+            "width": 80.0,
+            "height": 60.0,
+            "label": "input cap",
+            "tag": null
+          },
+          {
+            "x": 900.0,
+            "y": 300.0,
+            "width": 80.0,
+            "height": 60.0,
+            "label": "output cap",
+            "tag": "A"
+          },
+          {
+            "x": 1200.0,
+            "y": 300.0,
+            "width": 80.0,
+            "height": 60.0,
+            "label": "fuse",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "U1",
+            "colour": "#00E676",
+            "label": "voltage regulator",
+            "rect": {
+              "x": 300.0,
+              "y": 300.0,
+              "width": 80.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "input cap",
+            "rect": {
+              "x": 600.0,
+              "y": 300.0,
+              "width": 80.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "A",
+            "colour": "#FFEA00",
+            "label": "output cap",
+            "rect": {
+              "x": 900.0,
+              "y": 300.0,
+              "width": 80.0,
+              "height": 60.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FF4081",
+            "label": "fuse",
+            "rect": {
+              "x": 1200.0,
+              "y": 300.0,
+              "width": 80.0,
+              "height": 60.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "U1",
+            "colour": "#00E676",
+            "rect": {
+              "x": 384.0,
+              "y": 321.0,
+              "width": 26.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 684.0,
+              "y": 321.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "A",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 984.0,
+              "y": 321.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "C",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 1284.0,
+              "y": 321.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 1084.0,
+            "width": 180.0,
+            "height": 84.0
+          },
+          "rows": [
+            {
+              "tag": "U1",
+              "label": "voltage regulator",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "input cap",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "A",
+              "label": "output cap",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "C",
+              "label": "fuse",
+              "colour": "#FF4081"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": null,
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "eight tiny boxes packed tight: the badges go around the cluster",
+      "input": {
+        "width": 1568.0,
+        "height": 1176.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 740.0,
+            "y": 560.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 1",
+            "tag": null
+          },
+          {
+            "x": 752.0,
+            "y": 560.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 2",
+            "tag": null
+          },
+          {
+            "x": 764.0,
+            "y": 560.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 3",
+            "tag": null
+          },
+          {
+            "x": 776.0,
+            "y": 560.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 4",
+            "tag": null
+          },
+          {
+            "x": 740.0,
+            "y": 572.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 5",
+            "tag": null
+          },
+          {
+            "x": 752.0,
+            "y": 572.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 6",
+            "tag": null
+          },
+          {
+            "x": 764.0,
+            "y": 572.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 7",
+            "tag": null
+          },
+          {
+            "x": 776.0,
+            "y": 572.0,
+            "width": 8.0,
+            "height": 8.0,
+            "label": "pin 8",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": true
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "pin 1",
+            "rect": {
+              "x": 728.0,
+              "y": 548.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "pin 2",
+            "rect": {
+              "x": 740.0,
+              "y": 548.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "label": "pin 3",
+            "rect": {
+              "x": 752.0,
+              "y": 548.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "label": "pin 4",
+            "rect": {
+              "x": 764.0,
+              "y": 548.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "E",
+            "colour": "#00E676",
+            "label": "pin 5",
+            "rect": {
+              "x": 728.0,
+              "y": 560.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "F",
+            "colour": "#00E5FF",
+            "label": "pin 6",
+            "rect": {
+              "x": 740.0,
+              "y": 560.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "G",
+            "colour": "#FFEA00",
+            "label": "pin 7",
+            "rect": {
+              "x": 752.0,
+              "y": 560.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          },
+          {
+            "tag": "H",
+            "colour": "#FF4081",
+            "label": "pin 8",
+            "rect": {
+              "x": 764.0,
+              "y": 560.0,
+              "width": 32.0,
+              "height": 32.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 707.0,
+              "y": 555.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 747.5,
+              "y": 526.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 788.0,
+              "y": 526.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 800.0,
+              "y": 555.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "E",
+            "colour": "#00E676",
+            "rect": {
+              "x": 735.5,
+              "y": 596.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "F",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 776.0,
+              "y": 596.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "G",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 711.0,
+              "y": 518.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "H",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 800.0,
+              "y": 596.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 1484.0,
+            "y": 1012.0,
+            "width": 76.0,
+            "height": 156.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "pin 1",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "pin 2",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "C",
+              "label": "pin 3",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "D",
+              "label": "pin 4",
+              "colour": "#FF4081"
+            },
+            {
+              "tag": "E",
+              "label": "pin 5",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "F",
+              "label": "pin 6",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "G",
+              "label": "pin 7",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "H",
+              "label": "pin 8",
+              "colour": "#FF4081"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": {
+          "source": {
+            "x": 718.0,
+            "y": 538.0,
+            "width": 88.0,
+            "height": 64.0
+          },
+          "dest": {
+            "x": 8.0,
+            "y": 8.0,
+            "width": 264.0,
+            "height": 192.0
+          },
+          "scale": 3.0
+        },
+        "extra_height": 0.0
+      }
+    },
+    {
+      "name": "a small view full of boxes: no free place, badges fall back with leader lines",
+      "input": {
+        "width": 200.0,
+        "height": 150.0,
+        "min_box": 32.0,
+        "boxes": [
+          {
+            "x": 10.0,
+            "y": 8.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 1",
+            "tag": null
+          },
+          {
+            "x": 72.0,
+            "y": 8.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 2",
+            "tag": null
+          },
+          {
+            "x": 134.0,
+            "y": 8.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 3",
+            "tag": null
+          },
+          {
+            "x": 10.0,
+            "y": 78.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 4",
+            "tag": null
+          },
+          {
+            "x": 72.0,
+            "y": 78.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 5",
+            "tag": null
+          },
+          {
+            "x": 134.0,
+            "y": 78.0,
+            "width": 56.0,
+            "height": 64.0,
+            "label": "part 6",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": false
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "part 1",
+            "rect": {
+              "x": 10.0,
+              "y": 8.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "part 2",
+            "rect": {
+              "x": 72.0,
+              "y": 8.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "label": "part 3",
+            "rect": {
+              "x": 134.0,
+              "y": 8.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "label": "part 4",
+            "rect": {
+              "x": 10.0,
+              "y": 78.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          },
+          {
+            "tag": "E",
+            "colour": "#00E676",
+            "label": "part 5",
+            "rect": {
+              "x": 72.0,
+              "y": 78.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          },
+          {
+            "tag": "F",
+            "colour": "#00E5FF",
+            "label": "part 6",
+            "rect": {
+              "x": 134.0,
+              "y": 78.0,
+              "width": 56.0,
+              "height": 64.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 0.0,
+              "y": 2.9,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              8.5,
+              11.9,
+              10.0,
+              11.9
+            ]
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 91.5,
+              "y": 0.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              100.0,
+              9.0,
+              100.0,
+              9.0
+            ]
+          },
+          {
+            "tag": "C",
+            "colour": "#FFEA00",
+            "rect": {
+              "x": 183.0,
+              "y": 2.9,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              191.5,
+              11.9,
+              190.0,
+              11.9
+            ]
+          },
+          {
+            "tag": "D",
+            "colour": "#FF4081",
+            "rect": {
+              "x": 0.0,
+              "y": 129.1,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              8.5,
+              138.1,
+              10.0,
+              138.1
+            ]
+          },
+          {
+            "tag": "E",
+            "colour": "#00E676",
+            "rect": {
+              "x": 91.5,
+              "y": 132.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              100.0,
+              141.0,
+              100.0,
+              141.0
+            ]
+          },
+          {
+            "tag": "F",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 183.0,
+              "y": 129.1,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": true,
+            "leader": [
+              191.5,
+              138.1,
+              190.0,
+              138.1
+            ]
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 158.0,
+            "width": 84.0,
+            "height": 120.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "part 1",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "part 2",
+              "colour": "#00E5FF"
+            },
+            {
+              "tag": "C",
+              "label": "part 3",
+              "colour": "#FFEA00"
+            },
+            {
+              "tag": "D",
+              "label": "part 4",
+              "colour": "#FF4081"
+            },
+            {
+              "tag": "E",
+              "label": "part 5",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "F",
+              "label": "part 6",
+              "colour": "#00E5FF"
+            }
+          ],
+          "outside": true
+        },
+        "arrows": [],
+        "inset": null,
+        "extra_height": 136.0
+      }
+    },
+    {
+      "name": "phone: two close boxes on a 411 x 914 dp screen (no inset)",
+      "input": {
+        "width": 411.0,
+        "height": 914.0,
+        "min_box": 24.0,
+        "boxes": [
+          {
+            "x": 190.0,
+            "y": 440.0,
+            "width": 10.0,
+            "height": 8.0,
+            "label": "C12 pad 1",
+            "tag": null
+          },
+          {
+            "x": 214.0,
+            "y": 440.0,
+            "width": 10.0,
+            "height": 8.0,
+            "label": "C12 pad 2",
+            "tag": null
+          }
+        ],
+        "arrows": [],
+        "inset": false
+      },
+      "expected": {
+        "boxes": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "label": "C12 pad 1",
+            "rect": {
+              "x": 183.0,
+              "y": 432.0,
+              "width": 24.0,
+              "height": 24.0
+            }
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "label": "C12 pad 2",
+            "rect": {
+              "x": 207.0,
+              "y": 432.0,
+              "width": 24.0,
+              "height": 24.0
+            }
+          }
+        ],
+        "badges": [
+          {
+            "tag": "A",
+            "colour": "#00E676",
+            "rect": {
+              "x": 162.0,
+              "y": 435.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          },
+          {
+            "tag": "B",
+            "colour": "#00E5FF",
+            "rect": {
+              "x": 235.0,
+              "y": 435.0,
+              "width": 17.0,
+              "height": 18.0
+            },
+            "outside": false,
+            "leader": null
+          }
+        ],
+        "legend": {
+          "rect": {
+            "x": 8.0,
+            "y": 858.0,
+            "width": 108.0,
+            "height": 48.0
+          },
+          "rows": [
+            {
+              "tag": "A",
+              "label": "C12 pad 1",
+              "colour": "#00E676"
+            },
+            {
+              "tag": "B",
+              "label": "C12 pad 2",
+              "colour": "#00E5FF"
+            }
+          ],
+          "outside": false
+        },
+        "arrows": [],
+        "inset": null,
+        "extra_height": 0.0
+      }
+    }
+  ]
+}

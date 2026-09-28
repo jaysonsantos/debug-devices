@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from http import HTTPStatus
 
+from debug_devices_mcp.app_start import AppStartWatch
 from debug_devices_mcp.phone_api import (
     AfMode,
     AfModeName,
@@ -32,15 +33,31 @@ class InSensorZoomChoice:
 
     def __init__(self, store: SettingsStore | None = None) -> None:
         self._store = store
-        saved = store.load().in_sensor_zoom if store is not None else None
-        self.enabled = bool(saved)
+        self._value = False
         self._listeners: list[ChoiceListener] = []
+        self._seen = self.enabled
+
+    @property
+    def enabled(self) -> bool:
+        """The choice in the settings file now (shared by all MCP servers), or in memory without a store."""
+        if self._store is None:
+            return self._value
+        return bool(self._store.current().in_sensor_zoom)
 
     def add_listener(self, listener: ChoiceListener) -> None:
         self._listeners.append(listener)
 
+    def refresh(self) -> None:
+        """Tell the listeners when another MCP server changed the file."""
+        enabled = self.enabled
+        if enabled != self._seen:
+            self._seen = enabled
+            for listener in self._listeners:
+                listener(enabled)
+
     def set(self, enabled: bool) -> None:
-        self.enabled = enabled
+        self._value = enabled
+        self._seen = enabled
         if self._store is not None:
             try:
                 saved = self._store.load()
@@ -59,9 +76,11 @@ class InSensorZoomSync:
         self._choice = choice
         # An app from before POST /v1/camera answers 404: warn one time, then stop until the next phone_connect.
         self._unsupported = False
+        self._watch = AppStartWatch("in-sensor zoom")
 
     def reset(self) -> None:
         self._unsupported = False
+        self._watch.reset()
 
     def needs_send(self, status: CameraStatus) -> bool:
         current = status.in_sensor_zoom or InSensorZoom.OFF
@@ -74,7 +93,12 @@ class InSensorZoomSync:
         return await self._phone.camera(CameraSettingsRequest(in_sensor_zoom=self._choice.enabled))
 
     async def ensure(self, status: CameraStatus) -> CameraStatus:
+        """Send the choice after an app restart (or phone_connect) when the phone differs; see app_start.py."""
+        may_send = self._watch.may_send(status)
         if self._unsupported or not self.needs_send(status):
+            return status
+        if not may_send:
+            self._watch.other_client(status, str(status.in_sensor_zoom))
             return status
         try:
             return await self.send()
@@ -101,15 +125,31 @@ class AfModeChoice:
 
     def __init__(self, store: SettingsStore | None = None) -> None:
         self._store = store
-        saved = store.load().af_mode if store is not None else None
-        self.mode: AfModeName = saved or DEFAULT_AF_MODE
+        self._value: AfModeName = DEFAULT_AF_MODE
         self._listeners: list[AfModeListener] = []
+        self._seen = self.mode
+
+    @property
+    def mode(self) -> AfModeName:
+        """The choice in the settings file now (shared by all MCP servers), or in memory without a store."""
+        if self._store is None:
+            return self._value
+        return self._store.current().af_mode or DEFAULT_AF_MODE
 
     def add_listener(self, listener: AfModeListener) -> None:
         self._listeners.append(listener)
 
+    def refresh(self) -> None:
+        """Tell the listeners when another MCP server changed the file."""
+        mode = self.mode
+        if mode != self._seen:
+            self._seen = mode
+            for listener in self._listeners:
+                listener(mode)
+
     def set(self, mode: AfModeName) -> None:
-        self.mode = mode
+        self._value = mode
+        self._seen = mode
         if self._store is not None:
             try:
                 saved = self._store.load()
@@ -131,9 +171,11 @@ class AfModeSync:
         self._phone = phone
         self._choice = choice
         self._stopped = False
+        self._watch = AppStartWatch("autofocus mode")
 
     def reset(self) -> None:
         self._stopped = False
+        self._watch.reset()
 
     def needs_send(self, status: CameraStatus) -> bool:
         if status.af_mode is None or status.af_mode is AfMode.UNKNOWN:
@@ -152,7 +194,12 @@ class AfModeSync:
         return status
 
     async def ensure(self, status: CameraStatus) -> CameraStatus:
+        """Send the choice after an app restart (or phone_connect) when the phone differs; see app_start.py."""
+        may_send = self._watch.may_send(status)
         if self._stopped or not self.needs_send(status):
+            return status
+        if not may_send:
+            self._watch.other_client(status, str(status.af_mode))
             return status
         try:
             return await self.send()
@@ -166,3 +213,85 @@ class AfModeSync:
 
 
 # endregion: autofocus mode
+
+
+# region: markings
+
+
+type MarkingsListener = Callable[[bool], None]
+
+
+class MarkingsChoice:
+    """Show or hide the markings (default shown), saved in the settings file like the other choices."""
+
+    def __init__(self, store: SettingsStore | None = None) -> None:
+        self._store = store
+        self._value = True
+        self._listeners: list[MarkingsListener] = []
+        self._seen = self.visible
+
+    @property
+    def visible(self) -> bool:
+        if self._store is None:
+            return self._value
+        saved = self._store.current().markings_visible
+        return True if saved is None else saved
+
+    def add_listener(self, listener: MarkingsListener) -> None:
+        self._listeners.append(listener)
+
+    def refresh(self) -> None:
+        """Tell the listeners when another MCP server changed the file."""
+        visible = self.visible
+        if visible != self._seen:
+            self._seen = visible
+            for listener in self._listeners:
+                listener(visible)
+
+    def set(self, visible: bool) -> None:
+        self._value = visible
+        self._seen = visible
+        if self._store is not None:
+            try:
+                saved = self._store.load()
+                self._store.save(saved.model_copy(update={"markings_visible": visible}))
+            except OSError as exc:
+                logger.warning("cannot save the markings choice: %s", exc)
+        for listener in self._listeners:
+            listener(visible)
+
+
+class MarkingsSync:
+    """Send the choice to the phone at phone_connect and after an app restart (the app starts with them shown).
+
+    The rule of app_start.py: never send again only because the status differs. An old app (no `overlay_visible`)
+    gets nothing here: while the markings are hidden, Services keeps the boxes off the phone.
+    """
+
+    def __init__(self, phone: PhoneClient, choice: MarkingsChoice) -> None:
+        self._phone = phone
+        self._choice = choice
+        self._watch = AppStartWatch("markings visibility")
+
+    def reset(self) -> None:
+        self._watch.reset()
+
+    async def send(self) -> CameraStatus:
+        """Send the choice now. An old app raises OverlayNotSupportedError (it cannot hide its boxes)."""
+        return await self._phone.overlay_visibility(self._choice.visible)
+
+    async def ensure(self, status: CameraStatus) -> CameraStatus:
+        may_send = self._watch.may_send(status)
+        if status.overlay_visible is None or status.overlay_visible == self._choice.visible:
+            return status
+        if not may_send:
+            self._watch.other_client(status, f"overlay_visible={status.overlay_visible}")
+            return status
+        try:
+            return await self.send()
+        except PhoneError as exc:
+            logger.info("markings visibility not sent: %s", exc)
+        return status
+
+
+# endregion: markings

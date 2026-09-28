@@ -42,3 +42,15 @@ PIN_BOX_MARGIN_MM = 0.3
 # Part name prefixes that mark a test point part (besides the nails of the format).
 TEST_POINT_PREFIXES = ("TP", "PT", "TEST")
 HASH_CHUNK_BYTES = 1024 * 1024
+
+
+class sides:
+    """Side labels of boardview files (bench feedback 2, item 8)."""
+
+    # Mounting holes are visible from both sides, whatever the file says: MH1, H3, HOLE2, SCREW1, STANDOFF4, SPACER1.
+    MOUNTING_HOLE_PATTERN = r"^(?:MH|HOLE|SCREW|STANDOFF|SPACER)\w*$|^H\d+$"
+    # Mixed-side files: the nearest part of the same type (same refdes letters, same pin count) within this distance
+    # has the opposite side label in many places.
+    NEIGHBOUR_MM = 3.0
+    MIN_OPPOSITE_PAIRS = 10
+    MIN_OPPOSITE_FRACTION = 0.3

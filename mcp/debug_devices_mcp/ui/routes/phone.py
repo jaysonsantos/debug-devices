@@ -9,12 +9,14 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from debug_devices_mcp.focus import FocusSource
+from debug_devices_mcp.overlay_layout import LayoutInput, layout
 from debug_devices_mcp.ui.constants import http, tools
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
 from debug_devices_mcp.ui.views import (
     AfModeBody,
     FocusBody,
     InSensorZoomBody,
+    MarkingsBody,
     OrientationBody,
     RotationBody,
     TorchBody,
@@ -100,6 +102,26 @@ async def post_af_mode(request: Request) -> JSONResponse:
     return await run_tool(request, tools.PHONE_AF_MODE, {"mode": body.mode})
 
 
+async def post_markings(request: Request) -> JSONResponse:
+    body = await parse(request, MarkingsBody)
+    if isinstance(body, JSONResponse):
+        return body
+    monitor = monitor_of(request)
+    try:
+        await monitor.set_markings(body.visible)
+    except RuntimeError as exc:
+        return error_response(str(exc), BAD_GATEWAY)
+    return json_response(monitor.bus.phone)
+
+
+async def post_overlay_layout(request: Request) -> JSONResponse:
+    """The highlight layout for the page (docs/overlay-layout.md): one implementation, on the server."""
+    body = await parse(request, LayoutInput)
+    if isinstance(body, JSONResponse):
+        return body
+    return json_response(layout(body))
+
+
 async def post_in_sensor_zoom(request: Request) -> JSONResponse:
     body = await parse(request, InSensorZoomBody)
     if isinstance(body, JSONResponse):
@@ -138,6 +160,8 @@ routes = [
     Route("/api/phone/focus", post_focus, methods=["POST"]),
     Route("/api/phone/highlight/clear", post_clear_highlights, methods=["POST"]),
     Route("/api/phone/af-mode", post_af_mode, methods=["POST"]),
+    Route("/api/phone/markings", post_markings, methods=["POST"]),
+    Route("/api/overlay-layout", post_overlay_layout, methods=["POST"]),
     Route("/api/phone/in-sensor-zoom", post_in_sensor_zoom, methods=["POST"]),
     Route("/api/phone/snapshot", post_snapshot, methods=["POST"]),
     Route("/api/phone/snapshot.jpg", get_last_snapshot, methods=["GET"]),

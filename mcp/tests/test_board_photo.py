@@ -109,7 +109,10 @@ async def test_register_and_locate(settings: Settings, tmp_path: Path) -> None:
     assert u1["on_registered_side"] is True
     assert result["parts"][1]["name"] == "C1"
     assert result["parts"][1]["on_registered_side"] is False
-    assert result["notes"] == ["part 'Q9': not on this board"]
+    assert result["notes"][0] == "part 'Q9': not on this board"
+    # Located positions are boardview estimates, never a visual fact.
+    assert result["identity"] == "candidate"
+    assert "estimates" in result["notes"][-1]
     # PP3V3 pins: U1 pin 1 and R1 pin 2 are on the top; U2 pin 1 is on the bottom and is left out.
     assert sorted((pin["part"], pin["number"]) for pin in result["pins"]) == [("R1", "2"), ("U1", "1")]
     assert result["annotated"] is True

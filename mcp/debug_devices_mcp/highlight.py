@@ -5,15 +5,17 @@ boxes on the true-orientation /v1/snapshot image, from 0 to 1 (docs/phone-api.md
 """
 
 import io
+from enum import StrEnum
 from typing import Annotated, ClassVar
 
 from PIL import Image as PilImage
-from PIL import ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 
-from debug_devices_mcp.constants import images, phone
+from debug_devices_mcp.constants import phone
 from debug_devices_mcp.focus import SnapshotGeometry
-from debug_devices_mcp.phone_api import OverlayBox
+from debug_devices_mcp.overlay_draw import draw_layout
+from debug_devices_mcp.overlay_layout import LayoutBox, assign_tags
+from debug_devices_mcp.phone_api import OverlayBox, PreviewRegion
 
 # The same green as the phone overlay.
 BOX_COLOR = (0, 230, 64)
@@ -23,6 +25,8 @@ LABEL_PADDING_PX = 3
 LABEL_BACKGROUND = (0, 0, 0)
 LABEL_TEXT = (255, 255, 255)
 ANNOTATED_QUALITY = 90
+# A box is fully on the phone screen when this part of its area is in the preview region (float rounding).
+FULLY_INSIDE = 0.999
 # Two sizes of the same photo: the width and height scales differ by at most this part (rounding).
 SAME_SHAPE_TOLERANCE = 0.02
 
@@ -35,12 +39,27 @@ class PixelBox(BaseModel):
     width: Annotated[float, Field(gt=0)]
     height: Annotated[float, Field(gt=0)]
     label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
+    # A short tag (1-3 characters) at the box; without it, the next free letter (A, B, ...).
+    tag: Annotated[str, Field(min_length=1, max_length=phone.OVERLAY_MAX_TAG)] | None = None
+
+
+class LayoutSummary(BaseModel):
+    """How the highlight layout came out (docs/overlay-layout.md)."""
+
+    tags: list[str]
+    # The legend with the labels went below the image: every corner had a box.
+    legend_outside: bool
+    # The tags whose badge had no free place next to the box (drawn outside the cluster, with a leader line).
+    badges_outside: list[str]
+    # An enlarged inset of small boxes is in the annotated image.
+    inset: bool
 
 
 class HighlightResult(BaseModel):
     ESTIMATE_NOTE: ClassVar[str] = (
         "The boxes are your estimate from the last phone_snapshot: say so to the user. Check them in the annotated "
-        "image. Clear them (clear: true) when done or when the phone moves."
+        "image. Clear them (clear: true) when done. With live tracking they follow the board; after a move, take a "
+        "fresh phone_snapshot before you say what is visible."
     )
     CLEARED_NOTE: ClassVar[str] = "The highlight boxes are removed."
 
@@ -50,6 +69,61 @@ class HighlightResult(BaseModel):
     # The number of boxes that the phone shows now (from its status). None: an app without overlay_boxes.
     overlay_boxes: int | None
     note: str
+    # Per box: is it on the phone screen (the preview can show only a part of the still)?
+    visibility: list[BoxVisibility] = []
+    warning: str | None = None
+    # Set while the user hides the markings in the monitor.
+    markings: str | None = None
+    # The tags, and whether the legend or a badge had to move outside (the annotated image shows it).
+    layout: LayoutSummary | None = None
+    # "live tracking on: ..." (the boxes follow the board while the phone moves) or "no live tracking: <reason>".
+    tracking: str | None = None
+
+
+class InPreview(StrEnum):
+    """Is a box on the phone screen? The preview can show only a part of the still (preview_region)."""
+
+    FULLY = "fully"
+    PARTLY = "partly"
+    NOT = "not"
+    # The app does not report its preview region.
+    UNKNOWN = "unknown"
+
+
+class BoxVisibility(BaseModel):
+    label: str
+    in_preview: InPreview
+
+
+PREVIEW_WARNING = "not visible on the phone screen: move the phone or zoom out so it is near the centre"
+PARTLY_WARNING = "only partly visible on the phone screen"
+
+
+def in_preview(box: OverlayBox, region: PreviewRegion | None) -> InPreview:
+    if region is None:
+        return InPreview.UNKNOWN
+    left = max(box.snapshot_x, region.snapshot_x)
+    right = min(box.snapshot_x + box.width, region.snapshot_x + region.width)
+    top = max(box.snapshot_y, region.snapshot_y)
+    bottom = min(box.snapshot_y + box.height, region.snapshot_y + region.height)
+    overlap = max(right - left, 0.0) * max(bottom - top, 0.0)
+    area = box.width * box.height
+    if overlap >= area * FULLY_INSIDE:
+        return InPreview.FULLY
+    return InPreview.PARTLY if overlap > 0 else InPreview.NOT
+
+
+def visibility(boxes: list[OverlayBox], region: PreviewRegion | None) -> tuple[list[BoxVisibility], str | None]:
+    """The visibility of each box, and a warning for the boxes that the user cannot see on the phone."""
+    items = [BoxVisibility(label=box.label, in_preview=in_preview(box, region)) for box in boxes]
+    hidden = [item.label or "a box" for item in items if item.in_preview is InPreview.NOT]
+    partly = [item.label or "a box" for item in items if item.in_preview is InPreview.PARTLY]
+    notes = []
+    if hidden:
+        notes.append(f"{', '.join(hidden)}: {PREVIEW_WARNING}")
+    if partly:
+        notes.append(f"{', '.join(partly)}: {PARTLY_WARNING}")
+    return items, "; ".join(notes) or None
 
 
 class BoxOutsideError(ValueError):
@@ -89,48 +163,52 @@ def scale_boxes(boxes: list[PixelBox], source: tuple[int, int], target: tuple[in
 
 
 def overlay_box(box: PixelBox, geometry: SnapshotGeometry) -> OverlayBox:
-    """Pixels in the flipped, scaled image -> a box from 0 to 1 on the true-orientation snapshot of the phone."""
+    """Pixels in the shown image (turned, flipped, scaled) -> a box from 0 to 1 on the still of the phone."""
     clipped = clip_box(box, geometry.width, geometry.height)
-    unit_x, unit_y = clipped.x / geometry.width, clipped.y / geometry.height
-    unit_width, unit_height = clipped.width / geometry.width, clipped.height / geometry.height
-    # A flip mirrors the box: its far edge becomes its near edge.
-    if geometry.orientation.flip_horizontal:
-        unit_x = 1 - unit_x - unit_width
-    if geometry.orientation.flip_vertical:
-        unit_y = 1 - unit_y - unit_height
+    unit_x, unit_y, unit_width, unit_height = geometry.orientation.box_to_true(
+        clipped.x / geometry.width,
+        clipped.y / geometry.height,
+        clipped.width / geometry.width,
+        clipped.height / geometry.height,
+    )
     return OverlayBox(
         snapshot_x=max(unit_x, 0.0),
         snapshot_y=max(unit_y, 0.0),
         width=unit_width,
         height=unit_height,
         label=clipped.label,
+        tag=clipped.tag,
     )
 
 
-def draw_boxes(jpeg: bytes, boxes: list[PixelBox]) -> bytes:
-    """A copy of the image with green boxes and their labels (the boxes in pixels of this image)."""
+def with_tags(boxes: list[PixelBox]) -> list[PixelBox]:
+    """Every box gets its tag (given ones stay; the others get the next free letter), so that the phone, the
+    annotated image, and the page show the same tags."""
+    tags = assign_tags([box.tag for box in boxes])
+    return [box.model_copy(update={"tag": tag}) for box, tag in zip(boxes, tags, strict=True)]
+
+
+def layout_boxes(boxes: list[PixelBox], width: int, height: int) -> list[LayoutBox]:
+    boxes = [clip_box(box, width, height) for box in boxes]
+    return [
+        LayoutBox(x=box.x, y=box.y, width=box.width, height=box.height, label=box.label, tag=box.tag) for box in boxes
+    ]
+
+
+def draw_highlights(jpeg: bytes, boxes: list[PixelBox]) -> tuple[bytes, LayoutSummary]:
+    """The annotated image by the highlight layout, and its summary."""
     with PilImage.open(io.BytesIO(jpeg)) as opened:
-        image = opened.convert(images.JPEG_MODE)
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default(size=LABEL_FONT_SIZE)
-    for box in boxes:
-        clipped = clip_box(box, image.width, image.height)
-        right, bottom = clipped.x + clipped.width, clipped.y + clipped.height
-        draw.rectangle((clipped.x, clipped.y, right, bottom), outline=BOX_COLOR, width=BOX_WIDTH_PX)
-        if not clipped.label:
-            continue
-        left, top, text_right, text_bottom = draw.textbbox((0, 0), clipped.label, font=font)
-        text_height = text_bottom - top + 2 * LABEL_PADDING_PX
-        # Above the box; below its top edge when there is no room above.
-        label_y = clipped.y - text_height if clipped.y >= text_height else clipped.y + BOX_WIDTH_PX
-        background = (clipped.x, label_y, clipped.x + text_right - left + 2 * LABEL_PADDING_PX, label_y + text_height)
-        draw.rectangle(background, fill=LABEL_BACKGROUND)
-        draw.text(
-            (clipped.x + LABEL_PADDING_PX - left, label_y + LABEL_PADDING_PX - top),
-            clipped.label,
-            fill=LABEL_TEXT,
-            font=font,
-        )
-    output = io.BytesIO()
-    image.save(output, format=images.PIL_JPEG_FORMAT, quality=ANNOTATED_QUALITY)
-    return output.getvalue()
+        width, height = opened.size
+    annotated, result = draw_layout(jpeg, layout_boxes(boxes, width, height))
+    summary = LayoutSummary(
+        tags=[box.tag for box in result.boxes],
+        legend_outside=result.legend is not None and result.legend.outside,
+        badges_outside=[badge.tag for badge in result.badges if badge.outside],
+        inset=result.inset is not None,
+    )
+    return annotated, summary
+
+
+def draw_boxes(jpeg: bytes, boxes: list[PixelBox]) -> bytes:
+    """A copy of the image with the boxes by the highlight layout (the boxes in pixels of this image)."""
+    return draw_highlights(jpeg, boxes)[0]

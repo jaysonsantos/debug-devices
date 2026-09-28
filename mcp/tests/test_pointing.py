@@ -16,7 +16,7 @@ from debug_devices_mcp.board.model import Box, Part, Point
 from debug_devices_mcp.board.tools import BoardSession
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.images import SnapshotOrientation
-from debug_devices_mcp.pointer import OTHER_SIDE_MESSAGE, plan, true_angle
+from debug_devices_mcp.pointer import OTHER_SIDE_MESSAGE, ImageFrame, plan, true_angle
 from debug_devices_mcp.process import CommandResult
 from debug_devices_mcp.server import Services, build_server
 from debug_devices_mcp.tracking import apply
@@ -63,7 +63,7 @@ def test_plan_boxes_arrows_and_the_other_side() -> None:
         part("U2", 50, -30),  # 30 mm above the view
         part("R9", 20, 20, Side.BOTTOM),
     ]
-    result = plan(parts, Side.TOP, matrix, (1000, 800), SnapshotOrientation())
+    result = plan(parts, Side.TOP, matrix, ImageFrame((1000, 800), SnapshotOrientation()))
     [box] = result.boxes
     assert box.label == "C1"
     assert (box.x, box.y, box.width, box.height) == pytest.approx((480, 380, 40, 40))
@@ -94,7 +94,8 @@ def test_arrow_angles_go_to_the_true_orientation(
 
 
 def test_a_close_part_has_a_decimal_distance() -> None:
-    result = plan([part("C7", 104, 40)], Side.TOP, np.diag([MM, MM, 1.0]), (1000, 800), SnapshotOrientation())
+    frame = ImageFrame((1000, 800), SnapshotOrientation())
+    result = plan([part("C7", 104, 40)], Side.TOP, np.diag([MM, MM, 1.0]), frame)
     assert result.arrows[0].label == "C7 ~0.4 cm"
 
 

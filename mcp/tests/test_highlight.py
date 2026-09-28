@@ -83,7 +83,8 @@ def image_of(result: CallToolResult) -> Image.Image:
 
 
 def is_green(pixel: tuple[int, int, int]) -> bool:
-    return pixel[1] > 180 and pixel[0] < 90 and pixel[2] < 120
+    # The first colour of docs/overlay-layout.md: #00E676 (0, 230, 118), after JPEG.
+    return pixel[1] > 180 and pixel[0] < 90 and pixel[2] < 160
 
 
 def geometry(flip_horizontal: bool = False, flip_vertical: bool = False) -> SnapshotGeometry:
@@ -323,3 +324,57 @@ def test_the_page_gets_the_boxes_and_clears_them(settings: Settings, tmp_path: P
 
 
 # endregion: page
+
+
+# region: layout (docs/overlay-layout.md)
+
+
+class StrictTagPhone(OverlayPhone):
+    """An app from before `tag`: a box with an unknown field gives 400."""
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == OVERLAY and any("tag" in box for box in json.loads(request.content)["boxes"]):
+            return httpx.Response(400, json={"error": "bad_request", "message": "Each box needs exactly 5 fields"})
+        return super().handle(request)
+
+
+async def test_tags_and_the_layout_summary(settings: Settings) -> None:
+    phone = OverlayPhone()
+    phone.snapshot = make_jpeg(1568, 1176)
+    async with Client(build_server(make_services(settings, phone, no_vision()))) as client:
+        await client.call_tool("phone_snapshot", {})
+        # The bench case: two small pads 60 px apart.
+        boxes = [
+            {"x": 700, "y": 560, "width": 14, "height": 12, "label": "C12 pad 1"},
+            {"x": 760, "y": 560, "width": 14, "height": 12, "label": "C12 pad 2", "tag": "P2"},
+        ]
+        result = await client.call_tool("phone_highlight", {"boxes": boxes})
+        too_long = await client.call_tool("phone_highlight", {"boxes": [{**boxes[0], "tag": "ABCD"}]})
+    layout = result.structured_content["layout"]
+    assert layout == {"tags": ["A", "P2"], "legend_outside": False, "badges_outside": [], "inset": True}
+    assert [box["tag"] for box in phone.sent[-1]] == ["A", "P2"]
+    assert too_long.is_error
+
+
+async def test_an_app_without_tags_gets_the_boxes_without_them(settings: Settings) -> None:
+    phone = StrictTagPhone()
+    async with Client(build_server(make_services(settings, phone, no_vision()))) as client:
+        await client.call_tool("phone_snapshot", {})
+        result = await client.call_tool("phone_highlight", {"boxes": [{"x": 1, "y": 1, "width": 5, "height": 5}]})
+    assert not result.is_error, result.content
+    assert phone.sent[-1][0].get("tag") is None
+    assert result.structured_content["layout"]["tags"] == ["A"]
+
+
+def test_the_page_gets_the_layout(tmp_path: Path, settings: Settings) -> None:
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
+    client = TestClient(create_app(monitor), base_url=BASE_URL)
+    body = {"width": 400, "height": 300, "boxes": [{"x": 100, "y": 100, "width": 10, "height": 10, "label": "R1"}]}
+    answer = client.post("/api/overlay-layout", json=body).json()
+    assert answer["boxes"][0]["tag"] == "A"
+    assert answer["boxes"][0]["rect"]["width"] == 32
+    assert answer["legend"]["rows"] == [{"tag": "A", "label": "R1", "colour": "#00E676"}]
+    assert client.post("/api/overlay-layout", json={"width": "wide"}).status_code == 400
+
+
+# endregion: layout

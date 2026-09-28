@@ -27,6 +27,7 @@ import struct
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -128,6 +129,10 @@ TEST_JPEG = base64.b64decode(
 
 ROTATIONS = (0, 90, 180, 270)
 DEGREES_TO_EXIF_ORIENTATION = {0: 1, 90: 6, 180: 3, 270: 8}
+# The back camera sensor of most phones: its image is turned 90 degrees against the natural portrait screen.
+# The configured snapshot is the raw sensor image (landscape); rotation 0 (portrait) gives EXIF 6.
+SENSOR_ORIENTATION = 90
+FULL_TURN = 360
 JPEG_SOI = b"\xff\xd8"
 JPEG_LENGTH_FIELD_BYTES = 2
 EXIF_APP1_MARKER = b"\xff\xe1"
@@ -144,6 +149,8 @@ TIFF_FIRST_IFD_OFFSET = 8
 
 # The autofocus mode after an app start (CameraStatus.af_mode).
 AF_CONTINUOUS = "continuous"
+# The contract example: a 9:20 portrait screen shows the middle 60 % of a 3:4 still.
+PREVIEW_REGION = {"snapshot_x": 0.2, "snapshot_y": 0.0, "width": 0.6, "height": 1.0}
 
 
 @dataclass
@@ -163,6 +170,12 @@ class CameraStatus:
     overlay_boxes: int = 0
     overlay_arrows: int = 0
     af_mode: str = AF_CONTINUOUS
+    # A UUID v7 per app start (set by FakeCamera); an old app (--no-preview) does not send it.
+    app_start_id: str = ""
+    # The part of the still that the fake preview shows: a 9:20 screen filled from a 3:4 image (the middle 60 %).
+    preview_region: dict[str, float] | None = None
+    # False while the boxes and arrows are hidden (kept); true after an app start.
+    overlay_visible: bool = True
 
 
 # The body of POST /v1/preview: exactly these fields, both booleans.
@@ -177,6 +190,9 @@ NEWER_STATUS_FIELDS = (
     "overlay_boxes",
     "overlay_arrows",
     "af_mode",
+    "app_start_id",
+    "preview_region",
+    "overlay_visible",
 )
 # The body of POST /v1/camera: exactly this field, a boolean.
 CAMERA_FIELD = "in_sensor_zoom"
@@ -208,12 +224,17 @@ FOCUS_SCANNING = "scanning"
 # POST /v1/overlay: at most this many boxes, each with exactly these fields, labels at most 32 characters.
 OVERLAY_MAX_BOXES = 8
 OVERLAY_MAX_LABEL = 32
+# An optional short tag per box (docs/overlay-layout.md).
+TAG_FIELD = "tag"
+OVERLAY_MAX_TAG = 3
 OVERLAY_BOX_FIELDS = frozenset({"snapshot_x", "snapshot_y", "width", "height", "label"})
 # x + width and y + height may be this much above 1 (float rounding).
 OVERLAY_TOLERANCE = 1e-9
 # Optional arrows: at most this many, each with exactly these fields.
 OVERLAY_MAX_ARROWS = 4
 OVERLAY_ARROW_FIELDS = frozenset({"angle_deg", "label"})
+# POST /v1/overlay {"visible": false} hides the boxes and arrows without removing them.
+VISIBLE_FIELD = "visible"
 # A test-only route (not in the contract): change the focus distance, like moving the phone.
 FAKE_FOCUS_FIELD = "distance_diopters"
 
@@ -272,6 +293,8 @@ class FakeCamera:
                 "min_distance_diopters": MIN_FOCUS_DIOPTERS,
             },
             optics=dict(OPTICS),
+            app_start_id=str(uuid.uuid7()),
+            preview_region=dict(PREVIEW_REGION),
         )
         # The last focus point (the request fields) and the end of its scan: tests read them.
         self.last_focus: dict[str, float] | None = None
@@ -361,6 +384,13 @@ class FakeCamera:
             self._status.overlay_arrows = len(arrows)
         return self.status()
 
+    def overlay_visible(self, visible: bool) -> CameraStatus:
+        """Hide or show the boxes and arrows (they stay)."""
+        self._require_ready()
+        with self._lock:
+            self._status.overlay_visible = visible
+        return self.status()
+
     def move_to(self, diopters: float) -> CameraStatus:
         """Test only: the phone is now at 100 / diopters cm from the board."""
         with self._lock:
@@ -381,7 +411,9 @@ class FakeCamera:
             raise ApiError(ErrorCode.CAPTURE_FAILED, "Still capture failed (fake)")
         with self._lock:
             degrees = self._status.rotation_degrees
-        return with_exif_orientation(self.config.snapshot, DEGREES_TO_EXIF_ORIENTATION[degrees])
+        # Like CameraX: the still is the sensor image turned clockwise by (sensor orientation - rotation).
+        turn = (SENSOR_ORIENTATION - degrees) % FULL_TURN
+        return with_exif_orientation(self.config.snapshot, DEGREES_TO_EXIF_ORIENTATION[turn])
 
 
 def with_exif_orientation(jpeg: bytes, orientation: int) -> bytes:
@@ -413,8 +445,11 @@ def is_number(value: Any) -> bool:
 
 
 def check_overlay_box(box: Any) -> None:
-    if not isinstance(box, dict) or set(box) != OVERLAY_BOX_FIELDS:
-        raise ApiError(ErrorCode.BAD_REQUEST, f"Each box needs exactly {sorted(OVERLAY_BOX_FIELDS)}")
+    if not isinstance(box, dict) or set(box) - {TAG_FIELD} != OVERLAY_BOX_FIELDS:
+        raise ApiError(ErrorCode.BAD_REQUEST, f"Each box needs exactly {sorted(OVERLAY_BOX_FIELDS)} (and a tag)")
+    tag = box.get(TAG_FIELD)
+    if TAG_FIELD in box and not (isinstance(tag, str) and 1 <= len(tag) <= OVERLAY_MAX_TAG):
+        raise ApiError(ErrorCode.BAD_REQUEST, f'"{TAG_FIELD}" must be a string of 1 to {OVERLAY_MAX_TAG} characters')
     numbers = [box[name] for name in ("snapshot_x", "snapshot_y", "width", "height")]
     if not all(is_number(value) for value in numbers):
         raise ApiError(ErrorCode.BAD_REQUEST, "Box coordinates must be numbers")
@@ -575,6 +610,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def overlay(self) -> None:
         data = parse_body(self._read_body())
+        if VISIBLE_FIELD in data:
+            # Hide or show the boxes and arrows, and keep them. A body with `visible` has nothing else.
+            if set(data) != {VISIBLE_FIELD} or not isinstance(data[VISIBLE_FIELD], bool):
+                raise ApiError(ErrorCode.BAD_REQUEST, f'Send "{VISIBLE_FIELD}" alone: true or false')
+            self._send_status(self.camera.overlay_visible(data[VISIBLE_FIELD]))
+            return
         boxes, arrows = data.get("boxes"), data.get("arrows", [])
         if not set(data) <= {"boxes", "arrows"} or not isinstance(boxes, list) or not isinstance(arrows, list):
             raise ApiError(ErrorCode.BAD_REQUEST, 'Send "boxes": a list, and optionally "arrows": a list')

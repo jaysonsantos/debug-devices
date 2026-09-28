@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -112,10 +113,15 @@ CAMERA_STATUS_FIELDS: dict[str, type] = {
     "preview_flip_vertical": bool,
     "overlay_boxes": int,
     "overlay_arrows": int,
+    "overlay_visible": bool,
 }
 PREVIEW_FLIPS = ((True, False), (False, True), (True, True), (False, False))
 # Objects in CameraStatus, checked by expect_focus and expect_optics.
-CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom", "af_mode")
+CAMERA_STATUS_OBJECTS = ("focus", "optics", "in_sensor_zoom", "af_mode", "app_start_id", "preview_region")
+REGION_FIELDS = ("snapshot_x", "snapshot_y", "width", "height")
+# Float rounding of a region that ends on the image edge.
+REGION_TOLERANCE = 1e-6
+APP_START_ID_VERSION = 7
 AF_MODES = ("continuous", "macro")
 IN_SENSOR_ZOOM_STATES = ("off", "on", "unsupported", "fallback")
 # After POST /v1/camera: a phone can say that it cannot (unsupported) or that the vendor session failed (fallback).
@@ -179,6 +185,7 @@ class CameraStatus:
     preview_flip_vertical: bool
     overlay_boxes: int
     overlay_arrows: int
+    overlay_visible: bool
 
 
 class ContractError(AssertionError):
@@ -277,6 +284,8 @@ def expect_status(resp: Response) -> CameraStatus:
     zoom_mode = data["in_sensor_zoom"]
     expect(zoom_mode in IN_SENSOR_ZOOM_STATES, f"in_sensor_zoom {zoom_mode!r} is not in {IN_SENSOR_ZOOM_STATES}")
     expect(data["af_mode"] in AF_MODES, f"af_mode {data['af_mode']!r} is not in {AF_MODES}")
+    expect_app_start_id(data["app_start_id"])
+    expect_preview_region(data["preview_region"])
     for name, kind in CAMERA_STATUS_FIELDS.items():
         value = data[name]
         if kind is float:
@@ -399,7 +408,32 @@ def check_health(ctx: Context) -> None:
     ctx.notes.append(f"app_version={data['app_version']}")
 
 
+def expect_preview_region(region: Any) -> None:
+    """null before the camera is bound, else a part of the still from 0 to 1."""
+    if region is None:
+        return
+    expect(isinstance(region, dict) and set(region) == set(REGION_FIELDS), f"preview_region {region!r}")
+    values = [region[name] for name in REGION_FIELDS]
+    expect(all(isinstance(value, int | float) and not isinstance(value, bool) for value in values), f"{region!r}")
+    x, y, width, height = values
+    inside = x >= 0 and y >= 0 and x + width <= 1 + REGION_TOLERANCE and y + height <= 1 + REGION_TOLERANCE
+    expect(width > 0 and height > 0 and inside, f"preview_region {region!r} is not a part of the image")
+
+
+def expect_app_start_id(value: Any) -> None:
+    try:
+        parsed = uuid.UUID(value) if isinstance(value, str) else None
+    except ValueError:
+        parsed = None
+    expect(parsed is not None, f"app_start_id {value!r} is not a UUID")
+    assert parsed is not None
+    expect(parsed.version == APP_START_ID_VERSION, f"app_start_id {value!r} is not a UUID v7")
+
+
 def check_status(ctx: Context) -> None:
+    first = expect_json(ctx.client.get(Route.STATUS))["app_start_id"]
+    second = expect_json(ctx.client.get(Route.STATUS))["app_start_id"]
+    expect(first == second, f"app_start_id changed while the app runs: {first} -> {second}")
     status = ctx.status()
     ctx.notes.append(f"zoom=[{status.min_zoom_ratio}, {status.max_zoom_ratio}] flash={status.has_flash_unit}")
 
@@ -581,6 +615,8 @@ def check_after_start(ctx: Context) -> None:
     expect(boxes == 0, f"after the app start: overlay_boxes is {boxes!r}, expected 0")
     af_mode = expect_json(ctx.client.get(Route.STATUS))["af_mode"]
     expect(af_mode == "continuous", f"after the app start: af_mode is {af_mode!r}, expected continuous")
+    visible = expect_json(ctx.client.get(Route.STATUS))["overlay_visible"]
+    expect(visible is True, f"after the app start: overlay_visible is {visible!r}, expected true")
     arrows = expect_json(ctx.client.get(Route.STATUS))["overlay_arrows"]
     expect(arrows == 0, f"after the app start: overlay_arrows is {arrows!r}, expected 0")
 
@@ -927,6 +963,8 @@ BAD_OVERLAY_BODIES: list[tuple[str, bytes]] = [
     ("negative x", json.dumps({"boxes": [{**OVERLAY_BOX, "snapshot_x": -0.1}]}).encode()),
     ("label of 33 characters", json.dumps({"boxes": [{**OVERLAY_BOX, "label": "L" * 33}]}).encode()),
     ("a string coordinate", json.dumps({"boxes": [{**OVERLAY_BOX, "width": "0.1"}]}).encode()),
+    ("tag of 4 characters", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": "ABCD"}]}).encode()),
+    ("empty tag", json.dumps({"boxes": [{**OVERLAY_BOX, "tag": ""}]}).encode()),
 ]
 
 
@@ -965,6 +1003,34 @@ def check_overlay_arrows(ctx: Context) -> None:
     expect(arrow_count(raw, "clear") == 0 and overlay_count(raw, "clear") == 0, "clear: boxes or arrows stay")
 
 
+BAD_VISIBLE_BODIES: list[tuple[str, bytes]] = [
+    ("visible is a string", b'{"visible": "no"}'),
+    ("visible is a number", b'{"visible": 0}'),
+    ("visible is null", b'{"visible": null}'),
+]
+
+
+def check_overlay_visible(ctx: Context) -> None:
+    """Hide and show the overlay: the boxes stay, and a body with boxes does not change the visibility."""
+    ctx.client.post_json(Route.OVERLAY, {"boxes": [OVERLAY_BOX]})
+    hidden = expect_json(ctx.client.post_json(Route.OVERLAY, {"visible": False}))
+    expect(hidden["overlay_visible"] is False, f"visible false: overlay_visible {hidden['overlay_visible']!r}")
+    expect(hidden["overlay_boxes"] == 1, f"visible false removed the boxes: overlay_boxes {hidden['overlay_boxes']}")
+    new_boxes = [OVERLAY_BOX, EDGE_BOX]
+    replaced = expect_json(ctx.client.post_json(Route.OVERLAY, {"boxes": new_boxes}))
+    expect(replaced["overlay_visible"] is False, "a body with boxes changed the visibility")
+    kept = replaced["overlay_boxes"] == len(new_boxes)
+    expect(kept, f"new boxes while hidden: overlay_boxes {replaced['overlay_boxes']}")
+    shown = expect_json(ctx.client.post_json(Route.OVERLAY, {"visible": True}))
+    expect(shown["overlay_visible"] is True and shown["overlay_boxes"] == len(new_boxes), f"visible true: {shown}")
+    for name, body in BAD_VISIBLE_BODIES:
+        try:
+            expect_error(ctx.client.post_raw(Route.OVERLAY, body), ErrorCode.BAD_REQUEST)
+        except ContractError as err:
+            raise ContractError(f"overlay {name}: {err}") from err
+    ctx.client.post_json(Route.OVERLAY, {"boxes": [], "arrows": []})
+
+
 def overlay_count(raw: Response, what: str) -> int:
     expect_status(raw)
     count = expect_json(raw).get("overlay_boxes")
@@ -974,7 +1040,7 @@ def overlay_count(raw: Response, what: str) -> int:
 
 def check_overlay(ctx: Context) -> None:
     """Boxes appear in overlay_boxes, the limits hold, and an empty list removes them."""
-    boxes = [OVERLAY_BOX, EDGE_BOX, {**OVERLAY_BOX, "label": LONGEST_LABEL}]
+    boxes = [OVERLAY_BOX, EDGE_BOX, {**OVERLAY_BOX, "label": LONGEST_LABEL, "tag": "U1"}]
     shown = overlay_count(ctx.client.post_json(Route.OVERLAY, {"boxes": boxes}), "3 boxes")
     expect(shown == len(boxes), f"3 boxes: overlay_boxes is {shown}")
     expect(overlay_count(ctx.client.get(Route.STATUS), "GET status") == len(boxes), "GET status: another overlay_boxes")
@@ -1016,6 +1082,7 @@ READY_CHECKS: list[Check] = [
     check_focus,
     check_overlay,
     check_overlay_arrows,
+    check_overlay_visible,
     check_rotation_bad_request,
     check_post_needs_json_content_type,
     check_snapshot,

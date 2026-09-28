@@ -3,6 +3,7 @@ import io
 import json
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid7
 
 import httpx
 from mcp import Client
@@ -30,7 +31,8 @@ class FakePhone:
 
     def __init__(self, up: bool = True) -> None:
         self.up = up
-        self.status = dict(STATUS)
+        # A new app: one app_start_id for this app run (restart_app in the subclasses makes a new one).
+        self.status = {**STATUS, "app_start_id": str(uuid7())}
         self.requests: list[tuple[str, str]] = []
         self.snapshot = JPEG
 
@@ -164,7 +166,9 @@ async def test_multimeter_read(settings: Settings) -> None:
         with_image = await client.call_tool("multimeter_read", {"include_image": True})
 
     assert not plain.is_error, plain.content
-    assert plain.structured_content == READING
+    assert plain.structured_content is not None
+    assert {key: plain.structured_content[key] for key in READING} == READING
+    assert plain.structured_content["status"] == "confirmed"
     assert not any(isinstance(block, ImageContent) for block in plain.content)
     assert any(isinstance(block, ImageContent) for block in with_image.content)
 
@@ -194,7 +198,7 @@ async def test_multimeter_webcam_source_is_default(settings: Settings) -> None:
         result = await client.call_tool("multimeter_read", {})
 
     assert not result.is_error, result.content
-    assert webcam.captures == 1
+    assert webcam.captures == 2  # two frames by default
     assert ("GET", "/v1/snapshot") not in fake_phone.requests
 
 
@@ -216,7 +220,8 @@ async def test_multimeter_phone_source_uses_scaled_snapshot(settings: Settings) 
         result = await client.call_tool("multimeter_read", {"source": "phone", "include_image": True})
 
     assert not result.is_error, result.content
-    assert result.structured_content == READING
+    assert result.structured_content is not None
+    assert {key: result.structured_content[key] for key in READING} == READING
     assert webcam.captures == 0
     assert ("GET", "/v1/snapshot") in fake_phone.requests
     with Image.open(io.BytesIO(sent[0])) as seen:
@@ -286,3 +291,20 @@ async def test_phone_rotation(settings: Settings) -> None:
     assert neither.is_error
     assert bad.is_error
     assert [path for method, path in fake_phone.requests if path == "/v1/rotation"] == ["/v1/rotation"] * 2
+
+
+async def test_multimeter_read_disputes_volts_in_a_resistance_test(settings: Settings) -> None:
+    volts = {**READING, "value": 443.0, "display_text": "443", "confidence": 0.45}
+    vision = httpx.MockTransport(lambda request: completion(json.dumps(volts)))
+    services = make_services(settings, FakePhone(), vision)
+
+    async with Client(build_server(services)) as client:
+        result = await client.call_tool("multimeter_read", {"expected_mode": "resistance", "include_image": True})
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "disputed"
+    assert result.structured_content["value"] is None
+    assert result.structured_content["display_text"] == "443"
+    assert result.structured_content["expected_mode"] == "resistance"
+    # The exact image that the model saw stays available as evidence.
+    assert any(isinstance(block, ImageContent) for block in result.content)

@@ -55,7 +55,7 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
 
 - The server runs from `onCreate` to `onDestroy` of `MainActivity`. Android gives camera access only to a visible app
   or to a camera foreground service. The app keeps the screen on, so the activity is enough.
-- After a start, the camera endpoints return `503 camera_not_ready` until the start state is set (zoom at min, torch off).
+- After a start, the camera endpoints return `503 camera_not_ready` until the start state is set (zoom 1x, or the minimum when 1x is outside the range; torch off).
   `/v1/health` returns 200 before that. Retry `/v1/status` while it returns 503.
 - Zoom and torch changes run one at a time (`ControlGate`), so a request never cancels another request.
 - An unexpected error returns `500 internal_error`. Read the stack trace with `adb -s <serial> logcat -s DebugCamera:E`.
@@ -88,16 +88,25 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   screen stream shows it) or `snapshot_x`/`snapshot_y` (the current snapshot). The lock ends after 5 s, or earlier on a
   new focus, a zoom change, or a rebind. A screen tap shows a short focus ring. The screen shows only the middle part
   of the 3:4 camera image (the preview fills the tall display), and the PreviewView metering factory accounts for it.
-- `POST /v1/overlay` draws up to 8 green highlight boxes (3 dp, with a label) over the preview. The boxes are given on
+- `POST /v1/overlay` draws up to 8 highlight boxes over the preview by `docs/overlay-layout.md`: a dark outline
+  under a coloured one (green, cyan, yellow, magenta), a tag badge next to each box (the optional `tag`, else A, B,
+  ...), and a legend with the labels in the corner farthest from the boxes. `OverlayLayout` is the same pure layout
+  as the server's; `OverlayLayoutTest` runs the shared vectors in `docs/overlay-layout-vectors.json`. The boxes are given on
   the snapshot. `OverlayLogic` maps them to the preview (snapshot rotation, preview crop, flips) and scales them around
   the centre when the zoom changes. They are never in `/v1/snapshot`. `{"boxes": []}` clears them; they also go away
   after 10 minutes and at an app start. Optional `arrows` (at most 4, `angle_deg` on the snapshot, 0 = right,
   90 = down) show a green arrow at the preview edge in that direction: the target is outside the view there. Labels
-  of boxes and arrows are turned upright for the viewer, also when the phone is sideways.
+  of boxes and arrows are turned upright for the viewer, also when the phone is sideways. `{"visible": false}` (alone)
+  hides the overlay without removing it, `{"visible": true}` shows it again; `CameraStatus.overlay_visible`.
 - `POST /v1/camera {"af_mode": "continuous" | "macro"}` (with or without `in_sensor_zoom`) sets the autofocus mode.
   MACRO is the camera's close-range mode (a Camera2 request option); the lens moves on a focus trigger, so the app
   scans the centre once after the switch, and `/v1/focus` triggers it again. A phone without MACRO stays
   `continuous`. After an app start it is `continuous`.
+- `CameraStatus.app_start_id` is a UUID v7 that the app makes once at each start (`AppStart`). Clients send their
+  stored settings again only when it changes.
+- `CameraStatus.preview_region` is the part of the current snapshot that the phone screen shows (the preview fills
+  the tall screen and cuts off the sides of the 3:4 image). `OverlayLogic.previewRegion` computes it from the view
+  size, the scale type, and the rotations; zoom and flips do not change it.
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

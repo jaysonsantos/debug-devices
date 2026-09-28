@@ -99,6 +99,15 @@ class InSensorZoom(StrEnum):
         return cls.OFF
 
 
+class PreviewRegion(BaseModel):
+    """The part of the current /v1/snapshot image (true orientation, 0 to 1) that the phone preview shows."""
+
+    snapshot_x: float
+    snapshot_y: float
+    width: float
+    height: float
+
+
 class CameraStatus(BaseModel):
     zoom_ratio: float
     min_zoom_ratio: float
@@ -121,6 +130,12 @@ class CameraStatus(BaseModel):
     overlay_arrows: int | None = None
     # None: an app from before `af_mode`.
     af_mode: AfMode | None = None
+    # A UUID v7 per app start: a new value means that the app started again. None: an app from before it.
+    app_start_id: str | None = None
+    # The part of the still (true orientation, 0 to 1) that the phone screen shows. None: not known.
+    preview_region: PreviewRegion | None = None
+    # False while the boxes and arrows are hidden on the phone (not removed). None: an app from before it.
+    overlay_visible: bool | None = None
 
 
 class ApiErrorCode(StrEnum):
@@ -166,6 +181,10 @@ class RotationAutoRequest(BaseModel):
 # A point in [0, 1] on the phone screen or on the snapshot, 0,0 = top left.
 # Float rounding of a box that ends on the image edge (x + width can be 1.0000000001).
 BOX_TOLERANCE = 1e-9
+# An app without `visible` in POST /v1/overlay: it cannot hide its own boxes (the server removes them instead).
+OLD_APP_MARKINGS = "the phone app is old: it cannot hide its own boxes"
+
+
 type UnitCoordinate = Annotated[float, Field(ge=0, le=1)]
 
 
@@ -191,6 +210,8 @@ class OverlayBox(BaseModel):
     width: Annotated[float, Field(gt=0, le=1)]
     height: Annotated[float, Field(gt=0, le=1)]
     label: Annotated[str, Field(max_length=phone.OVERLAY_MAX_LABEL)] = ""
+    # The short tag at the box (docs/overlay-layout.md); the label goes into the legend. None: the app picks one.
+    tag: Annotated[str, Field(min_length=1, max_length=phone.OVERLAY_MAX_TAG)] | None = None
 
     @model_validator(mode="after")
     def _inside(self) -> OverlayBox:
@@ -213,6 +234,12 @@ class OverlayRequest(BaseModel):
     boxes: Annotated[list[OverlayBox], Field(max_length=phone.OVERLAY_MAX_BOXES)]
     # Without arrows, the app removes its arrows.
     arrows: Annotated[list[OverlayArrow], Field(max_length=phone.OVERLAY_MAX_ARROWS)] = []
+
+
+class OverlayVisibilityRequest(BaseModel):
+    """POST /v1/overlay with only `visible`: hide or show the boxes and arrows, and keep them."""
+
+    visible: bool
 
 
 class CameraSettingsRequest(BaseModel):
@@ -362,6 +389,16 @@ class PhoneClient:
                 raise OverlayNotSupportedError(
                     f"the phone app has no {phone.PATH_OVERLAY}; update the phone app to show highlight boxes"
                 ) from exc
+            raise
+        return _parse(CameraStatus, phone.PATH_OVERLAY, body)
+
+    async def overlay_visibility(self, visible: bool) -> CameraStatus:
+        """Hide or show the boxes and arrows on the phone screen. They stay (and come back when shown)."""
+        try:
+            body = await self._request(HTTPMethod.POST, phone.PATH_OVERLAY, OverlayVisibilityRequest(visible=visible))
+        except PhoneApiError as exc:
+            if exc.status in (HTTPStatus.NOT_FOUND, HTTPStatus.BAD_REQUEST):
+                raise OverlayNotSupportedError(OLD_APP_MARKINGS) from exc
             raise
         return _parse(CameraStatus, phone.PATH_OVERLAY, body)
 

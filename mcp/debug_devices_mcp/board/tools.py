@@ -1,7 +1,9 @@
 """MCP tools for boardview files: open a board, find parts and nets, and draw it."""
 
 import asyncio
+import functools
 import io
+import logging
 import math
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
@@ -15,11 +17,26 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from PIL import Image as PilImage
 from PIL import ImageDraw, ImageFont, ImageOps
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from debug_devices_mcp.board.constants import defaults
 from debug_devices_mcp.board.dump import BoardFormat, Side
-from debug_devices_mcp.board.homography import Fit, HomographyError, fit_homography, likely_outlier, map_points
+from debug_devices_mcp.board.homography import (
+    Fit,
+    HomographyError,
+    fit_homography,
+    likely_outlier,
+    map_points,
+    unmap_point,
+)
+from debug_devices_mcp.board.identity import (
+    IdentityClaim,
+    IdentityRegistry,
+    IdentityReport,
+    IdentityState,
+    PhotoChecker,
+    identify,
+)
 from debug_devices_mcp.board.loader import BoardLoadError, BoardviewLoader, LoaderOptions
 from debug_devices_mcp.board.marking import (
     MAX_CANDIDATES,
@@ -31,8 +48,10 @@ from debug_devices_mcp.board.marking import (
     find_marking_parts,
     message,
 )
-from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, TestPoint, on_side
+from debug_devices_mcp.board.marking_readings import lookup_marking, reading_message
+from debug_devices_mcp.board.model import Board, Mm, Part, Pin, Point, SideLabels, TestPoint, on_side
 from debug_devices_mcp.board.render import RenderError, RenderLegend, RenderOptions, colors, render_board
+from debug_devices_mcp.board.session_store import BoardSessionRecord, BoardSessionStore
 from debug_devices_mcp.constants import phone
 from debug_devices_mcp.highlight import PixelBox
 from debug_devices_mcp.pointer import PointResult
@@ -73,6 +92,10 @@ class BoardSummary(BaseModel):
     width_mm: Mm
     height_mm: Mm
     part_sides: SideCounts
+    # Through-hole parts and mounting holes count as "both" (visible from both sides), whatever the label.
+    relabeled_both_sides: int = 0
+    # Set when the side labels of the file look mixed: the tools then warn instead of ruling parts out by side.
+    side_warning: str | None = None
 
 
 class FindMatch(StrEnum):
@@ -147,6 +170,16 @@ class PhotoPair(BaseModel):
     y_px: float
 
 
+class CarryQuality(BaseModel):
+    """How well the registered photo matched the new phone_snapshot (image features, RANSAC homography)."""
+
+    inliers: int
+    matches: int
+    inlier_ratio: float
+    # The RMS error of the matched features, in pixels of the new snapshot.
+    error_px: float | None
+
+
 class Registration(BaseModel):
     registration_id: str
     board_sha256: str
@@ -159,8 +192,16 @@ class Registration(BaseModel):
     checked: bool
     # True after the board or the phone moved (scene change): the photo positions are for the old scene.
     stale: bool = False
+    # Why it is stale when not a move (for example an app restart); None: the move message.
+    stale_reason: str | None = None
     # Live tracking of this registration in the phone screen stream (on, or why not).
     tracking: str | None = None
+    # The capture id of the phone_snapshot that was the last photo at registration time (the registered photo).
+    photo_id: str | None = None
+    # A registration carried over to a newer phone_snapshot by image features (after the board or the phone moved):
+    # the registration it came from, and the quality of the match.
+    carried_from: str | None = None
+    carry_quality: CarryQuality | None = None
 
 
 class LocatedPart(BaseModel):
@@ -192,6 +233,8 @@ class Locations(BaseModel):
     notes: list[str]
     # With `highlight`: the result of phone_point_to for the located parts (boxes in view, arrows outside).
     highlight: PointResult | None = None
+    # Boardview positions are estimates: a located part is a candidate, never a visual fact (board_identify).
+    identity: IdentityState = IdentityState.CANDIDATE
 
 
 # endregion: results
@@ -206,6 +249,10 @@ type Highlighter = Callable[
 ]
 # A new registration: start the live tracking. Returns its note.
 type RegistrationHook = Callable[[Registration], Awaitable[str]]
+# A board tool function (async, any arguments).
+type ToolFunction = Callable[..., Awaitable[object]]
+
+logger = logging.getLogger(__name__)
 
 STALE_REGISTRATION = (
     "registration {id!r} is from before the board or the phone moved: take a fresh phone_snapshot and call "
@@ -226,14 +273,102 @@ class BoardSession:
         self.scene_guard: SceneGuard | None = None
         self.highlighter: Highlighter | None = None
         self.on_registered: RegistrationHook | None = None
+        # Part identity claims (board/identity.py), and the capture log that checks their photo ids.
+        self.identities = IdentityRegistry()
+        self.photos: PhotoChecker | None = None
+        # Set by the MCP server: the capture id of the last phone_snapshot, and the check that pixels of that photo can
+        # use a registration (same scene, same camera view).
+        self.current_photo_id: Callable[[], str | None] | None = None
+        self.snapshot_guard: Callable[[str | None], None] | None = None
+        # region: kept over a server restart (board/session_store.py)
+        self.store = BoardSessionStore()
+        self.board_path: str | None = None
+        self._restored = False
+        self.side_labels = SideLabels.AUTO
+        # Why the last restore did not bring the board back (for example the file is gone), or None.
+        self.restore_note: str | None = None
+        # endregion
 
     def check_scene(self, registration_id: str | None = None) -> None:
         if self.scene_guard is not None:
             self.scene_guard(registration_id)
 
-    def mark_registrations_stale(self) -> None:
+    def mark_registrations_stale(self, reason: str | None = None) -> None:
+        """`reason`: a message with `{id}` for the tools that refuse the registration (None: the move message)."""
         for registration in self.registrations.values():
             registration.stale = True
+            registration.stale_reason = reason
+
+    def open_board(self, board: Board, path: str, side_labels: SideLabels) -> None:
+        """board_open: the user's side label choice, then the board."""
+        board.apply_side_labels(side_labels)
+        self.side_labels = side_labels
+        self.use_board(board, path)
+
+    def use_board(self, board: Board, path: str | None = None) -> None:
+        """board_open: another board makes the part identity claims meaningless."""
+        if self.board is None or self.board.sha256 != board.sha256:
+            self.identities.clear()
+        self.board = board
+        if path is not None:
+            self.board_path = str(Path(path).expanduser().absolute())
+        self._restored = True
+
+    # region: restart (board/session_store.py)
+
+    def with_store(self, store: BoardSessionStore) -> BoardSession:
+        self.store = store
+        return self
+
+    def save(self) -> None:
+        """Write the open board and the registrations to the session record."""
+        if self.board is None or self.board_path is None:
+            return
+        self.store.save(
+            BoardSessionRecord(
+                board_path=self.board_path,
+                board_sha256=self.board.sha256,
+                registrations=[registration.model_dump(mode="json") for registration in self.registrations.values()],
+                last_registration_id=self.last_registration_id,
+                side_labels=self.side_labels.value,
+            )
+        )
+
+    async def restore(self) -> None:
+        """After a server restart: open the recorded board again, one time. Its registrations come back stale."""
+        if self._restored or self.board is not None:
+            return
+        self._restored = True
+        record = self.store.load()
+        if record.board_path is None:
+            return
+        try:
+            board, loaded = await self.loader.load(Path(record.board_path))
+        except BoardLoadError as exc:
+            self.restore_note = f"the board of the last session ({record.board_path}) did not open again: {exc}"
+            logger.warning("%s", self.restore_note)
+            return
+        self.side_labels = SideLabels(record.side_labels) if record.side_labels in set(SideLabels) else SideLabels.AUTO
+        board.apply_side_labels(self.side_labels)
+        self.board, self.board_path = board, record.board_path
+        if loaded.sha256 != record.board_sha256:
+            self.restore_note = "the board file changed since the last session: its photo registrations are dropped"
+            return
+        for data in record.registrations:
+            try:
+                registration = Registration.model_validate(data)
+            except ValidationError:
+                continue
+            # A new process cannot check the scene of an old photo: register a fresh phone_snapshot.
+            registration.stale = True
+            self.registrations[registration.registration_id] = registration
+        self.last_registration_id = record.last_registration_id
+        self.restore_note = (
+            f"opened {record.board_path} again after a server restart; the photo registrations are stale "
+            "(take a fresh phone_snapshot and call board_register_photo)"
+        )
+
+    # endregion: restart
 
     @classmethod
     def create(cls, runner: CommandRunner, options: LoaderOptions) -> BoardSession:
@@ -251,7 +386,7 @@ class BoardSession:
         if self.board is None or registration.board_sha256 != self.board.sha256:
             raise ToolError("that registration belongs to another board. Open that board, or register again.")
         if registration.stale:
-            raise ToolError(STALE_REGISTRATION.format(id=registration_id))
+            raise ToolError((registration.stale_reason or STALE_REGISTRATION).format(id=registration_id))
         return registration
 
     def part(self, refdes: str) -> Part:
@@ -285,6 +420,8 @@ def summarize(board: Board, sha256: str, cached: bool, load_seconds: float) -> B
         width_mm=board.bounds.width,
         height_mm=board.bounds.height,
         part_sides=SideCounts(top=sides.count(Side.TOP), bottom=sides.count(Side.BOTTOM), both=sides.count(Side.BOTH)),
+        relabeled_both_sides=sum(1 for part in board.parts.values() if part.labeled_side is not None),
+        side_warning=board.side_check.warning,
     )
 
 
@@ -394,10 +531,14 @@ def locate(board: Board, registration: Registration, refdes: list[str], net: str
                 part=pin.part, number=pin.number, net=pin.net, x_px=round(x, 1), y_px=round(y, 1), in_photo=inside(x, y)
             )
             for pin, (x, y) in zip(pins, pin_px, strict=True)
-            if on_side(pin.side, registration.side)
+            if board.side_ok(pin.side, registration.side)
         ],
         annotated=False,
-        notes=notes,
+        notes=[
+            *notes,
+            *([board.side_check.warning] if board.side_check.warning else []),
+            "positions are boardview estimates (identity: candidate); board_identify confirms a part",
+        ],
     )
 
 
@@ -444,25 +585,46 @@ def read_photo(photo_path: str) -> bytes:
     return Path(photo_path).expanduser().read_bytes()
 
 
+def board_tool(server: MCPServer, session: BoardSession) -> Callable[[ToolFunction], ToolFunction]:
+    """`@server.tool()` for the board tools: restore the board after a restart first, and save the session after."""
+
+    def decorate(function: ToolFunction) -> ToolFunction:
+        @functools.wraps(function)
+        async def wrapper(*args: object, **kwargs: object) -> object:
+            await session.restore()
+            try:
+                return await function(*args, **kwargs)
+            finally:
+                session.save()
+
+        server.tool()(wrapper)
+        return wrapper  # type: ignore[return-value]
+
+    return decorate
+
+
 def register_board_tools(server: MCPServer, session: BoardSession) -> None:
     register_query_tools(server, session)
     register_photo_tools(server, session)
+    register_identity_tools(server, session)
 
 
 def register_query_tools(server: MCPServer, session: BoardSession) -> None:
-    @server.tool()
-    async def board_open(path: str) -> BoardSummary:
+    @board_tool(server, session)
+    async def board_open(path: str, side_labels: SideLabels = SideLabels.AUTO) -> BoardSummary:
         """Load a boardview file (GenCAD .cad, .brd, .bvr, .fz, .pcb, and more) with obv-dump.
 
         The other board tools then use this board. Positions are in mm. A file that was loaded before comes from
-        the cache (by SHA-256).
+        the cache (by SHA-256). Through-hole parts and mounting holes count as on both sides. `side_labels`: "auto"
+        (a check warns when the top/bottom labels look mixed), "mixed" (the user says that the labels are not
+        reliable: the tools warn instead of ruling parts out by side), or "trust". See `side_warning`.
         """
         with board_errors():
             board, loaded = await session.loader.load(Path(path))
-        session.board = board
+        session.open_board(board, path, side_labels)
         return summarize(board, loaded.sha256, loaded.cached, loaded.load_seconds)
 
-    @server.tool()
+    @board_tool(server, session)
     async def board_find_part(query: str, limit: Limit = defaults.FIND_LIMIT) -> PartMatches:
         """Find parts by refdes ("U1", case does not matter), glob ("C1*", "U?"), or mfgcode/value text.
 
@@ -487,13 +649,13 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
             query=query, match=match, total=len(parts), parts=parts[:limit], truncated=len(parts) > limit, note=note
         )
 
-    @server.tool()
+    @board_tool(server, session)
     async def board_part_pins(refdes: str) -> PartPins:
         """All pins of one part: number, name, net, position (mm), and side."""
         part = session.part(refdes)
         return PartPins(part=part, pins=session.current().pins_by_part.get(part.name, []))
 
-    @server.tool()
+    @board_tool(server, session)
     async def board_find_net(query: str, limit: Limit = defaults.FIND_LIMIT) -> NetMatches:
         """Find nets by name or glob ("PP3V3*", "*VCORE*"). For each net: the parts and pin numbers on it, its
         test points (nails and TP parts), and the nearest test point to each part.
@@ -505,7 +667,7 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
         nets = [net_report(board, net, limit) for net in names[:limit]]
         return NetMatches(query=query, total=len(names), nets=nets, truncated=len(names) > limit)
 
-    @server.tool()
+    @board_tool(server, session)
     async def board_parts_near(
         refdes: str | None = None,
         x_mm: float | None = None,
@@ -533,7 +695,7 @@ def register_query_tools(server: MCPServer, session: BoardSession) -> None:
             center=center, radius_mm=radius_mm, side=side, parts=items[:limit], truncated=len(items) > limit
         )
 
-    @server.tool()
+    @board_tool(server, session)
     async def board_render(
         side: Side | None = None,
         highlight_parts: list[str] | None = None,
@@ -578,10 +740,12 @@ def match_marking(
     side: Side | None,
     registration_id: str | None,
     point: tuple[float, float] | None,
+    try_rotations: bool = True,
 ) -> MarkingMatch:
     board = session.current()
-    resolution, parts = find_marking_parts(board, marking, side)
-    candidates = [candidate(part) for part in parts]
+    lookup = lookup_marking(board, marking, side, try_rotations)
+    resolution = lookup.resolution
+    candidates = [candidate(part) for part in lookup.parts]
     ranked = registration_id is not None and point is not None and bool(candidates)
     if ranked:
         registration = session.registration(registration_id)
@@ -600,18 +764,24 @@ def match_marking(
         candidates=candidates[:MAX_CANDIDATES],
         total_candidates=len(candidates),
         best_candidate=best,
-        message=message(marking, resolution, names, best, ranked),
+        message=reading_message(marking, lookup, message(marking, resolution, names, best, ranked)),
+        reading=lookup.reading,
+        rotated_reading=lookup.rotated_text,
+        value_interpretations=lookup.value_interpretations,
     )
 
 
 def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
-    @server.tool()
+    tool = board_tool(server, session)
+
+    @tool
     async def board_match_marking(
         marking: str,
         side: Side | None = None,
         registration_id: str | None = None,
         x_px: float | None = None,
         y_px: float | None = None,
+        try_rotations: bool = True,
     ) -> MarkingMatch:
         """Match a marking that you see on the board (silkscreen, from phone_snapshot) to boardview parts.
 
@@ -620,16 +790,19 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         a match with O/0, I/1, S/5, B/8, Z/2, G/6 read wrong. Tell the user which one it is, and never replace the
         visible marking with a boardview name without saying so. With `registration_id` (board_register_photo) and
         `x_px`/`y_px` of the marking in that photo, the candidates are sorted by distance, and `best_candidate` is
-        set only when one is clearly nearest.
+        set only when one is clearly nearest. With `try_rotations` (default), the marking is also read upside down
+        ("00T" in a turned photo is "100"); `reading` says which reading matched, and `rotated_reading` gives the
+        upright text. `value_interpretations` reads the marking as an SMD value code ("100" = 10 Ω, "4R7" = 4.7 Ω):
+        an interpretation only, never a part name.
         """
         if (x_px is None) != (y_px is None):
             raise ToolError("give both `x_px` and `y_px`, or neither")
         point = (x_px, y_px) if x_px is not None and y_px is not None else None
         if point is not None and registration_id is None:
             raise ToolError("`x_px`/`y_px` need a `registration_id` from board_register_photo")
-        return match_marking(session, marking, side, registration_id, point)
+        return match_marking(session, marking, side, registration_id, point, try_rotations)
 
-    @server.tool()
+    @tool
     async def board_register_photo(
         side: Side,
         photo_width_px: Annotated[int, Field(gt=0)],
@@ -645,11 +818,13 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
         """
         session.check_scene()
         registration = register(session, side, photo_width_px, photo_height_px, pairs)
+        if session.current_photo_id is not None:
+            registration.photo_id = session.current_photo_id()
         if session.on_registered is not None:
             registration.tracking = await session.on_registered(registration)
         return registration
 
-    @server.tool()
+    @tool
     async def board_locate_in_photo(
         registration_id: str,
         refdes: list[str] | None = None,
@@ -693,3 +868,150 @@ def register_photo_tools(server: MCPServer, session: BoardSession) -> None:
             content.append(Image(data=jpeg, format=JPEG_FORMAT).to_image_content())
         content[0] = TextContent(type="text", text=locations.model_dump_json())
         return CallToolResult(content=content, structured_content=locations.model_dump(mode="json"))
+
+
+# region: part identity tools (board/identity.py)
+
+PARTS_AT_EVIDENCE = (
+    "supporting evidence: boardview positions mapped through the photo registration, not a visual fact "
+    "(identity: candidate; board_identify confirms a part)"
+)
+DEFAULT_RADIUS_PX = 20.0
+MAX_PARTS_AT = 10
+
+
+class PartAtPhoto(BaseModel):
+    refdes: str
+    side: Side
+    center: Point
+    # Distance from the pointed board position to the part box (0 inside the box), and to the part center.
+    distance_mm: Mm
+    center_distance_mm: Mm
+    inside_box: bool
+
+
+class PartsAtPhoto(BaseModel):
+    registration_id: str
+    x_px: float
+    y_px: float
+    board_point: Point
+    radius_mm: Mm
+    side: Side
+    parts: list[PartAtPhoto]
+    identity: IdentityState = IdentityState.CANDIDATE
+    evidence: str = PARTS_AT_EVIDENCE
+    # A mixed-side file: parts of both labels are listed (see board_open side_warning).
+    side_warning: str | None = None
+
+
+def box_distance(part: Part, point: Point) -> float:
+    dx = max(part.box.min_x - point.x, 0.0, point.x - part.box.max_x)
+    dy = max(part.box.min_y - point.y, 0.0, point.y - part.box.max_y)
+    return math.hypot(dx, dy)
+
+
+def parts_at_photo(
+    board: Board, registration: Registration, x_px: float, y_px: float, radius_px: float
+) -> PartsAtPhoto:
+    """The inverse of board_locate_in_photo: a photo pixel to board mm, and the parts near it on that side."""
+    x, y = unmap_point(registration.fit.matrix, (x_px, y_px))
+    point = Point(x=x, y=y)
+    edges = [
+        unmap_point(registration.fit.matrix, (x_px + dx, y_px + dy)) for dx, dy in ((radius_px, 0), (0, radius_px))
+    ]
+    radius_mm = max(math.hypot(ex - x, ey - y) for ex, ey in edges)
+    near = []
+    for part in board.parts.values():
+        if not board.side_ok(part.side, registration.side):
+            continue
+        distance = box_distance(part, point)
+        if distance <= radius_mm:
+            near.append(
+                PartAtPhoto(
+                    refdes=part.name,
+                    side=part.side,
+                    center=part.center,
+                    distance_mm=distance,
+                    center_distance_mm=part.center.distance(point),
+                    inside_box=distance == 0,
+                )
+            )
+    near.sort(key=lambda item: (item.distance_mm, item.center_distance_mm))
+    return PartsAtPhoto(
+        registration_id=registration.registration_id,
+        x_px=x_px,
+        y_px=y_px,
+        board_point=point,
+        radius_mm=radius_mm,
+        side=registration.side,
+        parts=near[:MAX_PARTS_AT],
+        side_warning=board.side_check.warning,
+    )
+
+
+def register_identity_tools(server: MCPServer, session: BoardSession) -> None:
+    tool = board_tool(server, session)
+
+    @tool
+    async def board_parts_at_photo(
+        registration_id: str,
+        x_px: float,
+        y_px: float,
+        radius_px: Annotated[float, Field(gt=0)] = DEFAULT_RADIUS_PX,
+    ) -> PartsAtPhoto:
+        """Which boardview parts are at a pixel of the photo: the inverse of board_locate_in_photo.
+
+        `x_px`/`y_px` are in the registered photo, or in a newer phone_snapshot of the same scene with the same zoom,
+        lens, and orientation (otherwise it is refused: register the new photo). Returns the parts of the registered
+        side within `radius_px` of that point, nearest first, with their distance in mm. This is supporting evidence
+        (identity: candidate), never a visual fact: board_identify confirms a part.
+        """
+        session.check_scene(registration_id)
+        registration = session.registration(registration_id)
+        if session.snapshot_guard is not None:
+            session.snapshot_guard(registration_id)
+        return parts_at_photo(session.current(), registration, x_px, y_px, radius_px)
+
+    @tool
+    async def board_identify(
+        photo_id: str,
+        marking: str | None = None,
+        registration_id: str | None = None,
+        x_px: float | None = None,
+        y_px: float | None = None,
+    ) -> IdentityClaim:
+        """Decide which boardview part a place in a current phone_snapshot is: visible_marking, candidate, or confirmed.
+
+        `photo_id` is the capture_id of a current phone_snapshot (a stale one is refused). `marking` is the text that
+        the photo shows at that place, quoted exactly (null when there is none). `registration_id` (board_register_photo
+        on this photo, 5+ pairs) and `x_px`/`y_px` give the position. Confirmed needs all three: a current photo, a
+        valid checked registration, and a visible marking (or a unique landmark with no look-alike part near).
+        Look-alike parts (for example similar coils) stay candidates: ask for a closer photo. A part on the other
+        board side cannot be confirmed. Never call a candidate a visual fact.
+        """
+        if (x_px is None) != (y_px is None):
+            raise ToolError("give both `x_px` and `y_px`, or neither")
+        if session.photos is not None:
+            session.photos.require_current_photo(photo_id)
+        point = (x_px, y_px) if x_px is not None and y_px is not None else None
+        registration = None
+        if registration_id is not None:
+            session.check_scene(registration_id)
+            registration = session.registration(registration_id)
+            if session.snapshot_guard is not None:
+                session.snapshot_guard(registration_id)
+            if point is None:
+                raise ToolError("a `registration_id` needs `x_px` and `y_px` of the part in that photo")
+        claim = identify(session.current(), photo_id, registration, point, marking)
+        return session.identities.add(claim)
+
+    @tool
+    async def board_identity() -> IdentityReport:
+        """The part identity claims of this session, as they hold now.
+
+        A confirmation holds only in its scene: after the board or the phone moved, it shows as a candidate again.
+        """
+        return session.identities.report(session.photos, session.registrations)  # type: ignore[arg-type]
+
+
+# endregion: part identity tools

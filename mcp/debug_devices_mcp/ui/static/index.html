@@ -19,6 +19,7 @@
   <main>
     <section id="phone-panel" class="panel">
       <h2>Phone</h2>
+      <p id="restart-note" class="restart-note" role="status" hidden></p>
       <div class="phone-layout">
         <div class="phone-live">
           <div id="phone-view" class="view" tabindex="0" aria-label="Phone screen">
@@ -35,6 +36,7 @@
               <button type="button" data-torch aria-label="Torch on or off">Torch</button>
               <button type="button" data-isz aria-pressed="false" title="Sensor zoom: real extra detail at 2x-4x">Sensor zoom</button>
               <button type="button" data-af aria-pressed="false" title="Macro focus: the close-range autofocus mode">Macro</button>
+              <button type="button" data-markings aria-pressed="true" title="Show or hide the markings: boxes, arrows, labels, frames, also on the phone (k)">Markings</button>
               <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
               <span id="live-zoom" data-zoom-ratio class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
             </div>
@@ -105,6 +107,7 @@
               <button type="button" data-af aria-pressed="false" title="Macro focus: the close-range autofocus mode">Macro</button>
               <button type="button" data-new-snapshot title="Take a new phone snapshot (s)">New snapshot</button>
             <button type="button" data-clear-highlights disabled>Clear highlights</button>
+              <button type="button" data-markings aria-pressed="true" title="Show or hide the markings: boxes, arrows, labels, frames, also on the phone (k)">Markings</button>
             </div>
             <button type="button" class="fs-button" aria-label="Full screen: phone snapshot" title="Full screen (double-click or f; Esc leaves)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
           </div>
@@ -114,10 +117,40 @@
               <button type="button" data-flip="vertical" aria-pressed="false" title="Flip the phone snapshot upside down (v)">Flip V</button>
             <span class="hint">Also for the agent's snapshots and the phone preview.</span>
             <button type="button" data-clear-highlights disabled>Clear highlights</button>
+            <button type="button" data-markings aria-pressed="true" title="Show or hide the markings: boxes, arrows, labels, frames, also on the phone (k)">Markings</button>
+            <span id="markings-note" class="hint" hidden></span>
           </div>
           <a id="snapshot-full" target="_blank" hidden>Open the full-size snapshot</a>
+          <figure id="annotated-view" hidden>
+            <figcaption>The agent's view: <span id="annotated-caption"></span></figcaption>
+            <img id="annotated" alt="The last snapshot of an agent with its green boxes">
+          </figure>
         </div>
       </div>
+      <details id="phone-devices">
+        <summary>Devices <small id="devices-selected"></small></summary>
+        <div class="row">
+          <button id="devices-refresh" type="button">Refresh</button>
+          <button id="devices-clear" type="button" title="Go back to --adb-serial / DEBUG_DEVICES_ADB_SERIAL">Clear selection</button>
+        </div>
+        <table id="devices-table">
+          <thead><tr><th>Serial</th><th>Link</th><th>State</th><th>Model</th><th>Camera app</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p id="devices-mdns" class="hint"></p>
+        <form id="devices-connect" class="row">
+          <input id="connect-address" type="text" placeholder="IP:port (tcpip mode)" autocomplete="off" spellcheck="false" aria-label="Address to connect">
+          <button type="submit">Connect</button>
+        </form>
+        <form id="devices-pair" class="row" title="Android 11+: Developer options, Wireless debugging, Pair device with pairing code">
+          <input id="pair-address" type="text" placeholder="Pairing IP:port" autocomplete="off" spellcheck="false" aria-label="Pairing address">
+          <input id="pair-code" type="text" placeholder="6-digit code" inputmode="numeric" maxlength="6" autocomplete="off" aria-label="Pairing code">
+          <input id="pair-connect" type="text" placeholder="Connect IP:port" autocomplete="off" spellcheck="false" aria-label="Connect address">
+          <button type="submit">Pair</button>
+        </form>
+        <ol id="devices-steps"></ol>
+        <p class="hint">Only you select the phone here. The agent can only list the devices (phone_devices).</p>
+      </details>
     </section>
 
     <section id="webcam-panel" class="panel">

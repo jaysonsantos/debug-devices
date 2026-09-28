@@ -402,6 +402,72 @@ Open for the device check (both rounds), when the phone is back:
 2. Box labels upright with the phone sideways.
 3. `af_mode` `macro`: `dumpsys media.camera` "Last request sent" shows `android.control.afMode = MACRO`; `focus.distance_diopters` after the centre scan at 10-12 cm; a tap focus in MACRO (the region and the trigger in the request); `continuous` again (`afMode = CONTINUOUS_PICTURE`). Then MACRO together with in-sensor zoom on, and after a rebind.
 
+
+### Round: `app_start_id` (sync fix)
+
+Brief: `docs/briefs/sync-fix.md`, dd-android part. Contract: `CameraStatus.app_start_id`, a UUID v7 made once at each app start.
+
+- `AppStart.kt`: `UuidV7.create(epochMillis, random)` (RFC 9562: 48-bit Unix milliseconds, version 7, variant `10`, random bits; Java 17 has no v7 generator) and `AppStart` (the id is made once in the constructor; the clock and the random source are injectable). `CameraController` makes one `AppStart` when it is built, that is once per app start, and `readStatus` reports it.
+- New unit tests: `AppStartTest` (3: the v7 layout and timestamp, later ids sort after earlier ids, stable across calls and new after a restart). 131 tests in total, all pass. ktlint passes. Builds used `--no-daemon`.
+- On `0a1b2c3d` (serial from `.env`): two reads 2 s apart gave `01a0e303-39c3-7b89-b48c-52793c70062a`; after `am force-stop` and `am start` the id was `01a0e303-587f-7085-b309-fe744035a900`. No crash.
+- The install restarted the app, so its settings went back to the start values (flips false, in-sensor zoom off, `af_mode` continuous). With this id, the MCP can now see the restart and send its stored settings again.
+
+
+### Round: start zoom 1x and the S22 lenses
+
+Brief: `docs/briefs/s22-start-zoom.md`. Phone: Samsung Galaxy S22 (SM-S901B, Android 16), the serial from `.env` only (Wi-Fi adb). The Xiaomi was not connected.
+
+Part 1, start zoom (contract: 1.0 when 1.0 is in the range, else the minimum):
+
+- `ZoomLogic.startRatio(min, max)` returns 1.0 when it is in `[min, max]`, else `min`. `applyStartState` passes the range. The comments ("zoom at min") and `android/README.md` now say the start zoom.
+- Unit test: 1..10 -> 1, 0.6..10 (S22) -> 1, 0.5..1 -> 1, 1.2..8 -> 1.2. 131 tests, all pass. ktlint passes. `--no-daemon`.
+- On the S22, after `am force-stop` + `am start`: `"zoom_ratio":1.0,"min_zoom_ratio":0.6,"max_zoom_ratio":10.0`. Before the fix the app started at 0.6 (the ultrawide). No crash.
+
+Part 2, the S22 lenses (read-only `dumpsys media.camera`, snapshots through a forward on local port 18775; details in `docs/research/s22-lenses.md`):
+
+- Camera `0` is a logical multi-camera of `"2"` (ultrawide 2.2 mm, fixed focus), `"5"` (wide 5.4 mm, f/1.8, minimum focus 10 cm), and `"6"` (telephoto 7.0 mm, f/2.4, minimum focus 50 cm). Note: `activePhysicalId` is ASCII bytes (`[53 0]` = `"5"`).
+- Active lens: 0.6x ultrawide, 1x-5x wide (crop), telephoto only once at 10x; a second pass at 6-10x stayed on the wide. **3x is not the telephoto**, it is a crop of the wide.
+- Detail at 3x: the real 3x is crisper than the 1x crop enlarged (Laplacian variance 47.3 against 29.4, the same gradient, visibly sharper marking and pads), but it comes from the wide, so it is processing or a denser sensor readout, not optics. 2x is the same as a digital crop.
+- On this phone `in_sensor_zoom` returns `unsupported` and `af_mode: macro` stays `continuous` (no vendor keys; AF modes 0, 1, 3, 4 only). Correct by the contract.
+- The wide focus distance read 10.0 diopters (its limit): the board is at 10 cm or closer.
+- Recommendation: 10-12 cm with the wide, zoom 1x to see and 2-3x to frame; not below 1x (ultrawide, fixed focus), no gain above 5x at close range (the telephoto cannot focus under 50 cm).
+
+End state: zoom 1.0, torch off, flips false, in-sensor zoom off, `af_mode` continuous. The forward on 18775 is removed. Images and dumps only in my scratch directory (`.../scratchpad/s22/`).
+
+
+### Round: `preview_region` (bench feedback 1)
+
+Brief: `docs/briefs/bench-feedback-1.md`, dd-android part. Contract: `CameraStatus.preview_region` (normalized rectangle on the true-orientation snapshot that the phone screen shows; `null` before the camera is bound).
+
+- `OverlayLogic.previewRegion(geometry)`: the visible fraction of the upright preview image under the scale type (FILL: `view / (image x max scale)` per axis, centred; FIT: everything), turned back to the capture surface by the preview rotation and forward to the snapshot by the snapshot rotation, as a bounding box. Zoom does not change it (the preview and the snapshot share the zoom crop), and the flips do not (a mirror maps the centred crop onto itself); the unit tests check both.
+- `CameraController.previewGeometry` is now shared by the overlay and `preview_region`. `readStatus` reports `null` until the preview view and the capture have a size.
+- New unit tests: `OverlayLogicTest` +3 (a 9:20 portrait view with a 3:4 image -> width 0.6 centred; a landscape snapshot -> the centred band 0.2-0.8 in y, also at 180; flips, zoom, FIT, and an equal aspect -> no change or the full image) and `ApiServerTest` +1 (`"preview_region":null`). 135 tests, all pass. ktlint passes. `--no-daemon`.
+- On the S22 (1080 x 2340 screen, serial from `.env`): at 1x `{"snapshot_x":0.192,"snapshot_y":0.0,"width":0.615,"height":1.0}` (= 1080 / (2340 x 3/4)); the same at 3x and with flip H; with the rotation locked to 90 (landscape snapshot) `{"snapshot_x":0.0,"snapshot_y":0.192,"width":1.0,"height":0.615}`. No crash.
+
+End state: zoom 1x, torch off, flips false, rotation auto. The forward on 18775 is removed.
+
+
+### Round: overlay visible toggle (markings toggle)
+
+Brief: `docs/briefs/markings-toggle.md`, dd-android part. **Code and unit tests only: a live bench session uses the S22, so no install until "bench done".**
+
+- `OverlayRequest` fields are all optional now. `OverlayLogic.command` turns a body into `SetVisible` (`visible` alone) or `SetShapes` (`boxes` required, `arrows` optional; the old rules). 400: an empty body, `visible` together with `boxes` or `arrows`, `arrows` without `boxes`, a non-boolean `visible` (strict serializer), `null`.
+- `CameraController.overlayVisible` (true after an app start, through `ControlGate`), `setOverlayVisible`, and `CameraStatus.overlay_visible`. `MainActivity` sets the overlay view `VISIBLE` or `INVISIBLE`; the boxes, the arrows, and the TTL stay.
+- New unit tests: `ApiServerTest` +2 (hide and show keep the shapes, new shapes keep the visibility; 7 bad bodies). 137 tests, all pass. ktlint passes. `--no-daemon`.
+- **Contract gap:** the text does not say what a body with `visible` and `boxes`/`arrows` together does. I return 400 ("Send 'visible' alone"). Proposal: write that rule in `docs/phone-api.md`, or say which one wins.
+- Device steps left (after "bench done"): install on the S22; set a box and an arrow; `{"visible":false}` -> screenshot without them, `overlay_visible` false, `overlay_boxes` still 1; `{"visible":true}` -> they are back.
+
+
+### Round: highlight layout (tags, legend, badges, contrast)
+
+Brief: `docs/briefs/overlay-layout.md`, dd-android part. Spec: `docs/overlay-layout.md` ("Geometry"). **Code and unit tests only: the bench session runs, no install.**
+
+- `OverlayLayout.kt`: the Geometry section as one pure function, in dp: tags (given ones, first 3 characters; else the first free letter, boxes then arrows), colours by index, drawn boxes grown to `min_box` (24 dp), badge size from the character count (8 + 9 x chars, 18), legend size (12 + 8 x longest row, 12 + 18 x rows), the legend corner (sorted by distance, first one clear of the boxes grown by 4; top-left without boxes; else "outside"), badges (gaps 4, 12, 24, 40; the 8 positions in the spec order; clear of boxes and badges grown by 4 and of the legend), the fallback outside the cluster with a leader line, arrow anchors 28 dp inside the edge, the inset (computed, not drawn on the phone), and the output rounded to 2 decimals.
+- `OverlayView`: turns the scene boxes and arrow directions into the viewer's frame (upright text when the phone is sideways), converts them to dp, runs the layout, and draws on a canvas turned to the viewer and scaled by the density. It draws a black 60% outline 2 dp wider on each side under the 3 dp colour outline, tag badges in the box colour with black text, leader lines, arrows (the tip at the anchor, the tag badge at the tail), and the legend (dark 85%, rows in the item colours). The text is monospace at 13 dp, so it fits the sizes from the character count. An "outside" legend has no room below the phone screen, so the phone draws it see-through in the first corner (rule 2).
+- `OverlayBox.tag` (optional, 1-3 characters, else 400). The old per-label turn helpers (`viewerTopLeft`, `labelRect`, `shiftInside`) are removed: the viewer-frame layout replaces them.
+- Tests: `OverlayLayoutTest` runs **all 10 shared vectors** from `docs/overlay-layout-vectors.json` (boxes, badges with leaders, legend with rows and "outside", arrows with anchors, inset, extra height; tolerance 0.01 + float slack) and 4 unit tests (tags, no inset on the phone, colours, viewer frame). `ApiServerTest` +1 (tags 1-3 characters). 141 tests, all pass. ktlint passes. `--no-daemon`.
+- Device steps left (after "bench done"): install on the S22; the bench case (two small pads 50-80 px apart) -> screenshot: badges next to the boxes, none covers the other box, the legend in a free corner; a box under each corner -> see-through legend; the phone sideways -> upright tags and legend; an arrow with its tag.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:

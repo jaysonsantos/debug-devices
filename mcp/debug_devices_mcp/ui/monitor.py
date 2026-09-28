@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -21,13 +22,15 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ValidationError
 
+from debug_devices_mcp.app_restart import RestartNotice
 from debug_devices_mcp.board.tools import BoardSummary
 from debug_devices_mcp.camera_choice import AfModeChoice, InSensorZoomChoice
 from debug_devices_mcp.constants import images
-from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, orient_jpeg
+from debug_devices_mcp.devices import PhoneSelection
+from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, transform_jpeg
 from debug_devices_mcp.orientation import OrientationState
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError
-from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState
+from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState, ScreenStatus
 from debug_devices_mcp.remote_webcam import MonitorIdentity, SharedWebcam
 from debug_devices_mcp.scene import SceneWatcher
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
@@ -36,8 +39,10 @@ from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.board import BoardPanel, RemoteBoard
 from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details, http, labels, tools
 from debug_devices_mcp.ui.desktop import BrowserOpener
+from debug_devices_mcp.ui.device_panel import DevicePanel
 from debug_devices_mcp.ui.events import CallSource, CallStatus, EventBus, ToolCall, current_call, truncate
 from debug_devices_mcp.ui.forward import CallForwarder, origin_label, remove_token, token_dir, write_token
+from debug_devices_mcp.ui.remote_screen import RemoteScreen, ScreenStartResult
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
 from debug_devices_mcp.ui.version import code_version
 from debug_devices_mcp.webcam import Crop
@@ -56,6 +61,8 @@ TEXT_SEPARATOR = "\n"
 # PhoneState.tracking while the live tracker follows the board (a move is then no scene change for the page).
 TRACKING_FOLLOWING = "following"
 BOARD_PATH_ARGUMENT = "path"
+# SnapshotInfo.turn_degrees: the page draws the snapshot and its boxes with the same turn.
+TURN_FIELD = "turn_degrees"
 PHONE_STATUS_TOOLS = frozenset(
     {
         tools.PHONE_STATUS,
@@ -88,6 +95,18 @@ def crop_preview(jpeg: bytes, crop: Crop | None) -> bytes:
     """The area that multimeter_read sends, scaled down for the log."""
     area = jpeg if crop is None else crop_jpeg(jpeg, crop)
     return downscale_jpeg(area, defaults.CROP_PREVIEW_MAX_SIDE).data
+
+
+def snapshot_turn(texts: list[str]) -> int:
+    """The `turn_degrees` of a phone_snapshot result (its text is SnapshotInfo JSON). 0 when it has none."""
+    for text in texts:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get(TURN_FIELD), int):
+            return data[TURN_FIELD]
+    return 0
 
 
 class ConnectedPhone(BaseModel):
@@ -198,6 +217,9 @@ class OnDemandFrameSource:
 
 
 class Monitor:
+    # The MCP server's Markings action (setup sets it): save the choice and tell the phone.
+    markings_setter: Callable[[bool], Awaitable[Any]] | None = None
+
     def __init__(
         self,
         start_settings: EffectiveSettings,
@@ -251,6 +273,11 @@ class Monitor:
         self.scene_watcher: SceneWatcher | None = None
         # The Board panel of the page (setup sets it, with the MCP server's board session).
         self.board_panel: BoardPanel | None = None
+        # The Devices part of the phone panel, and the phone selection that it writes (setup sets both).
+        self.device_panel: DevicePanel | None = None
+        # A secondary gets the phone screen frames from the primary, with its own scene watcher (setup sets it).
+        self.remote_screen: RemoteScreen | None = None
+        self.phone_selection: PhoneSelection | None = None
         # Changes with each server start and each change of the page files: an open page reloads itself.
         self.code_version = code_version()
         self.client_name: str | None = None
@@ -338,9 +365,13 @@ class Monitor:
         if raw is None:
             return self.last_snapshot
         orientation = self.orientation.current if self.orientation is not None else SnapshotOrientation()
-        key = (self.bus.phone.snapshot_seq, orientation, full)
+        # The turn of this snapshot (the same as the agent's image) and the flips of now.
+        turn = self.bus.phone.snapshot_turn
+        key = (self.bus.phone.snapshot_seq, orientation, turn, full)
         if key not in self._rendered:
-            oriented = await asyncio.to_thread(orient_jpeg, raw, orientation)
+            oriented = await asyncio.to_thread(
+                transform_jpeg, raw, turn, orientation.flip_horizontal, orientation.flip_vertical
+            )
             if not full:
                 oriented = (await asyncio.to_thread(downscale_jpeg, oriented, images.DEFAULT_MAX_SIDE)).data
             self._rendered[key] = oriented
@@ -396,14 +427,70 @@ class Monitor:
             # The full image of the same call, for the full screen view. Without it, the scaled one.
             self.last_snapshot_raw = self._full_snapshots.pop(call.id, None)
             self._rendered.clear()
-            self.bus.update_phone(has_snapshot=True, snapshot_seq=self.bus.phone.snapshot_seq + 1)
+            self.bus.update_phone(
+                has_snapshot=True,
+                snapshot_seq=self.bus.phone.snapshot_seq + 1,
+                snapshot_turn=snapshot_turn(texts),
+            )
 
     async def overlay_changed(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
-        """The boxes and arrows on the phone changed: the page draws the same ones on its snapshot."""
-        self.bus.update_phone(highlights=boxes, arrows=arrows)
+        """The boxes and arrows on the phone changed: the page draws the same ones on its snapshot. A secondary
+        also sends them to the primary's page (in the background: a slow primary never slows a tool)."""
+        self.bus.update_phone(highlights=boxes, arrows=arrows, overlay_origin=None)
+        if self.forwarder is not None and self.is_secondary():
+            self.forwarder.send_overlay_soon(boxes, arrows)
+
+    def markings_changed(self, visible: bool) -> None:
+        """Listener for `MarkingsChoice` (also a change through another server): the page hides or shows."""
+        self.saved = self.saved.model_copy(update={"markings_visible": visible})
+        self.bus.update_phone(markings_visible=visible)
+
+    async def set_markings(self, visible: bool) -> None:
+        """The page's Markings toggle: one log row; the MCP server saves it and tells the phone."""
+        if self.markings_setter is None:
+            raise RuntimeError("the monitor is not attached to an MCP server")
+        async with self.bus.record(tools.MARKINGS, {"visible": visible}, CallSource.UI) as call:
+            result = await self.markings_setter(visible)
+            call.summary = f"{'shown' if result.visible else 'hidden'}; phone: {result.phone}"
+        self.bus.update_phone(markings_visible=result.visible, markings_phone=result.phone)
+
+    def remote_overlay(self, origin: str, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
+        """The boxes and arrows of a secondary server (the ingest route)."""
+        self.bus.update_phone(highlights=boxes, arrows=arrows, overlay_origin=origin)
+
+    # region: phone screen of a secondary
+
+    async def start_screen_for(self, serial: str) -> ScreenStartResult:
+        """A secondary server connected this phone: stream it here (one scrcpy stream per phone)."""
+        if self.screen is None:
+            return ScreenStartResult(running=False, detail="this monitor has no phone screen (--no-phone-screen)")
+        started = self.screen.ensure_running(serial)
+        self._start_scene_watch()
+        return ScreenStartResult(running=True, detail="started" if started else "already running")
+
+    def scene_frame(self) -> tuple[int, bytes] | None:
+        """The newest phone screen frame and its number, for a secondary's live tracking."""
+        watcher = self.scene_watcher
+        if watcher is None or watcher.state.latest_frame is None:
+            return None
+        return watcher.state.frame_seq, watcher.state.latest_frame
+
+    def screen_source(self) -> tuple[bool, str]:
+        """Where the phone screen frames come from: this monitor's stream, the primary's, or nowhere."""
+        if self.remote_screen is not None and self.remote_screen.active:
+            return True, "the phone screen stream of the primary monitor"
+        if self.screen is not None and self.scene_watcher is not None and self.scene_watcher.running:
+            state = self.bus.phone.screen
+            return state != ScreenStatus.ERROR.value, f"this server's phone screen stream ({state})"
+        return False, "no phone screen stream (--no-phone-screen here, and no primary monitor with one)"
+
+    # endregion: phone screen of a secondary
 
     async def tracking_changed(self, state: str) -> None:
         self.bus.update_phone(tracking=str(state))
+
+    async def app_restarted(self, notice: RestartNotice | None) -> None:
+        self.bus.update_phone(restart_notice=notice)
 
     def remote_board(self) -> RemoteBoard | None:
         """The last board that another MCP server opened (its board_open call came to this page)."""
@@ -417,6 +504,17 @@ class Monitor:
         """The board or the phone moved: the page shows a note, unless the live tracking follows the move."""
         if self.bus.phone.tracking != TRACKING_FOLLOWING:
             self.bus.update_phone(scene_changed_at=changed_at)
+
+    async def _use_primary_screen(self, serial: str) -> str | None:
+        """A secondary: the primary streams the phone, and this server reads its frames. None: use our own."""
+        if self.remote_screen is None or self.remote_screen.watcher is None or not self.is_secondary():
+            return None
+        result = await self.remote_screen.start(serial)
+        if not result.running:
+            logger.info("the primary monitor does not stream the phone screen: %s", result.detail)
+            return None
+        self.remote_screen.watcher.start()
+        return f"from the primary monitor ({result.detail})"
 
     def _start_scene_watch(self) -> None:
         if self.scene_watcher is not None:
@@ -436,7 +534,10 @@ class Monitor:
             return
         self.bus.update_phone(serial=connected.serial, status=connected.status)
         self._start_status_poll()
-        if self.screen is not None:
+        remote = await self._use_primary_screen(connected.serial)
+        if remote is not None:
+            call.set_detail(details.SCREEN, remote)
+        elif self.screen is not None:
             started = self.screen.ensure_running(connected.serial)
             call.set_detail(details.SCREEN, "started" if started else "already running")
             self._start_scene_watch()
@@ -469,6 +570,11 @@ class Monitor:
             saved = saved.model_copy(update={"in_sensor_zoom": self.in_sensor_zoom.enabled})
         if self.af_mode is not None:
             saved = saved.model_copy(update={"af_mode": self.af_mode.mode})
+        # The Markings toggle owns its value: a save of the other settings keeps it.
+        saved = saved.model_copy(update={"markings_visible": self.bus.phone.markings_visible})
+        if self.phone_selection is not None:
+            # The Devices part owns the selected phone: a save of the other settings keeps it.
+            saved = saved.model_copy(update={"adb_serial": self.phone_selection.page_serial})
         old = self.effective
         self._store.save(saved)
         self.saved = saved
@@ -716,6 +822,8 @@ class Monitor:
         """Stop the phone screen, scrcpy, and the status poll, and remove the adb forward of the camera API."""
         if self.scene_watcher is not None:
             await self.scene_watcher.stop()
+        if self.remote_screen is not None and self.remote_screen.watcher is not None:
+            await self.remote_screen.watcher.stop()
         if self.screen is not None:
             await self.screen.stop()
         if self.scrcpy is not None:

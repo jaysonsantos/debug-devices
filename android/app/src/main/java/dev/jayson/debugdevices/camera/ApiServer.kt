@@ -93,9 +93,11 @@ fun Application.cameraApi(camera: CameraPort, appVersion: String, onUnexpected: 
             call.respond(camera.focusAt(FocusTapLogic.target(request)))
         }
         post(Constants.Paths.OVERLAY) {
-            val request = call.receive<OverlayRequest>()
-            OverlayLogic.validate(request)
-            call.respond(camera.setOverlay(request.boxes, request.arrows))
+            val status = when (val command = OverlayLogic.command(call.receive<OverlayRequest>())) {
+                is OverlayCommand.SetShapes -> camera.setOverlay(command.boxes, command.arrows)
+                is OverlayCommand.SetVisible -> camera.setOverlayVisible(command.visible)
+            }
+            call.respond(status)
         }
         get(Constants.Paths.SNAPSHOT) { call.respondBytes(camera.capture(), ContentType.Image.JPEG) }
     }

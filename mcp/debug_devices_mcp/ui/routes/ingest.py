@@ -13,8 +13,9 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from debug_devices_mcp.ui.constants import http, ingest
-from debug_devices_mcp.ui.forward import IngestCall
-from debug_devices_mcp.ui.routes import error_response, monitor_of
+from debug_devices_mcp.ui.forward import IngestCall, IngestOverlay
+from debug_devices_mcp.ui.remote_screen import ScreenStart
+from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
 
 BAD_REQUEST = 400
 FORBIDDEN = 403
@@ -68,7 +69,48 @@ async def post_image(request: Request) -> Response:
     return Response(status_code=NO_CONTENT)
 
 
+async def post_overlay(request: Request) -> Response:
+    """The boxes and arrows of a secondary server: the page draws them on its snapshot with the origin."""
+    if not token_ok(request):
+        return error_response("a valid ingest token is required", FORBIDDEN)
+    try:
+        data = IngestOverlay.model_validate_json(await request.body())
+    except ValidationError as exc:
+        return error_response(str(exc), BAD_REQUEST)
+    monitor_of(request).remote_overlay(data.origin, data.boxes, data.arrows)
+    return Response(status_code=NO_CONTENT)
+
+
+async def post_screen_start(request: Request) -> Response:
+    """A secondary connected the phone: stream it here, so its live tracking gets frames."""
+    if not token_ok(request):
+        return error_response("a valid ingest token is required", FORBIDDEN)
+    try:
+        data = ScreenStart.model_validate_json(await request.body())
+    except ValidationError as exc:
+        return error_response(str(exc), BAD_REQUEST)
+    return json_response(await monitor_of(request).start_screen_for(data.serial))
+
+
+async def get_frame(request: Request) -> Response:
+    """The newest phone screen frame (JPEG), or 204 when there is none newer than `after`."""
+    if not token_ok(request):
+        return error_response("a valid ingest token is required", FORBIDDEN)
+    try:
+        after = int(request.query_params.get(ingest.AFTER_PARAM, "0"))
+    except ValueError:
+        return error_response(f"{ingest.AFTER_PARAM} must be a number", BAD_REQUEST)
+    frame = monitor_of(request).scene_frame()
+    if frame is None or frame[0] <= after:
+        return Response(status_code=NO_CONTENT)
+    seq, jpeg = frame
+    return Response(jpeg, media_type=http.JPEG_MEDIA_TYPE, headers={ingest.FRAME_SEQ_HEADER: str(seq)})
+
+
 routes = [
     Route(ingest.CALLS_PATH, post_call, methods=["POST"]),
+    Route(ingest.OVERLAY_PATH, post_overlay, methods=["POST"]),
+    Route(ingest.SCREEN_START_PATH, post_screen_start, methods=["POST"]),
+    Route(ingest.FRAME_PATH, get_frame, methods=["GET"]),
     Route("/api/ingest/calls/{call_id:uuid}/images", post_image, methods=["POST"]),
 ]

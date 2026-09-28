@@ -8,13 +8,17 @@ from pydantic import SecretStr
 
 from debug_devices_mcp.multimeter import (
     MeterMode,
+    MeterStatus,
     MissingApiKeyError,
     MultimeterReading,
     OutputTruncatedError,
+    UnitFamily,
     VisionClient,
     VisionError,
     build_request,
+    check_reading,
     parse_reading,
+    unit_family,
 )
 
 from .conftest import JPEG
@@ -220,3 +224,115 @@ async def test_meter_model_goes_into_the_prompt() -> None:
 
     text = json.loads(seen[0].content)["messages"][1]["content"][0]["text"]
     assert text == "Read this multimeter. The meter is a PROSTER T21D. Use what you know about its display and dial."
+
+
+# region: meter check (the report's acceptance: clear Ω, kΩ, MΩ, V, OL; obscured symbols; 443 V in a resistance test)
+
+
+def reading(**changes: object) -> MultimeterReading:
+    return MultimeterReading.model_validate({**READING, **changes})
+
+
+@pytest.mark.parametrize(
+    ("unit", "family"),
+    [
+        ("Ω", UnitFamily.RESISTANCE),
+        ("kΩ", UnitFamily.RESISTANCE),
+        ("MΩ", UnitFamily.RESISTANCE),
+        ("\u2126", UnitFamily.RESISTANCE),  # OHM SIGN
+        ("k ohm", UnitFamily.RESISTANCE),
+        ("mV", UnitFamily.VOLTAGE),
+        ("V", UnitFamily.VOLTAGE),
+        ("µA", UnitFamily.CURRENT),
+        ("uA", UnitFamily.CURRENT),
+        ("nF", UnitFamily.CAPACITANCE),
+        ("kHz", UnitFamily.FREQUENCY),
+        ("°C", UnitFamily.TEMPERATURE),
+        ("%", UnitFamily.PERCENT),
+        ("unknown", UnitFamily.UNKNOWN),
+        ("", UnitFamily.UNKNOWN),
+        ("kxV", UnitFamily.UNKNOWN),
+    ],
+)
+def test_unit_family(unit: str, family: UnitFamily) -> None:
+    assert unit_family(unit) is family
+
+
+@pytest.mark.parametrize(
+    ("unit", "display_text", "value"),
+    [("Ω", "12.3", 12.3), ("kΩ", "443.0", 443.0), ("MΩ", "1.205", 1.205)],
+)
+def test_clear_resistance_is_confirmed(unit: str, display_text: str, value: float) -> None:
+    result = check_reading(
+        reading(mode="resistance", unit=unit, display_text=display_text, value=value, confidence=0.9),
+        MeterMode.RESISTANCE,
+    )
+    assert result.status is MeterStatus.CONFIRMED
+    assert result.value == value
+    assert result.unit_family is UnitFamily.RESISTANCE
+    assert result.display_text == display_text
+    assert result.request is None
+
+
+def test_clear_voltage_is_confirmed() -> None:
+    result = check_reading(reading(), MeterMode.DC_VOLTAGE)
+    assert result.status is MeterStatus.CONFIRMED
+    assert result.value == 4.98
+
+
+def test_overload_in_resistance_mode() -> None:
+    result = check_reading(
+        reading(mode="resistance", unit="MΩ", display_text="O.L", value=None, confidence=0.9), MeterMode.RESISTANCE
+    )
+    assert result.status is MeterStatus.CONFIRMED
+    assert result.overload is True
+    assert result.value is None
+    assert result.display_text == "O.L"
+
+
+def test_obscured_unit_symbol_gives_no_number() -> None:
+    result = check_reading(
+        reading(mode="resistance", unit="unknown", display_text="443", value=443.0, confidence=0.4),
+        MeterMode.RESISTANCE,
+    )
+    assert result.status is MeterStatus.UNCERTAIN
+    assert result.unit_family is UnitFamily.UNKNOWN
+    assert result.value is None
+    assert result.display_text == "443"
+    assert result.request is not None
+    assert "LCD symbols and the dial together" in result.request
+
+
+def test_443_volts_during_a_resistance_test_is_disputed() -> None:
+    # The model read volts (a consistent pair on its own), but the current test is a resistance test.
+    result = check_reading(
+        reading(mode="dc_voltage", unit="V", display_text="443", value=443.0, confidence=0.45), MeterMode.RESISTANCE
+    )
+    assert result.status is MeterStatus.DISPUTED
+    assert result.value is None
+    assert any("expects resistance" in problem for problem in result.problems)
+
+
+def test_unit_that_does_not_fit_the_mode_is_disputed() -> None:
+    result = check_reading(reading(mode="resistance", unit="V", display_text="443", value=443.0, confidence=0.95))
+    assert result.status is MeterStatus.DISPUTED
+    assert result.value is None
+
+
+def test_expected_mode_never_confirms() -> None:
+    # A low-confidence reading stays uncertain, also when it matches the expected mode.
+    low = check_reading(reading(confidence=0.3), MeterMode.DC_VOLTAGE)
+    assert low.status is MeterStatus.UNCERTAIN
+    assert low.value is None
+    # The same family with another mode (AC instead of DC) is not a confirmation either.
+    other = check_reading(reading(confidence=0.95), MeterMode.AC_VOLTAGE)
+    assert other.status is MeterStatus.UNCERTAIN
+
+
+def test_unreadable_display() -> None:
+    result = check_reading(reading(readable=False, value=None, confidence=0.1))
+    assert result.status is MeterStatus.UNREADABLE
+    assert result.value is None
+
+
+# endregion

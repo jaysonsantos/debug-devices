@@ -131,6 +131,8 @@
               pkgs.uv
               pkgs.ruff
               pkgs.ffmpeg
+              # schematic_find: pdftotext -bbox (text positions) and pdftoppm (crop images)
+              pkgs.poppler-utils
 
               # scripts/: live reload (dev-monitor.sh) and the MCP config JSON (agent.sh)
               pkgs.watchexec

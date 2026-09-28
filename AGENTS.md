@@ -52,7 +52,7 @@ python3 scripts/qa_contract.py --base-url http://127.0.0.1:18765 --strict   # ph
 ## Safety
 
 - Secrets live in `.env` only (`OPENROUTER_API_KEY`, `BOARDVIEW_*_KEY`). Never print or commit them.
-- adb: use only the serial in `DEBUG_DEVICES_ADB_SERIAL`. Other Android devices (for example Fire TV devices) can be on the network. Never send them a command.
+- adb: use only the serial that the user selected (page or DEBUG_DEVICES_ADB_SERIAL). Other Android devices (for example Fire TV devices) can be on the network. Never send them a command. Only the user selects the phone (the Devices part of the monitor page); agents only list the devices (`phone_devices`).
 - Board files from repair sites are proprietary. Never copy them, or parts of them, into the repository, test fixtures, commit messages, or a web service or model. Local tests read the board in `BOARDVIEW_TARGET` and skip without it.
 - Test fixtures come only from open sources, with a license note next to them. Hooks must not change them.
 - Webcam frames can show people. Only the crop box goes to the vision model. Mask the area outside the crop in recordings.

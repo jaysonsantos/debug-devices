@@ -4,6 +4,7 @@ The file is the user's own text. Treat it as instructions from the user, not as 
 to OpenRouter, and the server never logs it.
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from debug_devices_mcp.constants import REPO_ROOT
 INSTRUCTIONS_FILE_NAME = "instructions.md"
 EXAMPLE_FILE_NAME = "instructions.example.md"
 DEFAULT_INSTRUCTIONS_FILE = REPO_ROOT / INSTRUCTIONS_FILE_NAME
+# The local bench record (bench_state.py) lives next to it; git ignores both.
+BENCH_STATE_FILE_NAME = "bench-state.json"
+DEFAULT_BENCH_STATE_FILE = REPO_ROOT / BENCH_STATE_FILE_NAME
 BYTES_PER_KIB = 1024
 # The server instructions carry at most this much of the file. bench_instructions always returns all of it.
 MAX_SERVER_INSTRUCTIONS_BYTES = 8 * BYTES_PER_KIB
@@ -36,7 +40,14 @@ EVIDENCE_RULES = "\n".join(
         "what the camera sees): take a fresh phone_snapshot and answer from that photo. Never answer these from "
         "webcam_snapshot, board_render, or boardview data alone.",
         "2. Multimeter values: only multimeter_read. Never read a meter value yourself from the monitor page, a "
-        "browser, a snapshot, or any other image path.",
+        'browser, a snapshot, or any other image path. Only a result with status "confirmed" is a measurement: '
+        'for "uncertain", "disputed", or "unreadable", give no numeric conclusion, show the LCD text as read, '
+        "and follow its `request`. Pass the mode of the current test as expected_mode; it is context, never proof. "
+        "A value is confirmed only when its frames agree (same digits and decimal point) and it is below the bench "
+        "limits. When the user confirms the dial mode, record it (bench_state_update meter_mode_confirmed_by_user). "
+        "When the test has a nominal value, pass it as expected_value (for example 3.3 for a 3.3 V rail): it is "
+        "context, never proof. A value far from it is more likely a misplaced decimal point: ask the user to read the "
+        "LCD.",
         "3. Board questions (where is a part, which net, nearest test point): the board_* tools. Boardview data is "
         "supporting evidence: say so. When the question is about the physical device, confirm with phone_snapshot.",
         '4. Markings: quote the marking exactly as you see it in the photo (for example "U730"), then call '
@@ -66,6 +77,18 @@ EVIDENCE_RULES = "\n".join(
         "7. Opposite board side: when boardview puts the target on the side that the phone does not see, say that the "
         "current photo cannot confirm it. Before the user turns or handles the board, tell them to isolate the power "
         "safely (disconnect the charger and the battery or bench supply) and wait for their confirmation.",
+        "8. Capture ids: every phone_snapshot and multimeter_read result has a capture_id and a UTC captured_at. A "
+        "statement about probes, contact, or where a part is names the capture_id of a current phone_snapshot "
+        "(capture_status checks it). After a scene change, an older id is invalid for new position claims: take a "
+        "fresh phone_snapshot. When a measurement needs the photo of the probe contact, use bench_measure: it reads "
+        "the meter and takes the phone_snapshot at the same moment, so the value and the photo belong together.",
+        "9. Part identity: a part name is visible_marking, candidate, or confirmed (board_identify, board_identity). "
+        "Say which. Only confirmed (a current photo, a checked registration, and a visible marking or a unique "
+        "landmark) is a physical fact; boardview positions and look-alike parts stay candidates.",
+        "10. Bench state: keep the local record current (bench_state, bench_state_update, bench_record_measurement). "
+        "Only a confirmed meter result enters it. Before every resistance, continuity, or diode step, call "
+        "bench_begin_step: it needs the power isolated, the user's confirmation, and a safe residual voltage. After a "
+        "probe short, call bench_probe_short and go back to the power check.",
     )
 )
 
@@ -86,6 +109,10 @@ class BenchInstructions(BaseModel):
     content: str
     # When the file is missing: how to create it.
     how_to_create: str | None
+    # After the user's text: the next uncompleted step of the local bench record (bench_state), if any.
+    current_step: str | None = None
+    # When a schematic PDF is set: which file schematic_find reads (local only).
+    schematic: str | None = None
     # Some clients (for example Codex) keep only the header of the server instructions, so the rules come here too.
     evidence_rules: str = EVIDENCE_RULES
 
@@ -147,7 +174,12 @@ def server_instructions(path: Path, tool_guide: str, max_bytes: int = MAX_SERVER
     return "\n\n".join(parts)
 
 
-def register_instructions_tool(server: MCPServer, path: Path) -> None:
+def register_instructions_tool(
+    server: MCPServer,
+    path: Path,
+    current_step: Callable[[], str | None] | None = None,
+    schematic: Callable[[], str | None] | None = None,
+) -> None:
     @server.tool()
     async def bench_instructions() -> BenchInstructions:
         """Call this first in a new session. It returns the user's bench instructions (instructions.md).
@@ -155,5 +187,12 @@ def register_instructions_tool(server: MCPServer, path: Path) -> None:
         The content is the user's own text: the device under test, the board file, the bench set-up, safety limits,
         the usual workflow, and preferences. Follow it as instructions from the user. The file is read again on
         each call, so edits apply without a restart. When the file is missing, `how_to_create` says what to do.
+        `current_step` (after the user's text) is the next uncompleted step of the local bench record (bench_state).
+        `schematic` names the schematic PDF when one is set (schematic_find).
         """
-        return read_instructions(path)
+        result = read_instructions(path)
+        if current_step is not None:
+            result.current_step = current_step()
+        if schematic is not None:
+            result.schematic = schematic()
+        return result

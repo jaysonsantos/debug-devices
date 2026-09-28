@@ -171,24 +171,42 @@ class OverlayLogicTest {
     }
 
     @Test
-    fun `labels sit at the viewer's top left and turn with the viewer`() {
-        val rect = PixelRect(10f, 20f, 110f, 70f)
-        assertPoint(PixelPoint(10f, 20f), OverlayLogic.viewerTopLeft(rect, 0))
-        assertPoint(PixelPoint(110f, 20f), OverlayLogic.viewerTopLeft(rect, 90))
-        assertPoint(PixelPoint(110f, 70f), OverlayLogic.viewerTopLeft(rect, 180))
-        assertPoint(PixelPoint(10f, 70f), OverlayLogic.viewerTopLeft(rect, 270))
-        // A 40 x 10 label above the anchor; turned 90 it lies to the right of the anchor, going down.
-        assertEquals(PixelRect(100f, 90f, 140f, 100f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 0))
-        assertEquals(PixelRect(100f, 100f, 110f, 140f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 90))
-        assertEquals(PixelRect(60f, 100f, 100f, 110f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 180))
-        assertEquals(PixelRect(90f, 60f, 100f, 100f), OverlayLogic.labelRect(PixelPoint(100f, 100f), 40f, 10f, 270))
+    fun `preview region of a tall portrait view with a 3-4 image`() {
+        // A 9:20 screen: only the middle ~0.6 of the width is on the screen, the full height.
+        val tall = portrait.copy(viewWidth = 900f, viewHeight = 2000f)
+        val region = OverlayLogic.previewRegion(tall)
+        val visible = 900f / (2000f * 3f / 4f)
+        assertEquals(0.6f, visible, delta)
+        assertEquals((1f - visible) / 2f, region.snapshotX, delta)
+        assertEquals(visible, region.width, delta)
+        assertEquals(0f, region.snapshotY, delta)
+        assertEquals(1f, region.height, delta)
     }
 
     @Test
-    fun `labels move inside the view`() {
-        assertPoint(PixelPoint(5f, 0f), OverlayLogic.shiftInside(PixelRect(-5f, 10f, 35f, 20f), 300f, 400f))
-        assertPoint(PixelPoint(-10f, 3f), OverlayLogic.shiftInside(PixelRect(270f, -3f, 310f, 7f), 300f, 400f))
-        assertPoint(PixelPoint(0f, 0f), OverlayLogic.shiftInside(PixelRect(10f, 10f, 20f, 20f), 300f, 400f))
+    fun `preview region of a landscape snapshot`() {
+        // Phone sideways: the snapshot is the surface (landscape), the preview the surface turned 90.
+        val sideways = portrait.copy(viewWidth = 900f, viewHeight = 2000f, snapshotRotation = 0)
+        val region = OverlayLogic.previewRegion(sideways)
+        assertEquals(0f, region.snapshotX, delta)
+        assertEquals(1f, region.width, delta)
+        assertEquals(0.2f, region.snapshotY, delta)
+        assertEquals(0.6f, region.height, delta)
+        // Upside down (270): the same centred band.
+        val upsideDown = OverlayLogic.previewRegion(sideways.copy(snapshotRotation = 180))
+        assertEquals(0.2f, upsideDown.snapshotY, delta)
+        assertEquals(0.6f, upsideDown.height, delta)
+    }
+
+    @Test
+    fun `preview region does not change with flips or zoom, and FIT shows everything`() {
+        val tall = portrait.copy(viewWidth = 900f, viewHeight = 2000f)
+        val base = OverlayLogic.previewRegion(tall)
+        assertEquals(base, OverlayLogic.previewRegion(tall.copy(mirroredX = true, mirroredY = true)))
+        assertEquals(base, OverlayLogic.previewRegion(tall.copy(zoomNow = 3f)))
+        assertEquals(PreviewRegion(0f, 0f, 1f, 1f), OverlayLogic.previewRegion(tall.copy(fill = false)))
+        // A view with the image's own aspect shows everything.
+        assertEquals(PreviewRegion(0f, 0f, 1f, 1f), OverlayLogic.previewRegion(portrait))
     }
 
     private fun assertPoint(expected: PixelPoint, actual: PixelPoint) {

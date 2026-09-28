@@ -16,7 +16,9 @@ data class OverlayBox(
     val width: Float,
     @Serializable(with = StrictFloatSerializer::class)
     val height: Float,
-    val label: String
+    val label: String,
+    /** A short name for the badge (1-3 characters); a box without it gets the next free letter. */
+    val tag: String? = null
 )
 
 /** An arrow at the preview edge: the target is outside the view in [angleDeg] (snapshot space, 0 = right, 90 = down). */
@@ -28,16 +30,36 @@ data class OverlayArrow(
     val label: String
 )
 
-/** `boxes` is required; `arrows` is optional (missing = no arrows). `ApiJson` refuses unknown fields. */
+/**
+ * Either the shapes (`boxes` required, `arrows` optional: missing = no arrows) or `visible` alone
+ * (see [OverlayLogic.command]). `ApiJson` refuses unknown fields.
+ */
 @Serializable
-data class OverlayRequest(val boxes: List<OverlayBox>, val arrows: List<OverlayArrow> = emptyList())
+data class OverlayRequest(
+    val boxes: List<OverlayBox>? = null,
+    val arrows: List<OverlayArrow>? = null,
+    @Serializable(with = StrictBooleanSerializer::class)
+    val visible: Boolean? = null
+)
+
+/** What one `POST /v1/overlay` body does. */
+sealed interface OverlayCommand {
+    /** Replaces the boxes and arrows; the visibility stays. */
+    data class SetShapes(val boxes: List<OverlayBox>, val arrows: List<OverlayArrow>) : OverlayCommand
+
+    /** Hides or shows the overlay; the boxes and arrows stay. */
+    data class SetVisible(val visible: Boolean) : OverlayCommand
+}
+
+/** A box of the scene in view pixels, with its optional tag and its label (the layout input before the dp conversion). */
+data class LayoutItem(val rect: PixelRect, val tag: String?, val label: String)
 
 /** An arrow in view pixels: the tip near the preview edge and the tail towards the centre. */
 data class ViewArrow(val tip: PixelPoint, val tail: PixelPoint)
 
 /** What the overlay view draws: boxes and arrows in its pixels, and the viewer turn for upright labels. */
 data class OverlayScene(
-    val boxes: List<Pair<PixelRect, String>>,
+    val boxes: List<LayoutItem>,
     val arrows: List<Pair<ViewArrow, String>>,
     val viewerDegrees: Int
 ) {
@@ -45,6 +67,15 @@ data class OverlayScene(
         val EMPTY = OverlayScene(emptyList(), emptyList(), 0)
     }
 }
+
+/** A rectangle on the true-orientation snapshot, normalized to [0, 1]. */
+@Serializable
+data class PreviewRegion(
+    @SerialName("snapshot_x") val snapshotX: Float,
+    @SerialName("snapshot_y") val snapshotY: Float,
+    val width: Float,
+    val height: Float
+)
 
 /** A rectangle in view pixels. */
 data class PixelRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
@@ -78,8 +109,24 @@ object OverlayLogic {
     private const val CENTRE = 0.5f
     private const val HALF = 2f
 
+    /**
+     * The command of a body: `visible` alone, or the shapes with `boxes`. `visible` together with shapes, `arrows`
+     * without `boxes`, or an empty body is 400. Throws [ApiException] with [ErrorCode.BAD_REQUEST].
+     */
+    fun command(request: OverlayRequest): OverlayCommand {
+        val visible = request.visible
+        if (visible != null) {
+            if (request.boxes != null || request.arrows != null) bad(Constants.Messages.OVERLAY_VISIBLE_ALONE)
+            return OverlayCommand.SetVisible(visible)
+        }
+        val boxes = request.boxes ?: bad(Constants.Messages.OVERLAY_NEEDS_BOXES)
+        val command = OverlayCommand.SetShapes(boxes, request.arrows.orEmpty())
+        validate(command)
+        return command
+    }
+
     /** Throws [ApiException] with [ErrorCode.BAD_REQUEST] when a rule of the contract fails. */
-    fun validate(request: OverlayRequest) {
+    fun validate(request: OverlayCommand.SetShapes) {
         if (request.boxes.size > Constants.Overlay.MAX_BOXES) bad(Constants.Messages.OVERLAY_TOO_MANY)
         for (box in request.boxes) {
             val values = listOf(box.snapshotX, box.snapshotY, box.width, box.height)
@@ -89,6 +136,10 @@ object OverlayLogic {
                 box.snapshotY + box.height <= MAX + Constants.Overlay.EDGE_TOLERANCE
             if (!inside) bad(Constants.Messages.OVERLAY_BAD_BOX)
             if (box.label.length > Constants.Overlay.MAX_LABEL_LENGTH) bad(Constants.Messages.OVERLAY_LABEL_TOO_LONG)
+            val tag = box.tag
+            if (tag != null && tag.length !in Constants.Overlay.MIN_TAG_LENGTH..Constants.Overlay.MAX_TAG_LENGTH) {
+                bad(Constants.Messages.OVERLAY_BAD_TAG)
+            }
         }
         if (request.arrows.size > Constants.Overlay.MAX_ARROWS) bad(Constants.Messages.OVERLAY_TOO_MANY_ARROWS)
         for (arrow in request.arrows) {
@@ -209,52 +260,26 @@ object OverlayLogic {
         )
     }
 
-    /** The corner of [rect] that is the top left for a viewer who sees the screen turned by [viewerDegrees]. */
-    fun viewerTopLeft(rect: PixelRect, viewerDegrees: Int): PixelPoint =
-        when (Math.floorMod(viewerDegrees, Constants.Orientation.DEGREES_PER_TURN)) {
-            Constants.Orientation.BUCKET_DEGREES -> PixelPoint(rect.right, rect.top)
-            2 * Constants.Orientation.BUCKET_DEGREES -> PixelPoint(rect.right, rect.bottom)
-            3 * Constants.Orientation.BUCKET_DEGREES -> PixelPoint(rect.left, rect.bottom)
-            else -> PixelPoint(rect.left, rect.top)
-        }
-
     /**
-     * The screen rectangle of a label of [width] x [height], drawn from [anchor] turned clockwise by
-     * [viewerDegrees]; in its own frame it spans (0, -height) to (width, 0), so it sits above the anchor.
+     * The part of the snapshot that the preview view shows. Zoom and flips do not change it: the preview and the
+     * snapshot share the zoom crop, and a mirror maps the centred FILL crop onto itself. FIT shows the whole image.
      */
-    fun labelRect(anchor: PixelPoint, width: Float, height: Float, viewerDegrees: Int): PixelRect {
-        val corners = listOf(0f to -height, width to -height, 0f to 0f, width to 0f).map { (x, y) ->
-            rotate(x, y, viewerDegrees)
+    fun previewRegion(geometry: OverlayGeometry): PreviewRegion {
+        val scaleX = geometry.viewWidth / geometry.imageWidth
+        val scaleY = geometry.viewHeight / geometry.imageHeight
+        val scale = if (geometry.fill) maxOf(scaleX, scaleY) else minOf(scaleX, scaleY)
+        // The visible fraction of the upright preview image on each axis, centred.
+        val visibleX = minOf(MAX, geometry.viewWidth / (geometry.imageWidth * scale))
+        val visibleY = minOf(MAX, geometry.viewHeight / (geometry.imageHeight * scale))
+        val corners = listOf(
+            CENTRE - visibleX / HALF to CENTRE - visibleY / HALF,
+            CENTRE + visibleX / HALF to CENTRE + visibleY / HALF
+        ).map { (x, y) ->
+            val (surfaceX, surfaceY) = FocusTapLogic.snapshotToSurface(x, y, geometry.previewRotation)
+            surfaceToImage(surfaceX, surfaceY, geometry.snapshotRotation)
         }
-        return PixelRect(
-            anchor.x + corners.minOf { it.first },
-            anchor.y + corners.minOf { it.second },
-            anchor.x + corners.maxOf { it.first },
-            anchor.y + corners.maxOf { it.second }
-        )
+        val left = corners.minOf { it.first }
+        val top = corners.minOf { it.second }
+        return PreviewRegion(left, top, corners.maxOf { it.first } - left, corners.maxOf { it.second } - top)
     }
-
-    /** The shift that moves [rect] inside a view of [width] x [height] (when it fits). */
-    fun shiftInside(rect: PixelRect, width: Float, height: Float): PixelPoint {
-        val dx = when {
-            rect.left < 0f -> -rect.left
-            rect.right > width -> width - rect.right
-            else -> 0f
-        }
-        val dy = when {
-            rect.top < 0f -> -rect.top
-            rect.bottom > height -> height - rect.bottom
-            else -> 0f
-        }
-        return PixelPoint(dx, dy)
-    }
-
-    /** Turns a vector clockwise on the screen (y down) by a multiple of 90 degrees. */
-    private fun rotate(x: Float, y: Float, degrees: Int): Pair<Float, Float> =
-        when (Math.floorMod(degrees, Constants.Orientation.DEGREES_PER_TURN)) {
-            Constants.Orientation.BUCKET_DEGREES -> -y to x
-            2 * Constants.Orientation.BUCKET_DEGREES -> -x to -y
-            3 * Constants.Orientation.BUCKET_DEGREES -> y to -x
-            else -> x to y
-        }
 }

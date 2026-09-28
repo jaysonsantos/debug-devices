@@ -94,6 +94,13 @@ def map_points(matrix: list[list[float]], points: list[tuple[float, float]]) -> 
     return [(float(x), float(y)) for x, y in mapped]
 
 
+def unmap_point(matrix: list[list[float]], point: tuple[float, float]) -> tuple[float, float]:
+    """A photo pixel back to board mm (the inverse of the fitted homography)."""
+    inverse = np.linalg.inv(np.asarray(matrix))
+    ((x, y),) = apply(inverse, np.asarray([point], dtype=float))
+    return float(x), float(y)
+
+
 def likely_outlier(board_mm: list[tuple[float, float]], photo_px: list[tuple[float, float]]) -> int | None:
     """The index of the pair that is most likely wrong, or None when the pairs cannot tell.
 

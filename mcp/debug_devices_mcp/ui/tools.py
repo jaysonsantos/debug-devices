@@ -44,6 +44,8 @@ class StepName(StrEnum):
     PAGE = "page"
     WEBCAM = "webcam"
     PHONE = "phone"
+    # The phone screen frames (live tracking, scene changes): this server's stream or the primary's.
+    SCREEN = "screen"
     BOARD = "board"
 
 
@@ -63,6 +65,10 @@ async def run_step(name: StepName, enabled: bool, action: StepAction) -> BenchSt
 
 class ToolFailedError(Exception):
     """A nested tool call returned an error result."""
+
+
+class NoScreenError(Exception):
+    """No phone screen stream in this server or in the primary monitor."""
 
 
 async def nested_tool(monitor: Monitor, name: str, arguments: dict[str, object]) -> str:
@@ -98,8 +104,9 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
 
         Follow bench_instructions (the user's instructions file): call it first in a new session.
 
-        Steps: the monitor page (a Firefox window with `open_browser`), the webcam stream, phone_connect (with
-        the phone screen), and board_open when `board_path` is given. Each step runs even when another one fails.
+        Steps: the monitor page (a Firefox window with `open_browser`), the webcam stream, phone_connect, the
+        phone screen stream (this server's or the primary monitor's: live tracking and scene changes need it), and
+        board_open when `board_path` is given. Each step runs even when another one fails.
         The result has the page URL and the status of each step; tell the user both.
         """
         opened: list[str] = []
@@ -113,10 +120,17 @@ def register_monitor_tools(server: MCPServer, monitor: Monitor) -> None:
         async def start_webcam() -> str:
             return await monitor.start_webcam_now()
 
+        async def screen_step() -> str:
+            running, detail = monitor.screen_source()
+            if not running:
+                raise NoScreenError(detail)
+            return detail
+
         steps = [
             await run_step(StepName.PAGE, True, start_page),
             await run_step(StepName.WEBCAM, webcam, start_webcam),
             await run_step(StepName.PHONE, phone, lambda: nested_tool(monitor, tools.PHONE_CONNECT, {})),
+            await run_step(StepName.SCREEN, phone, screen_step),
             await run_step(
                 StepName.BOARD,
                 board_path is not None,

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, JsonValue
 
+from debug_devices_mcp.app_restart import RestartNotice
 from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox
@@ -89,6 +90,9 @@ class PhoneState(BaseModel):
     snapshot_seq: int = 0
     # The flips of the phone snapshots. The page shows the buttons and turns the live view the same way.
     orientation: SnapshotOrientation = SnapshotOrientation()
+    # The clockwise turn of the last snapshot (SnapshotInfo.turn_degrees): the page shows it turned like the agent's
+    # image, and maps the boxes and arrows (on the phone still) with it, then with the flips.
+    snapshot_turn: int = 0
     # How far the phone is from the board and the detail it gives (from `status`, computed on the server).
     focus: FocusReport | None = None
     # The user's in-sensor zoom choice. The state of the phone is `status.in_sensor_zoom`.
@@ -99,10 +103,18 @@ class PhoneState(BaseModel):
     highlights: list[OverlayBox] = []
     # The arrows toward searched parts outside the view (phone_point_to): angles on the true-orientation snapshot.
     arrows: list[OverlayArrow] = []
+    # The Markings toggle: False hides the page's drawings (boxes, arrows, labels, frames) and the phone's boxes.
+    markings_visible: bool = True
+    # What the phone did with the last toggle ("hidden", "shown", or why not: an old app keeps its boxes).
+    markings_phone: str | None = None
+    # The MCP server that drew the boxes and arrows: None for this server, else the origin of a secondary.
+    overlay_origin: str | None = None
     # The live tracking of the newest photo registration: off, following, or lost.
     tracking: str = "off"
     # The last time the board or the phone moved (the scene watcher). The page shows a short note.
     scene_changed_at: datetime | None = None
+    # The phone app restarted (app_restart.py): the page shows the notice until the agent's next phone_snapshot.
+    restart_notice: RestartNotice | None = None
     # The phone screen stream in the page: off, starting, streaming, or error.
     screen: str = "off"
     screen_error: str | None = None

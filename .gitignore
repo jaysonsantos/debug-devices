@@ -19,5 +19,7 @@ local.properties
 .mcp.json
 # Personal bench instructions for the agents (see instructions.example.md)
 instructions.md
+# Local bench record of the MCP server (bench_state): power state, measurements, steps. Never tracked.
+bench-state.json
 # Orchestrator briefs for the agents (working notes)
 docs/briefs/

@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel
 
+from debug_devices_mcp.phone_api import OverlayArrow, OverlayBox
 from debug_devices_mcp.remote_webcam import RemoteMonitor
 from debug_devices_mcp.ui.constants import STATE_DIR_NAME, defaults, env, http, ingest, tools
 from debug_devices_mcp.ui.events import BusMessage, CallStatus, EventBus, EventKind, ToolCallEvent
@@ -77,6 +78,14 @@ class IngestCall(BaseModel):
     event: ToolCallEvent
 
 
+class IngestOverlay(BaseModel):
+    """The boxes and arrows that a secondary server has on the phone now (true orientation of the still)."""
+
+    origin: str
+    boxes: list[OverlayBox]
+    arrows: list[OverlayArrow]
+
+
 def redacted(event: ToolCallEvent) -> ToolCallEvent:
     """The user's instructions text must not leave this server: keep only the tool name and the status."""
     if event.tool not in tools.REDACTED:
@@ -121,6 +130,7 @@ class CallForwarder:
         self._next_lookup = 0.0
         self._backoff = ingest.BACKOFF_START
         self.sent = 0
+        self._overlay_tasks: set[asyncio.Task[bool]] = set()
 
     @property
     def primary(self) -> str | None:
@@ -217,6 +227,19 @@ class CallForwarder:
             }
             if not await self._post(path, image.jpeg, http.JPEG_MEDIA_TYPE, params):
                 return
+
+    def send_overlay_soon(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> None:
+        """Send in the background: a slow or gone primary never slows a tool call."""
+        task = asyncio.create_task(self.send_overlay(boxes, arrows), name="overlay-forward")
+        self._overlay_tasks.add(task)
+        task.add_done_callback(self._overlay_tasks.discard)
+
+    async def send_overlay(self, boxes: list[OverlayBox], arrows: list[OverlayArrow]) -> bool:
+        """The boxes and arrows of this server, for the primary's page (drawn on its snapshot with our origin)."""
+        if not self._is_secondary() or not await self._find_primary():
+            return False
+        body = IngestOverlay(origin=self._origin(), boxes=boxes, arrows=arrows).model_dump_json().encode()
+        return await self._post(ingest.OVERLAY_PATH, body, http.JSON_MEDIA_TYPE)
 
     async def _post(self, path: str, body: bytes, media_type: str, params: dict[str, str] | None = None) -> bool:
         if self._primary is None or self._token is None:

@@ -41,6 +41,10 @@ class ApiServerTest {
                 status().copy(overlayBoxes = boxes.size, overlayArrows = arrows.size).also { status = it }
             }
 
+        override suspend fun setOverlayVisible(visible: Boolean): CameraStatus = gate.control {
+            status().copy(overlayVisible = visible).also { status = it }
+        }
+
         override suspend fun setCameraSettings(inSensorZoom: Boolean?, afMode: AfMode?): CameraStatus {
             inSensorZoom?.let { setInSensorZoom(it) }
             return gate.control {
@@ -128,7 +132,10 @@ class ApiServerTest {
         inSensorZoom = InSensorZoomState.OFF,
         overlayBoxes = 0,
         overlayArrows = 0,
-        afMode = AfMode.CONTINUOUS
+        afMode = AfMode.CONTINUOUS,
+        appStartId = "0192f3a4-5b6c-7d8e-9f00-112233445566",
+        previewRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0f, width = 0.6f, height = 1f),
+        overlayVisible = true
     )
 
     private val unexpected = mutableListOf<Throwable>()
@@ -160,7 +167,7 @@ class ApiServerTest {
     fun `status uses snake case`() = api(ready(ready)) {
         val body = client.get(Constants.Paths.STATUS).bodyAsText()
         assertEquals(
-            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0,"overlay_arrows":0,"af_mode":"continuous"}""",
+            """{"zoom_ratio":1.0,"min_zoom_ratio":1.0,"max_zoom_ratio":8.0,"torch_enabled":false,"has_flash_unit":true,"rotation_degrees":0,"rotation_locked":false,"preview_flip_horizontal":false,"preview_flip_vertical":false,"focus":{"distance_diopters":3.5,"state":"focused","calibration":"approximate","min_distance_diopters":10.0},"optics":{"focal_length_mm":6.07,"sensor_width_mm":9.14,"output_width_px":4080},"in_sensor_zoom":"off","overlay_boxes":0,"overlay_arrows":0,"af_mode":"continuous","app_start_id":"0192f3a4-5b6c-7d8e-9f00-112233445566","preview_region":{"snapshot_x":0.2,"snapshot_y":0.0,"width":0.6,"height":1.0},"overlay_visible":true}""",
             body
         )
     }
@@ -394,6 +401,11 @@ class ApiServerTest {
     }
 
     @Test
+    fun `preview region can be null`() = api(ready(ready.copy(previewRegion = null))) {
+        assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""preview_region":null"""))
+    }
+
+    @Test
     fun `focus is null before the camera is bound, and the distance can be null`() {
         api(ready(ready.copy(focus = null))) {
             val body = client.get(Constants.Paths.STATUS).bodyAsText()
@@ -538,6 +550,61 @@ class ApiServerTest {
         )) {
             val response = postJson(Constants.Paths.CAMERA, body)
             assertEquals(body, HttpStatusCode.BadRequest, response.status)
+        }
+    }
+
+    @Test
+    fun `overlay visible hides and shows without changing the shapes`() {
+        val camera = ready(ready)
+        api(camera) {
+            val shapes = """{"boxes":[{"snapshot_x":0.1,"snapshot_y":0.1,"width":0.2,"height":0.2,"label":"U1"}],""" +
+                """"arrows":[{"angle_deg":0,"label":"J4"}]}"""
+            postJson(Constants.Paths.OVERLAY, shapes)
+            val hidden = postJson(Constants.Paths.OVERLAY, """{"visible":false}""").status()
+            assertEquals(false, hidden.overlayVisible)
+            assertEquals(1, hidden.overlayBoxes)
+            assertEquals(1, hidden.overlayArrows)
+            assertEquals(1, camera.overlay.size)
+            // New shapes do not change the visibility.
+            val replaced = postJson(Constants.Paths.OVERLAY, """{"boxes":[]}""").status()
+            assertEquals(false, replaced.overlayVisible)
+            assertEquals(0, replaced.overlayBoxes)
+            val shown = postJson(Constants.Paths.OVERLAY, """{"visible":true}""").status()
+            assertEquals(true, shown.overlayVisible)
+            assertTrue(client.get(Constants.Paths.STATUS).bodyAsText().contains(""""overlay_visible":true"""))
+        }
+    }
+
+    @Test
+    fun `overlay visible bad bodies are 400`() = api(ready(ready)) {
+        val bodies = listOf(
+            "{}",
+            """{"visible":"false"}""",
+            """{"visible":0}""",
+            """{"visible":false,"boxes":[]}""",
+            """{"visible":true,"arrows":[]}""",
+            """{"arrows":[]}""",
+            """{"visible":null}"""
+        )
+        for (body in bodies) {
+            val response = postJson(Constants.Paths.OVERLAY, body)
+            assertEquals(body, HttpStatusCode.BadRequest, response.status)
+            assertEquals(body, ErrorCode.BAD_REQUEST, response.error().error)
+        }
+    }
+
+    @Test
+    fun `overlay tags are 1 to 3 characters`() {
+        val camera = ready(ready)
+        api(camera) {
+            fun body(tag: String) =
+                """{"boxes":[{"snapshot_x":0.1,"snapshot_y":0.1,"width":0.2,"height":0.2,"label":"R1",$tag}]}"""
+            assertEquals(HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, body(""""tag":"U7"""")).status)
+            assertEquals("U7", camera.overlay.single().tag)
+            assertEquals(HttpStatusCode.OK, postJson(Constants.Paths.OVERLAY, body(""""tag":"ABC"""")).status)
+            for (bad in listOf(""""tag":""""", """"tag":"ABCD"""", """"tag":7""")) {
+                assertEquals(bad, HttpStatusCode.BadRequest, postJson(Constants.Paths.OVERLAY, body(bad)).status)
+            }
         }
     }
 

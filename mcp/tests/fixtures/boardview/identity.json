@@ -1,0 +1,506 @@
+{
+ "schema_version": 1,
+ "source": {
+  "path": "/fixtures/identity.json",
+  "format": "gencad",
+  "obv_version": "fixture"
+ },
+ "units": "mil",
+ "outline": [
+  {
+   "x": 0,
+   "y": 0
+  },
+  {
+   "x": 4000,
+   "y": 0
+  },
+  {
+   "x": 4000,
+   "y": 3000
+  },
+  {
+   "x": 0,
+   "y": 3000
+  }
+ ],
+ "outline_segments": [],
+ "parts": [
+  {
+   "name": "L501",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-COIL-1UH",
+   "first_pin": 0,
+   "pin_count": 2
+  },
+  {
+   "name": "L502",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-COIL-1UH",
+   "first_pin": 2,
+   "pin_count": 2
+  },
+  {
+   "name": "L503",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-COIL-1UH",
+   "first_pin": 4,
+   "pin_count": 2
+  },
+  {
+   "name": "L504",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-COIL-1UH",
+   "first_pin": 6,
+   "pin_count": 2
+  },
+  {
+   "name": "U7301",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-PMIC-A",
+   "first_pin": 8,
+   "pin_count": 8
+  },
+  {
+   "name": "U7303",
+   "side": "bottom",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-LDO",
+   "first_pin": 16,
+   "pin_count": 4
+  },
+  {
+   "name": "J4",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-CONN",
+   "first_pin": 20,
+   "pin_count": 4
+  },
+  {
+   "name": "Q12",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "SYN-FET",
+   "first_pin": 24,
+   "pin_count": 3
+  },
+  {
+   "name": "C8850",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "10UF",
+   "first_pin": 27,
+   "pin_count": 2
+  },
+  {
+   "name": "R10",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "10K",
+   "first_pin": 29,
+   "pin_count": 2
+  },
+  {
+   "name": "TP9",
+   "side": "top",
+   "mounting": "smd",
+   "p1": null,
+   "p2": null,
+   "rotation_deg": null,
+   "mfgcode": "",
+   "first_pin": 31,
+   "pin_count": 1
+  }
+ ],
+ "pins": [
+  {
+   "part": "L501",
+   "number": "1",
+   "name": "",
+   "net": "SYN_SW_1",
+   "x": 1750,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L501",
+   "number": "2",
+   "name": "",
+   "net": "PP_SYN_OUT_1",
+   "x": 1850,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L502",
+   "number": "1",
+   "name": "",
+   "net": "SYN_SW_2",
+   "x": 1950,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L502",
+   "number": "2",
+   "name": "",
+   "net": "PP_SYN_OUT_2",
+   "x": 2050,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L503",
+   "number": "1",
+   "name": "",
+   "net": "SYN_SW_3",
+   "x": 2150,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L503",
+   "number": "2",
+   "name": "",
+   "net": "PP_SYN_OUT_3",
+   "x": 2250,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L504",
+   "number": "1",
+   "name": "",
+   "net": "SYN_SW_4",
+   "x": 2350,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "L504",
+   "number": "2",
+   "name": "",
+   "net": "PP_SYN_OUT_4",
+   "x": 2450,
+   "y": 1500,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 980,
+   "y": 940,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 1020,
+   "y": 940,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "3",
+   "name": "",
+   "net": "SYN_EN_A",
+   "x": 980,
+   "y": 980,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "4",
+   "name": "",
+   "net": "SYN_FB_A",
+   "x": 1020,
+   "y": 980,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "5",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 980,
+   "y": 1020,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "6",
+   "name": "",
+   "net": "GND",
+   "x": 1020,
+   "y": 1020,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "7",
+   "name": "",
+   "net": "SYN_EN_A",
+   "x": 980,
+   "y": 1060,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7301",
+   "number": "8",
+   "name": "",
+   "net": "SYN_FB_A",
+   "x": 1020,
+   "y": 1060,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7303",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 980,
+   "y": 2480,
+   "side": "bottom",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7303",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 1020,
+   "y": 2480,
+   "side": "bottom",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7303",
+   "number": "3",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 980,
+   "y": 2520,
+   "side": "bottom",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "U7303",
+   "number": "4",
+   "name": "",
+   "net": "GND",
+   "x": 1020,
+   "y": 2520,
+   "side": "bottom",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "J4",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_VIN",
+   "x": 130,
+   "y": 130,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "J4",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 170,
+   "y": 130,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "J4",
+   "number": "3",
+   "name": "",
+   "net": "PP_SYN_VIN",
+   "x": 130,
+   "y": 170,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "J4",
+   "number": "4",
+   "name": "",
+   "net": "GND",
+   "x": 170,
+   "y": 170,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "Q12",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_1V8",
+   "x": 1980,
+   "y": 2400,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "Q12",
+   "number": "2",
+   "name": "",
+   "net": "SYN_GATE",
+   "x": 2020,
+   "y": 2400,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "Q12",
+   "number": "3",
+   "name": "",
+   "net": "GND",
+   "x": 1980,
+   "y": 2440,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "C8850",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 2980,
+   "y": 2600,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "C8850",
+   "number": "2",
+   "name": "",
+   "net": "GND",
+   "x": 3020,
+   "y": 2600,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "R10",
+   "number": "1",
+   "name": "",
+   "net": "SYN_EN_A",
+   "x": 480,
+   "y": 2600,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "R10",
+   "number": "2",
+   "name": "",
+   "net": "PP_SYN_1V8",
+   "x": 520,
+   "y": 2600,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  },
+  {
+   "part": "TP9",
+   "number": "1",
+   "name": "",
+   "net": "PP_SYN_1V0",
+   "x": 3800,
+   "y": 2850,
+   "side": "top",
+   "radius": 8.0,
+   "probe": 0
+  }
+ ],
+ "nails": []
+}

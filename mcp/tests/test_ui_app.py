@@ -183,7 +183,8 @@ def test_read_multimeter_button(client: TestClient, monitor: Monitor) -> None:
     assert call["tool"] == "multimeter_read"
     assert call["source"] == "ui"
     assert call["details"]["reading"]["unit"]
-    assert call["images"] == [{"index": 0, "label": "image sent to the model"}]
+    # multimeter_read reads 2 frames by default: both images that went to the model are in the log.
+    assert call["images"] == [{"index": index, "label": "image sent to the model"} for index in range(2)]
     assert client.get(f"/api/calls/{call['id']}/images/0").content == JPEG
 
 
@@ -412,7 +413,8 @@ async def test_status_poll_follows_the_phone_without_log_rows(
 def test_read_multimeter_button_with_the_phone(client: TestClient) -> None:
     call = client.post("/api/multimeter/read", json={"source": "phone"}).json()
     assert call["arguments"] == {"source": "phone", "include_image": True}
-    assert call["images"] == [{"index": 0, "label": "image sent to the model"}]
+    # multimeter_read reads 2 frames by default: both images that went to the model are in the log.
+    assert call["images"] == [{"index": index, "label": "image sent to the model"} for index in range(2)]
     assert client.get(f"/api/calls/{call['id']}/images/0").content == JPEG
     assert client.post("/api/multimeter/read", json={"source": "ceiling"}).status_code == 400
 

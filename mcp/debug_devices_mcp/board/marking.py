@@ -11,6 +11,8 @@ from pydantic import BaseModel
 
 from debug_devices_mcp.board.dump import Side
 from debug_devices_mcp.board.model import Board, Box, Mm, Part, Point, on_side
+from debug_devices_mcp.board.rotation import Reading
+from debug_devices_mcp.board.value_code import ValueInterpretation
 
 # Case, spaces, dashes, and underscores do not count.
 IGNORED_CHARS = re.compile(r"[\s\-_]+")
@@ -57,6 +59,14 @@ class MarkingMatch(BaseModel):
     total_candidates: int
     best_candidate: str | None
     message: str
+    # A marking match never confirms a physical part by itself: board_identify does (photo + registration).
+    identity: str = "visible_marking"
+    # Which reading matched: the marking as seen, or read upside down (board/rotation.py).
+    reading: Reading = Reading.AS_SEEN
+    # The upright text of the marking when it was read upside down; None when no turned reading exists.
+    rotated_reading: str | None = None
+    # The marking (and its rotated reading) as an SMD value code. Interpretations only, never a part name.
+    value_interpretations: list[ValueInterpretation] = []
 
 
 def normalize(text: str) -> str:

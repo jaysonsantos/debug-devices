@@ -10,11 +10,13 @@ from pydantic_settings import BaseSettings, CliApp, NoDecode, SettingsConfigDict
 from debug_devices_mcp.board.constants import defaults as board_defaults
 from debug_devices_mcp.board.constants import env as board_env
 from debug_devices_mcp.constants import ENV_FILE, PROGRAM_NAME, defaults, env
-from debug_devices_mcp.instructions import DEFAULT_INSTRUCTIONS_FILE
+from debug_devices_mcp.instructions import DEFAULT_BENCH_STATE_FILE, DEFAULT_INSTRUCTIONS_FILE
+from debug_devices_mcp.schematic import defaults as schematic_defaults
 from debug_devices_mcp.ui.constants import UiStart
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
 from debug_devices_mcp.webcam import Crop
+from debug_devices_mcp.webcam_controls import DEFAULT_V4L2_CTL
 
 
 def _parse_seconds(value: object) -> object:
@@ -44,7 +46,21 @@ def _default_if_empty(value: object) -> object:
     return value
 
 
+def _default_bench_state_if_empty(value: object) -> object:
+    """An empty variable (as in .env.example) means the default bench record file, not the current directory."""
+    if isinstance(value, str) and not value.strip():
+        return DEFAULT_BENCH_STATE_FILE
+    return value
+
+
 type CropSetting = Annotated[Crop | None, NoDecode, BeforeValidator(_parse_crop)]
+
+
+def _none_if_empty(value: object) -> object:
+    """An empty variable (as in .env.example) means "not set", not the current directory."""
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
 class Settings(BaseSettings):
@@ -66,6 +82,25 @@ class Settings(BaseSettings):
     )
     vision_model: str = Field(default=defaults.VISION_MODEL, description="OpenRouter model id with image input.")
     openrouter_base_url: str = defaults.OPENROUTER_BASE_URL
+    # region: meter plausibility (meter_frames.py)
+    max_voltage: float = Field(
+        default=defaults.MAX_VOLTAGE, gt=0, description="A meter value above this many volts is disputed (a misread)."
+    )
+    max_current: float = Field(
+        default=defaults.MAX_CURRENT, gt=0, description="A meter value above this many amperes is disputed."
+    )
+    meter_frame_interval: Seconds = Field(
+        default=defaults.METER_FRAME_INTERVAL, description="Seconds between the frames of one multimeter_read."
+    )
+    meter_counts: int = Field(
+        default=defaults.METER_COUNTS,
+        ge=0,
+        description=(
+            "Display counts of the meter for volts and amperes, for example 6000 (4 digits, at most 5999). "
+            "0: unknown, no check."
+        ),
+    )
+    # endregion: meter plausibility
     meter_model: str = Field(
         default="",
         description='Make and model of the multimeter, for example "PROSTER T21D". The vision prompt names it.',
@@ -80,6 +115,9 @@ class Settings(BaseSettings):
     local_forward_port: int = Field(default=defaults.LOCAL_FORWARD_PORT, gt=0, le=defaults.MAX_PORT)
     adb_path: str = defaults.ADB
     ffmpeg_path: str = defaults.FFMPEG
+    v4l2_ctl_path: str = Field(
+        default=DEFAULT_V4L2_CTL, description="v4l2-ctl, for the webcam image controls (webcam_controls)."
+    )
     phone_http_timeout: Seconds = defaults.PHONE_HTTP_TIMEOUT
     phone_snapshot_timeout: Seconds = defaults.PHONE_SNAPSHOT_TIMEOUT
     app_start_timeout: Seconds = defaults.APP_START_TIMEOUT
@@ -123,6 +161,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("instructions_file", env.INSTRUCTIONS.lower()),
         description="The user's bench instructions (Markdown). Missing file: no error. See instructions.example.md.",
     )
+    bench_state_file: Annotated[Path, BeforeValidator(_default_bench_state_if_empty)] = Field(
+        default=DEFAULT_BENCH_STATE_FILE,
+        description="The local bench record (JSON, git-ignored): power state, measurements, steps (bench_state).",
+    )
     # region: boardview. The environment names have no DEBUG_DEVICES_ prefix (see .env.example).
     obv_dump_path: str = Field(
         default=board_defaults.DUMP_BIN,
@@ -135,6 +177,15 @@ class Settings(BaseSettings):
     boardview_cae_key: SecretStr | None = Field(default=None, validation_alias=board_env.CAE_KEY.lower())
     boardview_xzz_key: SecretStr | None = Field(default=None, validation_alias=board_env.XZZ_KEY.lower())
     # endregion: boardview
+    # region: schematic (schematic_find, local only)
+    schematic: Annotated[Path | None, BeforeValidator(_none_if_empty)] = Field(
+        default=None,
+        description="The schematic PDF for schematic_find. It stays local: never sent to a web service. Empty: none.",
+    )
+    pdftotext_path: str = schematic_defaults.PDFTOTEXT
+    pdftoppm_path: str = schematic_defaults.PDFTOPPM
+    schematic_timeout: Seconds = schematic_defaults.TIMEOUT
+    # endregion: schematic
 
     @classmethod
     def from_cli(cls, args: list[str] | None = None) -> Settings:

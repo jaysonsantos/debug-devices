@@ -24,9 +24,17 @@ const API = {
   phoneOrientation: "/api/phone/orientation",
   phoneInSensorZoom: "/api/phone/in-sensor-zoom",
   phoneAfMode: "/api/phone/af-mode",
+  phoneMarkings: "/api/phone/markings",
+  overlayLayout: "/api/overlay-layout",
   phoneFocus: "/api/phone/focus",
   phoneClearHighlights: "/api/phone/highlight/clear",
   board: "/api/board",
+  devices: "/api/devices",
+  devicesSelect: "/api/devices/select",
+  devicesClear: "/api/devices/clear",
+  devicesWifi: "/api/devices/wifi",
+  devicesPair: "/api/devices/pair",
+  devicesConnect: "/api/devices/connect",
   boardNames: "/api/board/names",
   boardOpen: "/api/board/open",
   boardSearch: "/api/board/search",
@@ -81,6 +89,13 @@ const TOOL_ERROR_PREFIX = /^Error executing tool \w+: /;
 // A click on the snapshot that moves less than this (px) picks a registration point; more is a pan.
 const PICK_MAX_MOVE_PX = 5;
 const REGISTER_MIN_POINTS = 4;
+// The tools whose result image is the agent's snapshot with its boxes.
+const ANNOTATED_TOOLS = new Set(["phone_highlight", "board_locate_in_photo"]);
+// In the full-screen phone views: show or hide the markings.
+const MARKINGS_KEY = "k";
+const MARKINGS_VIEWS = new Set(["phone-view", "snapshot-view"]);
+// The phone answer of an old app (no `visible` in POST /v1/overlay): the server removes its boxes instead.
+const OLD_APP_MARKER = "the phone app is old";
 const AF_MACRO = "macro";
 const AF_CONTINUOUS = "continuous";
 const AF_MODE_TEXT = { continuous: "continuous autofocus", macro: "macro (close range)", unknown: "unknown" };
@@ -88,8 +103,6 @@ const AF_MODE_TEXT = { continuous: "continuous autofocus", macro: "macro (close 
 const MACRO_HINT_CM = 15;
 // A pick waits this long: a double-click (full screen) comes before it and cancels it.
 const PICK_CLICK_DELAY_MS = 250;
-// An arrow toward a part outside the view sits this far inside the picture edge (px).
-const ARROW_INSET_PX = 34;
 const DEGREES_PER_HALF_TURN = 180;
 const BOARD_TOOL_PREFIX = "board_";
 // The note "Scene changed: highlights cleared" shows this long.
@@ -318,9 +331,11 @@ function applyPhone(phone) {
   showFocus(phone.focus);
   showFocusTap(phone.focus);
   showHighlights(phone);
+  showMarkings(phone);
   showTracking(phone);
   showAfMode(phone);
   showSceneChange(phone.scene_changed_at);
+  showRestartNotice(phone.restart_notice);
   showInSensorZoom(phone);
   showLiveZoom(phone.status, false);
   showViewRotation();
@@ -814,7 +829,9 @@ function setupFullscreen() {
   setupLiveZoom();
   setupFocusTap();
   setupHighlights();
+  setupMarkings();
   setupBoard();
+  setupDevices();
   const controls = document.querySelector("#phone-view .fs-controls");
   for (const button of controls.querySelectorAll("[data-zoom]")) {
     button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
@@ -1176,53 +1193,37 @@ function drawHighlights() {
   const boxes = state.phone?.highlights ?? [];
   layer.replaceChildren();
   const arrows = state.phone?.arrows ?? [];
-  if ((!boxes.length && !arrows.length && !register.points.length) || !img.naturalWidth) return;
+  const region = state.phone?.status?.preview_region;
+  if ((!boxes.length && !arrows.length && !register.points.length && !region) || !img.naturalWidth) return;
   if ($("snapshot-view").hidden) return;
   const view = $("snapshot-view").getBoundingClientRect();
   const picture = snapshotPicture();
   const { width, height } = picture;
   const left = picture.left - view.left;
   const top = picture.top - view.top;
-  const flips = state.phone.orientation ?? {};
-  for (const box of boxes) {
-    const x = flips.flip_horizontal ? 1 - box.snapshot_x - box.width : box.snapshot_x;
-    const y = flips.flip_vertical ? 1 - box.snapshot_y - box.height : box.snapshot_y;
-    const element = document.createElement("div");
-    element.className = "highlight-box";
-    element.style.left = `${left + x * width}px`;
-    element.style.top = `${top + y * height}px`;
-    element.style.width = `${box.width * width}px`;
-    element.style.height = `${box.height * height}px`;
-    if (box.label) {
-      const label = document.createElement("span");
-      label.className = "highlight-label";
-      label.textContent = box.label;
-      element.append(label);
-    }
-    layer.append(element);
+  // The boxes and arrows are on the phone still: the snapshot turn, then the flips (orientation.ImageTransform).
+  const transform = snapshotTransform();
+  // The part of the snapshot that the phone screen shows (CameraStatus.preview_region): a thin frame.
+  if (region) {
+    const shown = boxFromTrue(region, transform);
+    const frame = document.createElement("div");
+    frame.className = "preview-frame";
+    frame.title = "The part that the phone screen shows";
+    frame.style.left = `${left + shown.x * width}px`;
+    frame.style.top = `${top + shown.y * height}px`;
+    frame.style.width = `${shown.width * width}px`;
+    frame.style.height = `${shown.height * height}px`;
+    layer.append(frame);
   }
-  // Arrows toward parts outside the view: at the picture edge, in the shown orientation (a flip is its own inverse).
-  for (const arrow of arrows) {
-    const angle = shownAngle(arrow.angle_deg, flips);
-    const radians = (angle * Math.PI) / DEGREES_PER_HALF_TURN;
-    const [dx, dy] = [Math.cos(radians), Math.sin(radians)];
-    const halfWidth = Math.max(width / 2 - ARROW_INSET_PX, 0);
-    const halfHeight = Math.max(height / 2 - ARROW_INSET_PX, 0);
-    const reach = Math.min(dx ? halfWidth / Math.abs(dx) : Infinity, dy ? halfHeight / Math.abs(dy) : Infinity);
-    const element = document.createElement("div");
-    element.className = "pointer-arrow";
-    element.style.left = `${left + width / 2 + dx * reach}px`;
-    element.style.top = `${top + height / 2 + dy * reach}px`;
-    const head = document.createElement("span");
-    head.className = "pointer-arrow-head";
-    head.textContent = "➜";
-    head.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
-    const label = document.createElement("span");
-    label.className = "highlight-label pointer-arrow-label";
-    label.textContent = arrow.label;
-    element.append(head, label);
-    layer.append(element);
+  // Boxes of another MCP server (a secondary): say whose they are.
+  if (state.phone.overlay_origin && (boxes.length || arrows.length)) {
+    const origin = document.createElement("span");
+    origin.className = "overlay-origin";
+    origin.textContent = `boxes from ${state.phone.overlay_origin}`;
+    layer.append(origin);
   }
+  // Boxes and arrows by the highlight layout (docs/overlay-layout.md): the server computes it for this picture.
+  drawLayout(layer, { left, top, width, height }, boxes, arrows, transform);
   // The registration points that the user picked (already in the shown orientation).
   for (const point of register.points) {
     const mark = document.createElement("div");
@@ -1237,11 +1238,50 @@ function drawHighlights() {
 }
 
 // An angle on the true-orientation snapshot -> the same direction on the shown (flipped) snapshot.
-function shownAngle(angle, flips) {
-  let shown = angle;
-  if (flips.flip_horizontal) shown = DEGREES_PER_HALF_TURN - shown;
-  if (flips.flip_vertical) shown = -shown;
-  return ((shown % 360) + 360) % 360;
+// The transform of the shown snapshot: its clockwise turn (SnapshotInfo.turn_degrees), then the flips of now.
+// The same math as orientation.ImageTransform on the server.
+function snapshotTransform() {
+  const flips = state.phone?.orientation ?? {};
+  return {
+    turn: state.phone?.snapshot_turn ?? 0,
+    flipH: Boolean(flips.flip_horizontal),
+    flipV: Boolean(flips.flip_vertical),
+  };
+}
+
+function turnPoint(x, y, turn) {
+  switch (((turn % FULL_TURN) + FULL_TURN) % FULL_TURN) {
+    case QUARTER_TURN:
+      return [1 - y, x];
+    case HALF_TURN:
+      return [1 - x, 1 - y];
+    case FULL_TURN - QUARTER_TURN:
+      return [y, 1 - x];
+    default:
+      return [x, y];
+  }
+}
+
+// A normalized point on the phone still -> the same point on the shown snapshot.
+function pointFromTrue(x, y, transform) {
+  let [shownX, shownY] = turnPoint(x, y, transform.turn);
+  if (transform.flipH) shownX = 1 - shownX;
+  if (transform.flipV) shownY = 1 - shownY;
+  return [shownX, shownY];
+}
+
+function boxFromTrue(box, transform) {
+  const [ax, ay] = pointFromTrue(box.snapshot_x, box.snapshot_y, transform);
+  const [bx, by] = pointFromTrue(box.snapshot_x + box.width, box.snapshot_y + box.height, transform);
+  return { x: Math.min(ax, bx), y: Math.min(ay, by), width: Math.abs(bx - ax), height: Math.abs(by - ay) };
+}
+
+// An angle on the phone still (0 = right, 90 = down) -> the same direction on the shown snapshot.
+function angleFromTrue(angle, transform) {
+  let shown = angle + transform.turn;
+  if (transform.flipH) shown = DEGREES_PER_HALF_TURN - shown;
+  if (transform.flipV) shown = -shown;
+  return ((shown % FULL_TURN) + FULL_TURN) % FULL_TURN;
 }
 
 // The shown picture of the snapshot in page pixels: after the zoom transform, inside the panel border, and without
@@ -1267,6 +1307,13 @@ function showHighlights(phone) {
   drawHighlights();
 }
 
+// The phone app restarted: the notice stays until the agent's next phone_snapshot.
+function showRestartNotice(notice) {
+  const note = $("restart-note");
+  note.hidden = !notice;
+  note.textContent = notice ? `Phone app restarted: ${notice.message.replace(/^the phone app restarted: /, "")}` : "";
+}
+
 function showSceneChange(changedAt) {
   const first = sceneNote.seen === undefined;
   const changed = changedAt !== sceneNote.seen;
@@ -1288,6 +1335,233 @@ function setupHighlights() {
   new ResizeObserver(drawHighlights).observe($("snapshot-view"));
   document.addEventListener("fullscreenchange", () => requestAnimationFrame(drawHighlights));
 }
+
+// The last snapshot with green boxes that an agent got (phone_highlight or a highlight of board_locate_in_photo),
+// from this server or a secondary one: the user sees what the agent sees.
+function showAnnotated(call) {
+  if (!ANNOTATED_TOOLS.has(call.tool) || call.status !== "ok" || !call.images?.length) return;
+  $("annotated").src = API.callImage(call.id, call.images.length - 1);
+  const time = new Date(call.started_at).toLocaleTimeString();
+  $("annotated-caption").textContent = `${call.origin ?? "this server"} · ${call.tool} · ${time}`;
+  $("annotated-view").hidden = false;
+}
+
+// The Markings toggle: one state for the page (in the settings file). Off hides the page's drawings and the
+// phone's own boxes; they are kept and come back when shown.
+function showMarkings(phone) {
+  const visible = phone.markings_visible !== false;
+  document.body.classList.toggle("markings-hidden", !visible);
+  for (const button of document.querySelectorAll("[data-markings]")) {
+    button.setAttribute("aria-pressed", String(visible));
+  }
+  const note = $("markings-note");
+  const old = Boolean(phone.markings_phone?.startsWith(OLD_APP_MARKER));
+  note.hidden = !old;
+  note.textContent = old ? phone.markings_phone : "";
+}
+
+let markingsBusy = false;
+
+async function toggleMarkings() {
+  if (markingsBusy) return;
+  markingsBusy = true;
+  const buttons = document.querySelectorAll("[data-markings]");
+  for (const button of buttons) button.disabled = true;
+  try {
+    await phoneAction(API.phoneMarkings, { visible: state.phone?.markings_visible === false });
+  } finally {
+    for (const button of buttons) button.disabled = false;
+    markingsBusy = false;
+  }
+}
+
+function setupMarkings() {
+  for (const button of document.querySelectorAll("[data-markings]")) button.addEventListener("click", toggleMarkings);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== MARKINGS_KEY || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!MARKINGS_VIEWS.has(document.fullscreenElement?.id) || event.target.closest?.(FORM_FIELDS)) return;
+    event.preventDefault();
+    toggleMarkings();
+  });
+}
+
+// region: highlight layout
+
+// The layout for the boxes and arrows in the shown picture (pixels of the picture as it is drawn now). The server
+// has the one implementation (overlay_layout.py); the page asks it and keeps the last answer.
+const layoutCache = { key: null, layout: null, pending: null };
+// Rule 4 of docs/overlay-layout.md: the page uses picture pixels, like the annotated image.
+const LAYOUT_MIN_BOX = 32;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function layoutRequest(picture, boxes, arrows, transform) {
+  return {
+    width: Math.round(picture.width),
+    height: Math.round(picture.height),
+    min_box: LAYOUT_MIN_BOX,
+    inset: true,
+    boxes: boxes.map((box) => {
+      const shown = boxFromTrue(box, transform);
+      return {
+        x: shown.x * picture.width,
+        y: shown.y * picture.height,
+        width: shown.width * picture.width,
+        height: shown.height * picture.height,
+        label: box.label ?? "",
+        tag: box.tag ?? null,
+      };
+    }),
+    arrows: arrows.map((arrow) => ({
+      angle_deg: angleFromTrue(arrow.angle_deg, transform),
+      label: arrow.label ?? "",
+      tag: arrow.tag ?? null,
+    })),
+  };
+}
+
+function drawLayout(layer, picture, boxes, arrows, transform) {
+  if (!boxes.length && !arrows.length) return;
+  const request = layoutRequest(picture, boxes, arrows, transform);
+  const key = JSON.stringify(request);
+  if (layoutCache.key !== key) {
+    if (layoutCache.pending !== key) {
+      layoutCache.pending = key;
+      api("POST", API.overlayLayout, request)
+        .then((layout) => {
+          layoutCache.key = key;
+          layoutCache.layout = layout;
+          drawHighlights();
+        })
+        .catch((error) => console.warn("highlight layout:", error.message))
+        .finally(() => {
+          if (layoutCache.pending === key) layoutCache.pending = null;
+        });
+    }
+    return;
+  }
+  paintLayout(layer, picture, layoutCache.layout);
+}
+
+function placed(element, picture, rect) {
+  element.style.left = `${picture.left + rect.x}px`;
+  element.style.top = `${picture.top + rect.y}px`;
+  element.style.width = `${rect.width}px`;
+  element.style.height = `${rect.height}px`;
+  return element;
+}
+
+function paintLayout(layer, picture, layout) {
+  if (layout.inset) paintInset(layer, picture, layout);
+  for (const box of layout.boxes) {
+    const element = placed(document.createElement("div"), picture, box.rect);
+    element.className = "highlight-box";
+    element.style.borderColor = box.colour;
+    element.title = `${box.tag}: ${box.label}`;
+    layer.append(element);
+  }
+  const leaders = document.createElementNS(SVG_NS, "svg");
+  leaders.classList.add("highlight-leaders");
+  for (const badge of layout.badges) {
+    if (badge.leader) {
+      const [x1, y1, x2, y2] = badge.leader;
+      const line = document.createElementNS(SVG_NS, "line");
+      for (const [name, value] of Object.entries({ x1, y1, x2, y2 })) {
+        line.setAttribute(name, String((name.startsWith("x") ? picture.left : picture.top) + value));
+      }
+      line.setAttribute("stroke", badge.colour);
+      leaders.append(line);
+    }
+    const element = placed(document.createElement("span"), picture, badge.rect);
+    element.className = "highlight-badge";
+    element.style.color = badge.colour;
+    element.style.borderColor = badge.colour;
+    element.textContent = badge.tag;
+    layer.append(element);
+  }
+  layer.append(leaders);
+  for (const arrow of layout.arrows) {
+    const element = document.createElement("div");
+    element.className = "pointer-arrow";
+    element.style.left = `${picture.left + arrow.anchor[0]}px`;
+    element.style.top = `${picture.top + arrow.anchor[1]}px`;
+    const head = document.createElement("span");
+    head.className = "pointer-arrow-head";
+    head.textContent = "➜";
+    head.style.color = arrow.colour;
+    head.style.transform = `translate(-50%, -50%) rotate(${arrow.angle_deg}deg)`;
+    const tag = document.createElement("span");
+    tag.className = "highlight-badge pointer-arrow-tag";
+    tag.style.color = arrow.colour;
+    tag.style.borderColor = arrow.colour;
+    tag.textContent = arrow.tag;
+    element.append(head, tag);
+    layer.append(element);
+  }
+  if (layout.legend) paintLegend(layer, picture, layout.legend);
+}
+
+function paintLegend(layer, picture, legend) {
+  const element = document.createElement("div");
+  element.className = "highlight-legend";
+  placed(element, picture, legend.rect);
+  element.style.width = "auto";
+  element.style.height = "auto";
+  if (legend.outside) {
+    // Every corner has a box: at the bottom of the view, under the picture when there is room.
+    const view = $("snapshot-view").getBoundingClientRect();
+    const below = picture.top + picture.height + 8;
+    element.style.top = `${Math.min(below, view.height - legend.rect.height - 4)}px`;
+    element.classList.add("outside");
+  }
+  for (const row of legend.rows) {
+    const line = document.createElement("div");
+    line.style.color = row.colour;
+    line.textContent = `${row.tag}: ${row.label}`;
+    element.append(line);
+  }
+  layer.append(element);
+}
+
+// Rule 7: the area around small boxes, enlarged, with the same outlines.
+function paintInset(layer, picture, layout) {
+  const inset = layout.inset;
+  const img = $("snapshot");
+  const canvas = document.createElement("canvas");
+  canvas.className = "highlight-inset";
+  placed(canvas, picture, inset.dest);
+  canvas.width = Math.max(1, Math.round(inset.dest.width));
+  canvas.height = Math.max(1, Math.round(inset.dest.height));
+  const context = canvas.getContext("2d");
+  const toImage = img.naturalWidth / picture.width;
+  try {
+    context.drawImage(
+      img,
+      inset.source.x * toImage,
+      inset.source.y * toImage,
+      inset.source.width * toImage,
+      inset.source.height * toImage,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+  } catch {
+    return; // no image yet
+  }
+  context.lineWidth = 3;
+  for (const box of layout.boxes) {
+    context.strokeStyle = box.colour;
+    context.strokeRect(
+      (box.rect.x - inset.source.x) * inset.scale,
+      (box.rect.y - inset.source.y) * inset.scale,
+      box.rect.width * inset.scale,
+      box.rect.height * inset.scale,
+    );
+  }
+  layer.append(canvas);
+}
+
+// endregion: highlight layout
 
 // endregion: highlights
 
@@ -1514,6 +1788,115 @@ function setupBoard() {
 
 // endregion: board panel
 
+// region: devices
+
+const APP_TEXT = { true: "installed", false: "app not installed", null: "unknown" };
+const SELECTED_FROM_TEXT = { page: "selected here", config: "from the config", none: "no choice" };
+
+function deviceButton(label, onClick, disabled = false, title = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.title = title;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function showDevices(list) {
+  const selected = list.selected_serial;
+  $("devices-selected").textContent = selected
+    ? `${selected} (${SELECTED_FROM_TEXT[list.selected_from]})`
+    : SELECTED_FROM_TEXT.none;
+  const rows = list.devices.map((device) => {
+    const row = document.createElement("tr");
+    row.classList.toggle("selected", device.selected);
+    const app = device.note && device.app_installed !== true ? device.note : APP_TEXT[device.app_installed];
+    for (const text of [device.serial, device.transport, device.state, device.model || "–", app]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.append(cell);
+    }
+    const actions = document.createElement("td");
+    actions.className = "actions";
+    const ready = device.state === "device";
+    actions.append(
+      deviceButton(device.selected ? "In use" : "Use this phone", () => deviceAction(API.devicesSelect, { serial: device.serial }),
+        device.selected || !ready),
+    );
+    if (device.transport === "usb" && ready) {
+      actions.append(
+        deviceButton("Switch to Wi-Fi", () => deviceAction(API.devicesWifi, { serial: device.serial }), false,
+          "adb tcpip 5555 on this phone, then adb connect over Wi-Fi, then use the Wi-Fi serial"),
+      );
+    }
+    row.append(actions);
+    return row;
+  });
+  $("devices-table").tBodies[0].replaceChildren(...rows);
+  const mdns = list.mdns.map((service) => `${service.name} ${service.address}`).join(", ");
+  $("devices-mdns").textContent = list.mdns_note
+    ? `Wireless debugging discovery: ${list.mdns_note}`
+    : mdns ? `On the network (not connected): ${mdns}` : "";
+}
+
+function showSteps(steps) {
+  $("devices-steps").replaceChildren(
+    ...steps.map((step) => {
+      const item = document.createElement("li");
+      item.textContent = `${step.step}: ${step.ok ? step.detail || "ok" : step.detail}`;
+      item.classList.toggle("failed", !step.ok);
+      return item;
+    }),
+  );
+}
+
+async function loadDevices() {
+  try {
+    showDevices(await api("GET", API.devices));
+  } catch (error) {
+    showSteps([{ step: "list", ok: false, detail: error.message }]);
+  }
+}
+
+async function deviceAction(url, body) {
+  const panel = $("phone-devices");
+  for (const button of panel.querySelectorAll("button")) button.disabled = true;
+  showSteps([{ step: "working", ok: true, detail: "…" }]);
+  try {
+    const result = await api("POST", url, body);
+    showSteps(result.steps);
+    showDevices(result.devices);
+  } catch (error) {
+    showSteps([{ step: "request", ok: false, detail: error.message }]);
+    await loadDevices();
+  } finally {
+    for (const button of panel.querySelectorAll("#devices-refresh, #devices-clear, form button")) button.disabled = false;
+  }
+}
+
+function setupDevices() {
+  $("phone-devices").addEventListener("toggle", (event) => {
+    if (event.currentTarget.open) loadDevices();
+  });
+  $("devices-refresh").addEventListener("click", loadDevices);
+  $("devices-clear").addEventListener("click", () => deviceAction(API.devicesClear));
+  $("devices-connect").addEventListener("submit", (event) => {
+    event.preventDefault();
+    deviceAction(API.devicesConnect, { address: $("connect-address").value.trim() });
+  });
+  $("devices-pair").addEventListener("submit", (event) => {
+    event.preventDefault();
+    deviceAction(API.devicesPair, {
+      pair_address: $("pair-address").value.trim(),
+      code: $("pair-code").value.trim(),
+      connect_address: $("pair-connect").value.trim(),
+    });
+  });
+}
+
+// endregion: devices
+
 // region: bench
 
 function benchSummary(result) {
@@ -1563,6 +1946,7 @@ function connectEvents() {
     const call = JSON.parse(event.data);
     renderCall(call);
     boardCallFinished(call);
+    showAnnotated(call);
   });
   // After a reconnect, another code version means a new server (dev reload): load the new page.
   source.addEventListener("version", (event) => {
@@ -1579,7 +1963,10 @@ async function loadState() {
   applySettings(view.settings);
   applyPhone(view.phone);
   if (view.webcam?.width) state.frame = { width: view.webcam.width, height: view.webcam.height };
-  for (const call of view.calls) renderCall(call);
+  for (const call of view.calls) {
+    renderCall(call);
+    showAnnotated(call);
+  }
 }
 
 // endregion: live events

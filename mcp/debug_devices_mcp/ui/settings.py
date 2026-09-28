@@ -41,6 +41,10 @@ class UiSettings(BaseModel):
     snapshot_orientation: SnapshotOrientation | None = None
     # The in-sensor zoom choice. `InSensorZoomChoice` owns it, like the flips.
     in_sensor_zoom: bool | None = None
+    # The phone that the user selected in the page (adb serial). It replaces DEBUG_DEVICES_ADB_SERIAL while set.
+    adb_serial: str | None = Field(default=None, min_length=1)
+    # Show the markings (boxes, arrows, labels, frames) on the page and the phone. `MarkingsChoice` owns it.
+    markings_visible: bool | None = None
     # The autofocus mode choice. `AfModeChoice` owns it.
     af_mode: Literal["continuous", "macro"] | None = None
 
@@ -71,8 +75,28 @@ def state_dir(environ: Mapping[str, str] = os.environ) -> Path:
 
 
 class SettingsStore:
+    """The settings file. It is the one source of truth for every MCP server of this user: `current()` reads it
+    again when it changed, so a change through another server is seen here too."""
+
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._cached: UiSettings | None = None
+        self._stamp: tuple[int, int, int] | None = None
+
+    def _file_stamp(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+    def current(self) -> UiSettings:
+        """The saved settings, read again only when the file changed (time, size, or a new file)."""
+        stamp = self._file_stamp()
+        if self._cached is None or stamp != self._stamp:
+            self._cached = self.load()
+            self._stamp = stamp
+        return self._cached
 
     @classmethod
     def in_dir(cls, directory: Path) -> SettingsStore:
@@ -91,6 +115,8 @@ class SettingsStore:
     def save(self, settings: UiSettings) -> None:
         """Write a temporary file, then rename it, so a crash never leaves half a file."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_name(self.path.name + TEMP_SUFFIX)
+        # One temporary name per process: two MCP servers can save at the same time.
+        temp = self.path.with_name(f"{self.path.name}.{os.getpid()}{TEMP_SUFFIX}")
         temp.write_text(settings.model_dump_json(indent=2, exclude_none=True))
         temp.replace(self.path)
+        self._cached, self._stamp = settings, self._file_stamp()

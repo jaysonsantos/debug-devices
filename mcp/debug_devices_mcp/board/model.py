@@ -1,18 +1,21 @@
 """The board in mm, built from a `BoardDump`, with the queries that the tools use."""
 
 import math
+import re
 from collections import defaultdict
+from collections.abc import Iterable
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Annotated
 
 from pydantic import BaseModel, PlainSerializer
 
-from debug_devices_mcp.board.constants import PIN_BOX_MARGIN_MM, TEST_POINT_PREFIXES
+from debug_devices_mcp.board.constants import PIN_BOX_MARGIN_MM, TEST_POINT_PREFIXES, sides
 from debug_devices_mcp.board.dump import BoardDump, BoardFormat, DumpPart, DumpPin, MilPoint, Mounting, Side
 from debug_devices_mcp.board.units import mil_to_mm
 
 GLOB_CHARS = frozenset("*?[")
+MOUNTING_HOLE = re.compile(sides.MOUNTING_HOLE_PATTERN)
 MM_DECIMALS = 3
 
 # A length in mm. Output keeps 3 decimals (1 µm), so JSON shows 13.97, not 13.969999999999999.
@@ -77,7 +80,10 @@ class Pin(BaseModel):
 
 class Part(BaseModel):
     name: str
+    # The side to use: "both" for through-hole parts and mounting holes (visible from both sides).
     side: Side
+    # The side label in the file, when it differs from `side`.
+    labeled_side: Side | None = None
     mounting: Mounting
     center: Point
     box: Box
@@ -122,6 +128,71 @@ def matches(query: str, value: str) -> bool:
 
 def on_side(item_side: Side, side: Side | None) -> bool:
     return side is None or side is Side.BOTH or item_side in {side, Side.BOTH}
+
+
+class SideLabels(StrEnum):
+    # The heuristic decides (check_sides).
+    AUTO = "auto"
+    # The user knows that the labels are mixed: warn, and never rule a part out by its label.
+    MIXED = "mixed"
+    # The user trusts the labels: no warning.
+    TRUST = "trust"
+
+
+USER_MIXED_WARNING = (
+    "the user said that the side labels of this board file are mixed: a part can be on the other physical side than "
+    "its label. The tools warn, but they do not rule a part out by its side label. Check the side on the photo."
+)
+
+
+class SideCheck(BaseModel):
+    """Do the side labels of the file look reliable?"""
+
+    mixed: bool
+    # Parts whose nearest same-type part (within sides.NEIGHBOUR_MM) has the opposite label, of all such pairs.
+    opposite_pairs: int
+    compared: int
+    warning: str | None
+
+
+MIXED_SIDES_WARNING = (
+    "the side labels of this board file look mixed: {opposite} of {compared} neighbouring parts of the same type "
+    "have opposite top/bottom labels. A part can be on the other physical side than its label: the tools warn, "
+    "but they do not rule a part out by its side label. Check the side on the photo."
+)
+
+
+def _type_key(part: Part) -> tuple[str, int]:
+    return "".join(char for char in part.name if char.isalpha()).upper(), part.pin_count
+
+
+def check_sides(parts: Iterable[Part]) -> SideCheck:
+    """Look for a mixed-side file: many near same-type neighbours with opposite top/bottom labels."""
+    labeled = [part for part in parts if part.side is not Side.BOTH]
+    cell = sides.NEIGHBOUR_MM
+    grid: dict[tuple[int, int], list[Part]] = defaultdict(list)
+    for part in labeled:
+        grid[(int(part.center.x // cell), int(part.center.y // cell))].append(part)
+    compared = opposite = 0
+    for part in labeled:
+        gx, gy = int(part.center.x // cell), int(part.center.y // cell)
+        key = _type_key(part)
+        neighbours = [
+            other
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for other in grid.get((gx + dx, gy + dy), [])
+            if other.name != part.name and _type_key(other) == key
+        ]
+        near = [other for other in neighbours if other.center.distance(part.center) <= sides.NEIGHBOUR_MM]
+        if not near:
+            continue
+        compared += 1
+        if min(near, key=lambda other: other.center.distance(part.center)).side is not part.side:
+            opposite += 1
+    mixed = opposite >= sides.MIN_OPPOSITE_PAIRS and opposite >= sides.MIN_OPPOSITE_FRACTION * compared
+    warning = MIXED_SIDES_WARNING.format(opposite=opposite, compared=compared) if mixed else None
+    return SideCheck(mixed=mixed, opposite_pairs=opposite, compared=compared, warning=warning)
 
 
 class Board:
@@ -175,6 +246,24 @@ class Board:
             self.test_points_by_net[point.net].append(point)
         self.outline: list[list[Point]] = self._outline(dump)
         self.bounds = self._bounds()
+        self.side_check = check_sides(self.parts.values())
+
+    @property
+    def mixed_sides(self) -> bool:
+        return self.side_check.mixed
+
+    def apply_side_labels(self, choice: SideLabels) -> None:
+        """The user's choice over the heuristic: "mixed" or "trust" replace it, "auto" computes it again."""
+        check = check_sides(self.parts.values())
+        if choice is SideLabels.MIXED:
+            check = check.model_copy(update={"mixed": True, "warning": USER_MIXED_WARNING})
+        elif choice is SideLabels.TRUST:
+            check = check.model_copy(update={"mixed": False, "warning": None})
+        self.side_check = check
+
+    def side_ok(self, item_side: Side, side: Side | None) -> bool:
+        """on_side, but a file with mixed side labels does not rule out a part by its label."""
+        return self.mixed_sides or on_side(item_side, side)
 
     def _part(self, raw: DumpPart) -> Part:
         pins = self.pins_by_part.get(raw.name, [])
@@ -190,9 +279,15 @@ class Board:
         else:
             box = Box(min_x=0, min_y=0, max_x=0, max_y=0)
             from_pins = True
+        both = raw.mounting is Mounting.THROUGH_HOLE or MOUNTING_HOLE.match(raw.name.upper()) is not None
+        side = Side.BOTH if both else raw.side
+        if side is Side.BOTH:
+            for pin in pins:
+                pin.side = Side.BOTH
         return Part(
             name=raw.name,
-            side=raw.side,
+            side=side,
+            labeled_side=raw.side if side is not raw.side else None,
             mounting=raw.mounting,
             center=box.center,
             box=box,

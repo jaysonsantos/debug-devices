@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid7
 
 import httpx
 import pytest
@@ -50,6 +51,7 @@ class PreviewPhone(FakePhone):
 
     def restart_app(self) -> None:
         self.status.update(preview_flip_horizontal=False, preview_flip_vertical=False)
+        self.status["app_start_id"] = str(uuid7())
 
 
 def client_for(phone: FakePhone) -> PhoneClient:

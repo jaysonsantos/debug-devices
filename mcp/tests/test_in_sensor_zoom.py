@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from uuid import uuid7
 
 import httpx
 import pytest
@@ -52,6 +53,7 @@ class ZoomModePhone(FakePhone):
 
     def restart_app(self) -> None:
         self.status["in_sensor_zoom"] = "off"
+        self.status["app_start_id"] = str(uuid7())
 
 
 def services_for(settings: Settings, phone: FakePhone, tmp_path: Path, enabled: bool = False):

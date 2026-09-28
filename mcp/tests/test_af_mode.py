@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from uuid import uuid7
 
 import httpx
 import pytest
@@ -54,6 +55,7 @@ class AfPhone(FakePhone):
 
     def restart_app(self) -> None:
         self.status["af_mode"] = "continuous"
+        self.status["app_start_id"] = str(uuid7())
 
 
 def services_for(settings: Settings, phone: FakePhone, tmp_path: Path, mode: str = "continuous"):

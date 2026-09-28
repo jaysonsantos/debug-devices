@@ -76,6 +76,9 @@ class CameraController(
 ) : CameraPort {
     private val gate = ControlGate()
 
+    /** One id per app start: the controller lives from the activity start to its end. */
+    private val appStart = AppStart()
+
     /** Touch it on the main thread only. Declared before [imageCapture], which reads it when it is built. */
     private val rotation = RotationState { next ->
         imageCapture.targetRotation = next
@@ -127,6 +130,10 @@ class CameraController(
     /** The one place of the overlay boxes, and the zoom when they came. Main thread only. */
     private var overlayBoxes: List<OverlayBox> = emptyList()
     private var overlayArrows: List<OverlayArrow> = emptyList()
+
+    /** Hidden keeps the boxes and arrows (and their TTL). True after an app start. Main thread only. */
+    var overlayVisible = true
+        private set
     private var overlayZoomAtCall = Constants.Zoom.UNIT_RATIO
     private val overlayHandler = Handler(Looper.getMainLooper())
     private val clearOverlay = Runnable {
@@ -492,15 +499,16 @@ class CameraController(
     }
 
     /**
-     * Waits until the camera is open, then sets the start state of the contract: zoom at min, torch off.
+     * Waits until the camera is open, then sets the start state of the contract: the start zoom (1x, or the minimum when 1x is outside the range), torch off.
      * The API returns 503 until this is done. A failure goes to the caller, and the API opens anyway.
      */
     suspend fun applyStartState(camera: Camera) = gate.start {
         withContext(Dispatchers.Main) {
             camera.cameraInfo.cameraState.asFlow().first { it.type == CameraState.Type.OPEN }
-            val minZoomRatio = camera.cameraInfo.zoomState.value?.minZoomRatio
+            val zoom = camera.cameraInfo.zoomState.value
                 ?: throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_NOT_READY)
-            runControl { camera.cameraControl.setZoomRatio(ZoomLogic.startRatio(minZoomRatio)).await() }
+            val startRatio = ZoomLogic.startRatio(zoom.minZoomRatio, zoom.maxZoomRatio)
+            runControl { camera.cameraControl.setZoomRatio(startRatio).await() }
             if (camera.cameraInfo.hasFlashUnit()) {
                 runControl { camera.cameraControl.enableTorch(Constants.Start.TORCH_ENABLED).await() }
             }
@@ -530,6 +538,15 @@ class CameraController(
         }
     }
 
+    override suspend fun setOverlayVisible(visible: Boolean): CameraStatus = gate.control {
+        withContext(Dispatchers.Main) {
+            val camera = activeCamera()
+            overlayVisible = visible
+            onOverlayChanged()
+            readStatus(camera)
+        }
+    }
+
     /**
      * The overlay in the pixels of a view with the preview's bounds. [arrowInset] and [arrowLength] are in the same
      * pixels. Main thread only.
@@ -540,10 +557,31 @@ class CameraController(
         if ((overlayBoxes.isEmpty() && overlayArrows.isEmpty()) || viewWidth <= 0f || viewHeight <= 0f) {
             return OverlayScene.EMPTY
         }
-        val resolution = imageCapture.resolutionInfo?.resolution ?: return OverlayScene.EMPTY
+        val geometry = previewGeometry(camera, view, viewWidth, viewHeight) ?: return OverlayScene.EMPTY
+        val area = OverlayLogic.shownArea(geometry)
+        return OverlayScene(
+            boxes = overlayBoxes.mapNotNull { box ->
+                OverlayLogic.boxToView(box, geometry)?.let { LayoutItem(it, box.tag, box.label) }
+            },
+            arrows = overlayArrows.map { arrow ->
+                val direction = OverlayLogic.arrowDirection(arrow.angleDeg, geometry)
+                OverlayLogic.arrowAtEdge(direction, area, arrowInset, arrowLength) to arrow.label
+            },
+            viewerDegrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
+        )
+    }
+
+    /** How the snapshot maps onto a view with the preview's bounds. Null before the capture has a resolution. */
+    private fun previewGeometry(
+        camera: Camera,
+        view: PreviewView,
+        viewWidth: Float,
+        viewHeight: Float
+    ): OverlayGeometry? {
+        val resolution = imageCapture.resolutionInfo?.resolution ?: return null
         val previewRotation = camera.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0)
         val snapshotRotation = camera.cameraInfo.getSensorRotationDegrees(imageCapture.targetRotation)
-        val geometry = OverlayGeometry(
+        return OverlayGeometry(
             zoomAtCall = overlayZoomAtCall,
             zoomNow = camera.cameraInfo.zoomState.value?.zoomRatio ?: overlayZoomAtCall,
             snapshotRotation = snapshotRotation,
@@ -558,15 +596,14 @@ class CameraController(
             mirroredX = view.scaleX < 0f,
             mirroredY = view.scaleY < 0f
         )
-        val area = OverlayLogic.shownArea(geometry)
-        return OverlayScene(
-            boxes = overlayBoxes.mapNotNull { box -> OverlayLogic.boxToView(box, geometry)?.let { it to box.label } },
-            arrows = overlayArrows.map { arrow ->
-                val direction = OverlayLogic.arrowDirection(arrow.angleDeg, geometry)
-                OverlayLogic.arrowAtEdge(direction, area, arrowInset, arrowLength) to arrow.label
-            },
-            viewerDegrees = OrientationLogic.surfaceDegrees(rotation.effectiveRotation)
-        )
+    }
+
+    /** `CameraStatus.preview_region`: null before the camera and the preview view have a size. */
+    private fun previewRegion(camera: Camera): PreviewRegion? {
+        val view = previewView ?: return null
+        if (view.width <= 0 || view.height <= 0) return null
+        val geometry = previewGeometry(camera, view, view.width.toFloat(), view.height.toFloat()) ?: return null
+        return OverlayLogic.previewRegion(geometry)
     }
 
     private fun isSideways(degrees: Int): Boolean = degrees % (2 * Constants.Orientation.BUCKET_DEGREES) != 0
@@ -741,7 +778,10 @@ class CameraController(
             inSensorZoom = inSensorZoomState,
             overlayBoxes = overlayBoxes.size,
             overlayArrows = overlayArrows.size,
-            afMode = afModeActive
+            afMode = afModeActive,
+            appStartId = appStart.id,
+            previewRegion = previewRegion(camera),
+            overlayVisible = overlayVisible
         )
     }
 

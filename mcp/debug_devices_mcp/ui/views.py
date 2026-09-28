@@ -55,6 +55,11 @@ class InSensorZoomBody(BaseModel):
     enabled: StrictBool
 
 
+class MarkingsBody(BaseModel):
+    # Strict: "no" must not turn the markings on.
+    visible: StrictBool
+
+
 class AfModeBody(BaseModel):
     mode: Literal["continuous", "macro"]
 

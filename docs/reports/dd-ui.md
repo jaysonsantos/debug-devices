@@ -1091,3 +1091,449 @@ The contract: `POST /v1/camera {"af_mode": "continuous" | "macro"}` (`in_sensor_
 
 - The real app part is dd-android's task, and the phone is drained. I did not test against the phone.
 - The hint uses the lens focus distance. With an uncalibrated lens, the page has no distance, and there is no hint.
+
+## Round 26: no settings fight between MCP servers (`app_start_id`)
+
+The bug (found on the phone on 2026-09-27): the camera rebound about every 7 s. One MCP server sent `in_sensor_zoom=true`, another sent `false` about 1 s later, and this did not stop. Each server kept its own copy of the settings in memory, and it sent its value again when "the status differs from my setting". Two servers with different copies never stop.
+
+### What I did
+
+- **The rule** (`app_start.py`, `AppStartWatch`; used by `PreviewSync`, `InSensorZoomSync`, and `AfModeSync`). A server sends a stored setting only in these cases:
+  - The user or an agent changes it through this server (the tools and the page send it themselves).
+  - After `phone_connect` (one time).
+  - After a real app restart: `CameraStatus.app_start_id` is new since this server last saw it.
+
+  A status that differs from the stored value in the same app run is never a reason to send again. The server logs "changed by another client" one time per app run and value, and it does not fight. An app without `app_start_id` gets the settings only at `phone_connect`, with no periodic re-send.
+- **One source of truth**:
+  - `SettingsStore.current()` reads `ui-settings.json` again when the file changed (mtime in ns, size, inode). Otherwise it uses the cached copy.
+  - `OrientationState.current`, `InSensorZoomChoice.enabled`, and `AfModeChoice.mode` are now properties that read the file through the store. They are not copies loaded at start. Without a store (tests), they stay in memory.
+  - A change through any server writes the file, so all servers see the same value.
+  - `refresh()` on each choice tells the listeners (the page) when another server changed the file. `Services.sync_phone` calls it on each status read, which includes the monitor's 1 s poll.
+  - The temporary file of a save now has the process id in its name, so two servers that save at the same time do not share one temporary file.
+- **Client**: `CameraStatus.app_start_id` (None for an older app).
+- **Fake phone**: `app_start_id` (UUID v7 at each fake start); an old app (`--no-preview`) does not send it. **`qa_contract.py`**: `app_start_id` is a required status field. It must be a UUID v7, and it must be the same in two status reads while the app runs.
+- **Test fakes**: the httpx fake phone now has an `app_start_id`, and its `restart_app()` makes a new one, like the real app.
+- `mcp/README.md`: the new part "Settings of several servers". The sensor zoom and flip parts point to it.
+
+### Tests
+
+- New `mcp/tests/test_settings_sync.py` (6 tests; two `Services` on one fake phone, and the status polls of both servers in turns):
+  - Two servers with different stored values (separate files: the worst case). Each server can send one time after its start. Then 20 more rounds of polls from both servers send nothing. The old rule sent in every round.
+  - Two servers that share the file: a change through the first server is seen at once by the second (by the file time). The second server's page listener gets it one time, and the phone gets exactly one request.
+  - An app restart (new `app_start_id`, the app back at its defaults): exactly one re-send of the flips and one of the in-sensor zoom. The second server sees the phone already right.
+  - Another client turns the zoom on in the same app run: no re-send, the phone keeps "on", and one log line.
+  - An old app without `app_start_id`: one send at the first status (as after `phone_connect`), none after a restart that this server cannot see, and one again after `phone_connect`.
+  - The store reads a file that another store wrote, and it does not read the file again when nothing changed.
+- The earlier sync tests (flips, in-sensor zoom, af_mode after an app restart) pass with the new rule, because the fake restart now makes a new `app_start_id`.
+- `qa_contract.py --strict` against `scripts/fake_phone.py`: 24/24 passed. `fake_phone.py --self-check`: passed.
+- `uv run pytest`: 339 passed, 1 skipped. ruff check, ruff format, and `prek run --files` on the changed files: pass.
+
+### Notes
+
+- Servers that run the old code keep the old rule until they restart. After this change, restart all MCP servers once (`scripts/dev-monitor.sh` and `scripts/mcp-server.sh --dev-reload` restart on a code change).
+- Until dd-android's app sends `app_start_id`, every server uses the old-app path: it sends only at `phone_connect`. So an app restart without a new `phone_connect` does not get the settings back. The new app fixes that.
+
+## Round 27 (P0): phone_snapshot shows the same picture as the monitor preview
+
+The problem (docs/reports/bench-workflow-improvements.md, P0): the user saw four coils in one direction on the monitor preview, and the agent saw another direction in `phone_snapshot`. The page turned the phone screen with the Screen view choice, and the app turned its still with the phone rotation. The server applied only the flips. The paths had no shared final transform.
+
+The orchestrator made this task a high priority. I stopped the adb-wifi task for it; that task is not finished and comes next.
+
+### The geometry (checked in the app code; only read, not changed)
+
+- The activity is locked to portrait (`AndroidManifest.xml`). So the phone screen and the screen stream show the camera image N in the natural portrait orientation.
+- The page shows the screen turned clockwise by V: the Screen view choice, or in Auto V = (360 − `rotation_degrees`) % 360.
+- The still of `/v1/snapshot` is N turned clockwise by (360 − `rotation_degrees`). CameraX sets the still rotation to (sensor orientation − target rotation), and the preview uses target rotation 0. This agrees with `FocusTap.snapshotToSurface` in the app.
+- So the still must turn clockwise by **T = (V + `rotation_degrees`) % 360** to show what the page shows. T is 0 in Auto, so the bug appeared only with a manual Screen view choice (or a locked still rotation that is not the physical one).
+- The flips are what the user sees, so they are in the page frame. The preview flips of the phone are in its natural frame. With V = 90° or 270°, a horizontal flip on the page is a vertical flip on the phone. The earlier code sent them unchanged.
+
+### What I did
+
+- **`orientation.py`** (pure functions):
+  - `ImageTransform`: a clockwise quarter turn, then the flips. It extends `SnapshotOrientation`, so code that reads the flips still works.
+  - It maps between the phone still ("true") and the shown image: points, boxes, and angles (`*_to_true`, `*_from_true`), and the size.
+  - `view_rotation()` (the same rule as `viewRotation()` in app.js), `remaining_turn()`, `still_transform()`, and `phone_preview_flips()`.
+  - `OrientationState.screen_rotation` reads the Screen view choice from the settings file (shared by all servers), and `OrientationState.transform(rotation_degrees)` gives the transform of a still.
+- **`images.transform_jpeg()`**: the EXIF rotation, then the turn, then the flips. It now always applies an EXIF rotation. Before, a still without flips came back with its EXIF tag, and the width and height in the result were the sizes before that rotation. That was a second, older error in the same path.
+- **`Services.phone_snapshot()`** reads the status first (the rotation of the still that the app takes now), computes the transform, turns and flips the still, and returns the image with its transform. The phone still rotation is used once, inside T.
+- **`SnapshotInfo`** has `turn_degrees`, `flip_horizontal`, and `flip_vertical`, and the `orientation` text says, for example, "turned 90° clockwise to match the monitor view, flipped horizontally". The `phone_snapshot` description says that the photo is the same as the monitor preview.
+- **The same transform everywhere**:
+  - The saved file (`save_path`) and `multimeter_read(source="phone")` get the transformed still.
+  - `phone_focus` (snapshot pixels), `phone_highlight` boxes, and `phone_point_to` / `board_locate_in_photo` boxes and arrows map back through the transform (`SnapshotGeometry.orientation` is now an `ImageTransform`).
+  - Photo registration and live tracking work on the agent's image. The tracker matches that image with the screen frames by features, so the turn is part of its match.
+- **The page**:
+  - The monitor reads `turn_degrees` from the `phone_snapshot` result (`PhoneState.snapshot_turn`), and it draws the panel and full-screen snapshot with that turn and the current flips.
+  - The boxes and arrows use the same math in app.js (`snapshotTransform`, `boxFromTrue`, `angleFromTrue`).
+  - The Board panel compares only the flips of the last snapshot with the current flips (the turn is not a user choice).
+- **Preview sync**: `PreviewSync` sends `phone_preview_flips(flips, V)`. It sends again when this wanted value changes: the user changed the flips or the Screen view, or in Auto the phone turned between upright and sideways. All servers compute the same value from the shared file and the status, so this does not start a fight (round 26 rule).
+- **Contract** (`docs/phone-api.md`): a new rule text says how the still relates to the screen image. It describes the current app; there is no behavior change, and dd-android has nothing to change.
+- **Fake phone**: the still now turns like CameraX with a 90° sensor (EXIF 6 at rotation 0: a portrait still), like a real phone. The contract check `snapshot_rotation` still passes.
+- `scripts/make_orientation_target.py`: a printable test target (an arrow with a notch, and a red circle, green square, blue triangle, and yellow diamond). It is the same drawing as the test image.
+- `mcp/README.md`: the part "Same picture for the user and the agent".
+
+### Tests
+
+- New `mcp/tests/test_image_transform.py` (142 tests), with a synthetic target (made for the tests, same license as this repository) as the sensor image:
+  - The table of V and T for Auto and 0/90/180/270 × all 4 phone rotations.
+  - For all 5 choices × 4 rotations × 4 flips: the still, turned by T and then flipped, is pixel-equal to the page view (the screen with the app's preview flips, turned by V). With T ≠ 0, the old way (flips only) differs.
+  - For all 4 turns × 4 flips: the red circle center, a box around it, and the angle from the center map to the still and back.
+  - The preview flips swap axes for a sideways view.
+  - Through the MCP server with a scene fake phone (20 cases: 5 choices × rotations 0 and 90 × no flip or Flip H):
+    - the `phone_snapshot` image is the page view (a mean difference below 6 of 255, after JPEG), with the right size, `turn_degrees`, and flips;
+    - `phone_focus` and `phone_highlight` on the red circle of the agent's image reach the red circle of the phone's still.
+  - After phone rotations (0, 270, 180) with Screen view 90°, and after an app restart, the snapshot still matches.
+  - The preview flips change from H to V when the view turns to 90°. They are sent once, and not again on 3 more status reads.
+- Playwright (headless Firefox; an in-process monitor with the real tools; the fake phone screen stream is an H.264 clip of the portrait target with the preview flips that the server sent):
+  - For Auto, 0, 90, 180, and 270 × phone rotation 0 and 90 × no flip or Flip H (20 cases), the page's live canvas and a fresh page snapshot had the same size, and a mean difference of at most 1.5 of 255.
+  - Control: the same comparison with the snapshot mirrored gave at least 10.8, so the check sees a mirror mistake.
+  - A screenshot (rotation 90, Screen view 90, Flip H): the arrow direction and the shape order are the same in the live view and the snapshot. The screenshots are in my scratch folder only.
+- `qa_contract.py --strict` against the new fake: 24/24. `fake_phone.py --self-check`: passed.
+- `uv run pytest`: 520 passed, 1 skipped. The 8 tests of the unfinished adb-wifi task were not run. ruff and `prek run --files` on my files: pass.
+
+### The real-phone test (for the user)
+
+1. Make the target: `uv run python scripts/make_orientation_target.py target.png`. Print it, or show it on a second screen. Point the phone at it (in the camera app of this project), about 20 cm above it.
+2. Start the bench (`bench_start`, or the page "Start all"). Open the monitor page.
+3. For each Screen view choice (⟲/⟳ to 0°, 90°, 180°, 270°, then Auto):
+   1. Take a snapshot on the page ("Take snapshot"), or ask the agent for `phone_snapshot`.
+   2. Check that the arrow points the same way in the live view and in the snapshot, and that the shapes are in the same order (red, green, blue, yellow along the arrow).
+   3. Check that the agent's `phone_snapshot` text has `turn_degrees` (0 in Auto).
+4. Repeat step 3 with Flip H, then with Flip V (the buttons under the snapshot). The live view and the snapshot must be mirrored the same way.
+5. Turn the phone by 90° (landscape) and repeat steps 3–4 for Auto and one manual choice.
+6. Ask the agent to focus on the red circle (`phone_focus` with its pixels) and to draw a box around it (`phone_highlight`). The focus ring and the green box on the phone must be on the red circle.
+7. Close the camera app on the phone (an app restart), run `phone_connect`, and repeat one case of step 3.
+
+### Notes
+
+- The page turns the live view on each frame with the status that it has. The server reads the status just before the snapshot. If the phone turns in the ~1 s between them, one snapshot can have the old turn. The text of the snapshot shows the turn that was used.
+- Another agent (dd-mcp) worked in the same tree at the same time (`evidence.py`, `multimeter.py`, `instructions.py`). I changed only my files. One of my early `ruff format mcp` runs reformatted one file; I cannot see which. Since then, I format only my files.
+
+## Round 28: choose the phone in the page, and adb over USB or Wi-Fi
+
+The user's request: "allow the app to use adb over USB or over IP; a selector on the web app to list the connected devices, in case I do not want to keep the phone on USB". The phone app does not change. I started this task after the sync fix, stopped it for P0 (round 27), and then finished it.
+
+### What I did
+
+- **Device list** (`devices.py`, `list_devices`):
+  - `adb devices -l` gives the serial, the link (`usb`, or `wifi` for an `ip:port` or `…._adb-tls-connect._tcp` serial), the state, the model, and the product.
+  - The camera app check (`pm path dev.jayson.debugdevices.camera`, 3 s timeout) runs only for devices in state `device`.
+  - The list also tries `adb mdns services`. The flake's adb (37.0.0-android-tools) answers "mdns is not supported by this version of adb", so the list says "not supported by this adb (use Pair or Connect with the address from the phone)". A newer adb with mDNS would show the discovered phones.
+- **A conflict in the brief, and my decision**: item 1 asks for the app check on each device, but item 7 and the Fire TV rule forbid commands to other devices. I run `pm path` only on USB devices (the user plugged them in) and on the selected phone. A Wi-Fi device that is not selected shows "select it to check the app (no command goes to an unselected Wi-Fi device)". The fake adb log in the tests shows that the "TV" serial never gets a command.
+- **Selection** (`PhoneSelection`): the user's choice is saved in `ui-settings.json` as `adb_serial`, and it replaces `--adb-serial` / `DEBUG_DEVICES_ADB_SERIAL` while it is set. It is read by the file time, like the other settings (round 26), so all servers use the same phone. "Clear selection" goes back to the config.
+  - The server never picks one of several devices. With no choice and no config, `phone_connect` still says "several adb devices are connected; select the phone in the monitor page (Devices), or set …". With exactly one device, it uses that device, as before.
+  - A save of the other settings on the page keeps the choice.
+- **Page actions** (`ui/device_panel.py`, routes `/api/devices/*`). There is no MCP tool for these. Each action is one log row (source `ui`) with its steps, and the page lists the steps.
+  - **Use this phone**: check that the device is in state `device`, stop the phone screen stream and remove the old adb forward (`Monitor.stop_phone`), save the choice, then run `phone_connect`.
+  - **Switch to Wi-Fi** (a USB phone): first select that phone (the user's choice, so every following device command goes to it with `-s`). Then read its Wi-Fi address (`ip -f inet addr show wlan0`), run `adb tcpip 5555`, wait 2 s, run `adb connect <ip>:5555` (3 tries, 1 s apart; `adb connect` exits 0 also on a failure, so the output is checked), and then use the Wi-Fi serial with `phone_connect`.
+  - **Pair**: the pairing address and the 6-digit code (`adb pair`), then the connect address (`adb connect`). The code is not written to the log.
+  - **Connect**: `adb connect <ip:port>` for a phone that is already in tcpip mode.
+- **Reconnect**: when the selected serial is a Wi-Fi serial and adb does not list it, `phone_connect` runs `adb connect` one time before it reports the error.
+- **MCP tool** `phone_devices()`: read-only, the same data as the page. Its description says "only the user selects the phone in the monitor page (Devices); you cannot select, pair, or connect a phone". The `phone_connect` description names the page choice.
+- **Commands without `-s`**: only `devices`, `mdns services`, `connect`, and `pair`. All device commands use `-s <serial>` of the selected phone, and `pm path` also goes to the USB devices of the list.
+- **AGENTS.md** (safety rule): "adb: use only the serial that the user selected (page or DEBUG_DEVICES_ADB_SERIAL) … Only the user selects the phone (the Devices part of the monitor page); agents only list the devices (`phone_devices`)."
+- **`scripts/fake_adb.py`**: with `FAKE_ADB_STATE` (a JSON file), it has several devices (USB and Wi-Fi serials, any state), `tcpip`, `connect`, `disconnect`, `pair`, `pm path`, and `ip addr`. `connect` and `pair` change the file. Without the variable, it works as before (one device).
+- **Page**: a "Devices" part under the phone panel, full panel width, closed by default. It has the table with the buttons, the mDNS note, the Connect and Pair forms, and the steps list. It loads the list when you open it or press Refresh.
+- `mcp/README.md`: the `phone_devices` row, the new `phone_connect` text, and the "Devices" page part.
+
+### Tests
+
+- New `mcp/tests/test_devices.py` (8 tests; `scripts/fake_adb.py` runs as a real process with a state file: a USB phone, a Wi-Fi "Fire TV", and an unauthorized device):
+  - The list values. The TV is `wifi`, not checked, and gets no command. The unauthorized device has its note. mDNS is not supported.
+  - No auto-pick: `phone_connect` with two ready devices and no choice gives the error that names the page.
+  - The selection is saved, another server's selection object reads it, the page choice is over the config, and Clear goes back to the config.
+  - An unauthorized device cannot be used.
+  - Switch to Wi-Fi: all steps pass, the Wi-Fi serial is saved, and only the phone's serials got device commands.
+  - A lost Wi-Fi phone gets exactly one `adb connect` and then connects. A second lost address gives "adb connect … failed too".
+  - Pair: a wrong code fails; the right code pairs and connects. The code is not in the log. A plain connect to an unknown address fails with the adb text.
+  - The tool is read-only: no select, pair, or tcpip tool exists, and the list does not change the saved choice.
+- Playwright (headless Firefox; the real MCP server as a process with `fake_adb.py`, the state file, and `fake_phone.py` on the forward port):
+  - The list had 3 rows, and the mDNS note was shown.
+  - "Use this phone" gave the steps and `phone_connect` on R5CT1234567, and the phone panel showed that serial.
+  - "Switch to Wi-Fi" gave 8 steps. The last ones were "adb connect 192.0.2.23:5555: connected …", "select: 192.0.2.23:5555", and "phone_connect: connected to 192.0.2.23:5555".
+  - A wrong code showed a failed step, and the right code paired and connected. Clear showed the config phone.
+  - The log rows were adb_select, phone_connect, adb_switch_to_wifi, phone_connect, adb_pair (error), adb_pair, and adb_clear, all with source ui.
+  - The fake adb log: device commands only for R5CT1234567 and 192.0.2.23:5555.
+  - The first page check found a layout bug (the table went under the Board panel). The Devices part now has the full panel width. The screenshot is in my scratch folder only.
+- `uv run pytest`: 540 passed, 1 skipped (the total includes the tests of another agent that works in the same tree). ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- No test with the real phone or a real Wi-Fi connection. The real test:
+  1. Open Devices and press "Use this phone" on the USB phone.
+  2. Press "Switch to Wi-Fi". Check the steps, then unplug the cable and use the phone.
+  3. Test Pair with a second phone in Android wireless debugging.
+- `adb tcpip` stays active on the phone until it restarts. A phone that restarts needs "Switch to Wi-Fi" again (or Pair on Android 11+).
+
+## Round 29: bench feedback 1 (boxes outside the phone screen, and secondary servers)
+
+The orchestrator's diagnosis of the live bench session on the S22:
+
+- (a) The `phone_highlight` boxes were outside the visible phone preview. The 9:20 screen is filled from a 3:4 still, so only the middle ~60 % of the width is visible, and the boxes were at `snapshot_x` 0.08–0.17.
+- (b) The bench session's server was a secondary. Its boxes never reached the monitor page, and it had no phone screen stream, so there was no live tracking.
+
+The contract has `CameraStatus.preview_region`. The brief put this task before adb-wifi, but adb-wifi was already done (round 28), so this round comes after it.
+
+### What I did
+
+1. **Visibility of each box**:
+   - `PreviewRegion` is in the client, and the server keeps the region of the last status (status reads, overlay answers, and the status before each snapshot).
+   - `highlight.in_preview()` compares the area of each box with the region: `fully` (≥ 99.9 %), `partly`, `not`, or `unknown` (no region from the app).
+   - `phone_highlight`, `phone_point_to`, and `board_locate_in_photo(highlight)` return `visibility` (per box) and `warning` (for example "C12: not visible on the phone screen: move the phone or zoom out so it is near the centre", and "only partly visible on the phone screen").
+   - `phone_point_to` now uses the region (in the agent's pixels, through the snapshot's turn and flips) as its view. A part that is in the still but off the phone screen gets an arrow at the screen edge, not an invisible box.
+   - The page draws the region as a thin dashed frame on the snapshot.
+   - The fake phone reports the contract example (the middle 60 %). `qa_contract.py` checks `preview_region` (null, or a part of the image from 0 to 1).
+2. **The boxes of a secondary**:
+   - A secondary sends its boxes and arrows to the primary (`POST /api/ingest/overlay`, token-protected, in the background, so a slow primary never slows a tool).
+   - The primary's page draws them on its snapshot with "boxes from <origin>" (`PhoneState.overlay_origin`).
+   - The page shows "The agent's view": the last annotated snapshot of `phone_highlight` or `board_locate_in_photo` of any server (from the call images, which the forwarder already sends), with the origin, the tool, and the time. This is the fallback that the bench agent had to send by hand.
+3. **Frames for a secondary**:
+   - There is one scrcpy stream per phone. After its `phone_connect`, a secondary asks the primary to stream the phone (`POST /api/ingest/phone-screen`). Then it reads the newest frame about 4 times per second (`GET /api/ingest/phone-frame?after=<n>`, 204 when there is none newer). Both requests carry the ingest token.
+   - A scene watcher on these frames gives the secondary live tracking and scene changes, like the primary.
+   - When the primary has no phone screen, the secondary uses its own stream as before.
+   - The tracking note says "no live tracking: no phone screen stream in this server or in the primary monitor" only when neither exists.
+4. **`bench_start`**: a separate `screen` step after `phone`. It is ok with "this server's phone screen stream (streaming)" or "the phone screen stream of the primary monitor", and an error with the reason when no stream exists anywhere.
+
+### Tests
+
+- New `mcp/tests/test_bench_feedback.py` (8 tests):
+  - `in_preview` for the S22 region, including the bench boxes at 0.08–0.17 (`not`), and the warning text.
+  - `phone_highlight` with that region returns `not` for C12 and `fully` for U1.
+  - `phone_point_to`: with a region of only the right half, U7301 gets an arrow toward the left, and TP9 is in view and `fully` visible.
+  - The ingest routes: an overlay with and without the token (403). A screen start without a screen and with a fake screen. The frames: 204 before a frame, the frame with its number, and 204 for `after` = that number.
+  - A real primary (on a free port) and a secondary: the primary starts the stream for the secondary, and a frame of the primary reaches the secondary's scene state. `screen_source()` of the secondary names the primary. The secondary's boxes reach the primary's page with the secondary's origin.
+  - No stream anywhere gives the error step.
+- `test_lazy.py`: the new `screen` step (skipped when not asked; an error with the reason in the fake bench).
+- `test_pointing.py`: the new `ImageFrame` argument. It found a bug in my first change (the box of an in-view part reused the names of the view rectangle), which I fixed.
+- Playwright (headless Firefox; an in-process monitor with the real tools and the httpx fake phone; temporary settings; no real phone or webcam):
+  - The dashed frame was at x 0.201, width 0.601 of the picture, and the warning named C12.
+  - "The agent's view" showed "this server · phone_highlight · <time>".
+  - A secondary's overlay sent through the ingest route (204) showed "boxes from codex 4242" with its box Q7.
+  - The screenshot shows C12 outside the frame and U1 inside it.
+- `qa_contract.py --strict` with the fake: 24/24. `uv run pytest`: 561 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- A live bench session ran during this work. I used only the fake phone and the fake adb, temporary settings, and free ports. I did not signal any running server.
+- The secondary reads the primary's frames at the primary's tracking rate (4 per second, 720 px wide). The primary's own scene watcher runs on the same stream.
+- The real test with the S22 waits for dd-android's `preview_region`. With the S22:
+  1. Point at a part near the image edge and check the warning.
+  2. Check that the dashed frame matches the phone screen.
+  3. Run a second agent session and check that its boxes and "The agent's view" show on the page.
+
+## Round 30: the "Markings" toggle
+
+The user's request: "when in full screen on the web app, put a button to toggle on and off the current markings". The contract: `POST /v1/overlay {"visible": bool}` hides or shows the phone overlay without removing it, and `CameraStatus.overlay_visible` is true after an app start. A live bench session ran; I used only fakes.
+
+### What I did
+
+- **Client**: `CameraStatus.overlay_visible` (None for an older app), and `PhoneClient.overlay_visibility(visible)`. An app that answers 404 or 400 to a body with only `visible` raises `OverlayNotSupportedError` with "the phone app is old: its own boxes stay visible".
+- **One choice** (`MarkingsChoice`, `ui-settings.json` key `markings_visible`, default shown). It is read by the file time like the other choices, so every server and page has the same state.
+- **Sync** (`MarkingsSync`): the choice goes to the phone at `phone_connect` and after an app restart (the app starts with its overlay shown). It follows the rule of round 26: never again only because the status differs.
+- **Page action** `POST /api/phone/markings {"visible": bool}` (strict bool). It is one log row "markings" (source `ui`), for example "hidden; phone: hidden". The MCP server saves the choice and sends `{"visible": …}` to the phone. There is no MCP tool: only the user toggles.
+- **Tool results**: while hidden, `phone_highlight`, `phone_point_to`, and `board_locate_in_photo(highlight)` return `markings`: "markings are hidden in the monitor: the user does not see the boxes and arrows now (they appear when the user shows the markings again)". The boxes still go to the phone, and a body with boxes does not change the visibility (contract), so they appear when shown.
+- **Page**:
+  - A "Markings" button is in the phone panel (next to Clear highlights), in the full-screen live bar, and in the full-screen snapshot bar (`aria-pressed`; struck through when off). The key `k` works in the two full-screen phone views, not in form fields.
+  - Off sets one class on the page, which hides the green boxes, arrows, labels, the phone-screen frame, the "boxes from …" label, the focus ring, and the scene note. Nothing is removed.
+  - The webcam crop box and the Pick marks of the photo registration stay: they are the user's input, not markings.
+  - An old app shows the note "the phone app is old: its own boxes stay visible" in the panel.
+  - A save of the other settings keeps the choice.
+- **Fake phone**: `{"visible": bool}` alone hides or shows the overlay (400 for another value or other fields in the same body); `overlay_visible` is in the status. **`qa_contract.py`**: `overlay_visible` is a required bool. The new `check_overlay_visible` checks these things:
+  - hiding keeps the boxes;
+  - new boxes while hidden stay hidden;
+  - showing keeps them;
+  - three bad bodies give 400.
+
+  `--after-start` checks that `overlay_visible` is true.
+- `mcp/README.md`: the "Markings" page part.
+
+### Tests
+
+- New `mcp/tests/test_markings.py` (7 tests):
+  - The choice is saved, another server sees it, and the listener hears it.
+  - Hide, then highlight 2 boxes, then show: the phone got false and then true, the 2 boxes reached the phone while hidden, and the tool said "markings are hidden in the monitor". After show, the note is gone.
+  - An old app: the phone note says so, and the page state is still hidden.
+  - An app restart with the choice hidden: exactly one more `{"visible": false}`, and no more on 3 status reads.
+  - The page route: 200 with the page state, 400 for "no", the log row, and a settings save keeps the choice. A change through another server reaches this page.
+- Playwright (headless Firefox; an in-process monitor with the real tools, the httpx fake phone, and a looping H.264 test clip as the phone screen):
+  - The live full-screen bar button hid the markings (the phone got false), and `k` showed them (true).
+  - The snapshot full-screen bar button hid them (false). A `phone_highlight` with 2 boxes while hidden returned the note, and the page kept 2 boxes with 0 shown. `k` showed them again (true): 2 boxes and the phone-screen frame visible.
+  - 4 log rows, and the panel button state followed.
+- `qa_contract.py --strict` with the fake: 25/25. `uv run pytest`: 572 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- No test with the real phone: the bench rule (and dd-android installs its part after "bench done"). The real test: toggle in both full-screen views and with `k`, and check that the phone's own green boxes leave the live view and come back.
+
+## Round 31: highlight layout (tags, legend, badge placement, contrast) and the shared vectors
+
+The problem from the bench session: two small highlighted pads 40–80 px apart. The label above each box covered the other box, the labels overlapped each other, and thin green lines were hard to see on a red board. The spec is `docs/overlay-layout.md`. The contract gives the `/v1/overlay` boxes an optional `tag` (1–3 characters). A live bench session ran; I used only fakes.
+
+### What I did
+
+- **Spec, exact part**: I added a "Geometry" section to `docs/overlay-layout.md`, because two implementations (Python here, Kotlin in the app) can only give the same numbers from exact rules. It defines:
+  - the inputs and units (image pixels, or dp on the phone), the tag letters, and the colour order;
+  - the size of the drawn box, and the badge and legend sizes as formulas of the character count (no font measurement);
+  - rectangle distance and overlap (touching edges do not overlap);
+  - the legend corner choice with a stable tie order, and the strip below the image;
+  - the 8 badge positions with their exact coordinates for the gaps 4, 12, 24, 40, and the fallback badge on the ray from the cluster centre with a leader line;
+  - the arrow anchors, the inset (source, scale, corner), and rounding to 2 decimals.
+
+  At the end, I added the phone rule for a legend that is "outside": the first corner of the sorted list at 50% opacity, because the phone has no strip.
+- **The reference** `mcp/debug_devices_mcp/overlay_layout.py`: one pure function `layout()` (pydantic models; no randomness).
+- **Shared vectors** `docs/overlay-layout-vectors.json` (10 cases, tolerance 0.01), written by `scripts/make_overlay_vectors.py` (`--check` says if the file is up to date; `--render DIR` draws each case to look at). The cases:
+  - the bench case (two 14×12 px pads 60 px apart);
+  - 4 boxes in a cluster;
+  - a box at each edge;
+  - a box under every corner (the legend goes outside);
+  - one box and an arrow;
+  - arrows only;
+  - given tags mixed with free letters;
+  - 8 tiny boxes packed tight;
+  - a small view full of boxes (every badge falls back, with leader lines);
+  - the phone case (411×914 dp, `min_box` 24, no inset).
+- **Annotated image** (`overlay_draw.py`, used by `phone_highlight` and `board_locate_in_photo(highlight)`): it draws the layout: a dark outline under each colour outline, badges with the tags, leader lines, the legend (in a strip below the image when it is outside), and the inset (the area around small boxes, enlarged with the same outlines).
+- **`phone_highlight`**:
+  - Each box takes an optional `tag` (1–3 characters; 4 gives an error). The server gives every box its tag before it sends the boxes, so the phone, the annotated image, and the page show the same tags.
+  - The result has `layout`: `tags`, `legend_outside`, `badges_outside`, and `inset`.
+  - An app from before `tag` (400 for the unknown field) gets the boxes again without tags, and the server logs it.
+- **The page** asks the server for the layout (`POST /api/overlay-layout`, the same function; cached by its input) for the snapshot as it is drawn, in picture pixels. It draws the boxes with the contrast outline, the badges, the leader lines (SVG), the legend, the inset (a canvas crop of the snapshot), and the arrows with their tags; the labels are in the legend. The Markings toggle also hides the badges, the leaders, the legend, and the inset.
+- **Contract, fake, check**: `OverlayBox.tag` is in the client. The fake phone accepts an optional `tag` of 1–3 characters. `qa_contract.py` sends a tagged box, and a tag of 4 characters or an empty tag must give 400.
+- `mcp/README.md`: the "Highlight layout" page part.
+
+### Tests
+
+- New `mcp/tests/test_overlay_layout.py` (24 tests):
+  - The reference passes all vectors.
+  - The vectors keep the rules of the spec, independent of this code:
+    - every drawn box is at least `min_box` and has the centre of its real box;
+    - the tags are unique, and the colours are in order;
+    - the legend rows are in tag order;
+    - an inside legend covers no box, and an outside one adds the strip;
+    - every badge is in the view; a badge next to its box covers no box (with clearance), no earlier badge, and not the legend; a fallback badge has a leader line;
+    - the inset covers no box and is at most 25% of the width.
+  - The brief's cases are all there (the corner case has an outside legend, and the full view has only fallback badges). The output is stable, the tag rules hold, and the vectors file is up to date.
+- `mcp/tests/test_highlight.py`: the bench case through `phone_highlight` gives the tags A and P2 (given), no badge outside, and an inset, and the phone got the tags. A 4-character tag is refused. An app without tags gets the boxes without them. The page layout route answers, and a wrong body gives 400.
+- Rendered pictures of all vector cases, and Playwright (in-process monitor, httpx fake phone; screenshots in my scratch folder only):
+  - The bench case on the page: two badges A and B beside the boxes, the legend with both labels, and an inset. In the annotated image: the same tags beside the boxes, the legend in the free corner, and the inset.
+  - The earlier checks (Markings, preview frame and secondary boxes, arrows and Pick) still pass. The arrow now shows its tag, and its label is in the legend.
+- `qa_contract.py --strict` with the fake: 25/25. `uv run pytest`: 599 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### For dd-android
+
+- Implement the "Geometry" section of `docs/overlay-layout.md`, and pass `docs/overlay-layout-vectors.json` (inputs; expected rects, badges with `outside` and `leader`, legend with `rows` and `outside`, arrow anchors, inset null for the phone case; tolerance 0.01).
+- The phone uses `min_box` 24 dp and `inset` false, and it draws an outside legend in the first sorted corner at 50% opacity.
+- The server sends every box with its tag. An app that gets no tag assigns the free letters by the same rule.
+- When the spec changes, run `uv run python scripts/make_overlay_vectors.py` and check the render first (`--render DIR`).
+
+### Notes
+
+- The page computes the layout for the picture size on the screen. The panel image is small, so its badges and legend are placed for that size and can differ from the annotated image (which uses the full image size). The spec allows this: the unit is the pixel of the drawn picture.
+
+## Round 32: automatic re-registration after a move (bench feedback 2, item 4)
+
+The problem from the bench session: the user moved the board or the phone about 10 times, and each time the agent picked 6–10 part centres by eye to register the photo again.
+
+### What I did
+
+- **Carry-over** (`Pointing.carry()`, called at the end of `phone_snapshot`):
+  - When the newest registration is stale (after a scene change, lost tracking, or an app restart), the server matches its registered photo with the new snapshot: `tracking.match_photos()` (ORB, 3000 features, ratio test, MAGSAC homography, the whole images, 720 px wide, mapped back to full pixels). It works without the live stream.
+  - A good match needs at least 40 inliers, an inlier share of at least 30 %, and an RMS error of at most 6 px (the new snapshot's pixels). Then the registration comes along: a new registration (a new id, `carried_from`, `carry_quality`) with the matrix `H × (registered photo → the kept snapshot) × old`, the size of the new snapshot, the old pairs mapped through H, the capture id of the new snapshot as its `photo_id`, and a new live tracking start. It becomes the newest registration.
+  - A bad match leaves the old registration stale, and the result says why ("the board or the phone moved, and the new snapshot does not match the registered photo well enough", or that the photo is not kept, for example after a server restart).
+- **The kept photos**: at each registration (also a carried one), the server keeps the agent's snapshot of that moment (the newest 8), so a later carry can start from it.
+- **The result**: `SnapshotInfo.registration` gives `carried`, `registration_id` (the one to use now), `carried_from`, `quality` (inliers, matches, inlier_ratio, error_px), and a note. Without a stale registration it is null.
+- `tracking.MatchResult` has the RMS reprojection error of its inliers (`error_px`).
+- The `Registration` model (`board/tools.py`, dd-mcp's file) has two new optional fields: `carried_from` and `carry_quality`. I placed my call after the capture id step of dd-mcp (`# region: capture id` in `phone_snapshot`), so the carried registration gets the new capture id. **For dd-mcp**: the registration reuse (feedback 1, item 6) and this carry-over work together. Reuse covers the case with no scene change; carry covers a move.
+- `mcp/README.md`: the "Registration carry-over" part.
+
+### Tests
+
+- New `mcp/tests/test_carry.py` (a synthetic board texture as the photo; the markings.json registration):
+  - Without a move, a new snapshot carries nothing.
+  - After a move (a turn of 12° and a shift of 60 px, −40 px), the snapshot result has a carried registration with a new id, `carried_from`, at least 40 inliers, and an error below 6 px. The new registration is not stale and has the new capture id. `phone_point_to` puts U7301 within 8 px of its true place in the moved photo.
+  - Another scene (noise) stays stale with the reason, and `phone_point_to` is refused.
+- Measured on that move: 1756 of 1822 matches agree, the RMS error is 1.94 px, and mapped points are at most 0.43 px from the truth.
+- `uv run pytest`: 601 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- No test with the real phone (bench rule). A real board can have repeated patterns (rows of the same parts). The inlier thresholds and the error limit reject a weak match, but a large turn, a strong zoom change, or a very different light can still fail. Then the agent registers again.
+
+## Round 33: phone_snapshot crop (bench feedback 2, item 5)
+
+The problem from the bench session: to check where a probe tip touches, or to read a small marking, the agent cropped and enlarged the snapshot with its own steps.
+
+### What I did
+
+- **`crop` on `phone_snapshot`** (`snapshot_crop.py`): `SnapshotCrop` is `{x, y, radius}` (default radius 60 px) or `{box: {x, y, width, height}}`, and `zoom` (1 to 8, default 2). A validator requires exactly one area. The position is in pixels of the photo that the agent gets.
+- **The crop**: the server cuts the area from the full-resolution still, after the same turn and flips. The area is cut at the photo edges. The zoom is reduced so that the long side is at most 1600 px. LANCZOS resize, JPEG quality 92. An area fully outside the photo gives a tool error.
+- **The result**: a second image, tagged with the same capture id, and `SnapshotInfo.crop` (`box_px`, `full_resolution_box_px`, `zoom`, `width`, `height`). No model judges the crop: the agent looks at it.
+- The tool docstring and `mcp/README.md` ("Snapshot crop") describe the parameter.
+
+### Tests
+
+- `mcp/tests/test_snapshot_crop.py`: the area validator, and a 4000x3000 still with four colour quadrants: the crop around the centre shows the four colours in place, a box at the edge is cut, and an area outside gives an error.
+- `uv run pytest`: 654 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- No test with the real phone (bench rule).
+
+## Round 34: app restart notice (bench feedback 2, item 7)
+
+The problem from the bench session: the phone app restarted, and the agent did not know. The zoom was back at 1x, the still had another turn, and the agent used old boxes and registrations.
+
+### What I did
+
+- **Detection** (`app_restart.py`, `AppRestartWatch`): each status read in `Services.sync_phone` (phone_status, phone_connect, the page's status poll) and in `Services.phone_snapshot` goes to `check_app_start()`. A new `app_start_id` is a restart. The first id that the server sees is not a restart.
+- **The clean-up** after a restart:
+  - All photo registrations become stale with a reason. `Registration.stale_reason` is new (a small edit in `board/tools.py`), and `BoardSession.registration()` refuses with it: "registration '…' is from before the phone app restarted (…): take a fresh phone_snapshot and call board_register_photo again". A scene change still gives the old move message.
+  - The pointing target is cleared and the live tracker stops (`Pointing.stop_tracking()`). The page gets tracking "off".
+  - The highlight boxes and arrows are cleared in our record and on the page. The restarted app has no boxes, so nothing goes to the phone.
+- **The notice**: `RestartNotice` (message, app_start_id, turn_degrees, zoom_ratio, at). The text is "the phone app restarted: the snapshot turn is now N degrees and the zoom is back to Zx; old boxes and registrations were cleared", with the values from the new status.
+- **Tool results**: `add_restart_notice()` in `build_server` wraps `server.call_tool` (inside the monitor's log wrapper, so the Activity log shows it too). Every successful `phone_*` result ends with the notice as a last text block. The agent's next `phone_snapshot` carries it one last time and removes it. A `phone_snapshot` from the page (no MCP context) does not remove it.
+- **The page**: `PhoneState.restart_notice` and a banner at the top of the Phone panel (`#restart-note`). It stays until the notice is removed.
+- `mcp/README.md`: "App restart notice".
+
+### Tests
+
+- `mcp/tests/test_app_restart.py`: the watch (the first id, no id, a new id), and a full run with the fake phone: register, point to a part, restart the app (a new id, zoom 1, rotation 90). Then phone_status ends with the notice, the boxes, the target, and the tracker are gone, the registration is stale, phone_point_to is refused with the restart reason, a page phone_snapshot keeps the notice, and the agent's phone_snapshot removes it. The listener sees the notice, then None.
+- Page check with Playwright and the fake phone (scratchpad `restartcheck.py`): the banner is hidden, shows the notice after the restart, and hides after the notice is removed.
+- `uv run pytest`: 677 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Notes
+
+- For dd-mcp: `board/tools.py` has a new field `Registration.stale_reason` and an optional `reason` in `mark_registrations_stale()`. `take_phone_snapshot` did not change for this item.
+- A tool that fails (a `ToolError`) does not get the notice appended. The registration errors carry the restart reason themselves.
+- The carry-over (round 32) can still carry a registration after a restart when the new snapshot matches the registered photo well. With a zoom change, the match usually fails, and the registration stays stale.
+- No test with the real phone (bench rule).
+
+## Round 35: plain highlight boxes follow the board (highlight-tracking brief, items 1 to 6)
+
+The user asked: "is it possible to move the markings if the camera moves?" Before this round, only the boxes and arrows of `phone_point_to` (with a board registration) followed the board. Plain `phone_highlight` boxes were cleared at each scene change.
+
+### What I did
+
+1. **A tracker for plain boxes** (`pointing.py`, `TrackedBoxes`, `Pointing.follow_plain_boxes()`): after `phone_highlight` sends its boxes, the server starts a `LiveTracker` with the identity matrix in place of `board_to_snapshot`. It needs the last snapshot image and a phone screen frame (`scene.latest_frame`), and no board registration. `LiveTracker` is reused, not copied. `tracking.frame_features()` and `LiveTracker.follow(features)` are new: on each frame the server computes the features one time, and both trackers (registration and boxes) use them.
+2. **Each tracked frame** (`pointer.follow_boxes()`): the box corners go through `board_to_current()` (snapshot at phone_highlight → a snapshot taken now). The server sends the bounding box of the corners with the same label and tag. When the box center is outside the view (`preview_region`, else the whole image), the box becomes an arrow at the edge in its direction, with the box label (or tag). `plan()` and `follow_boxes()` share the new helpers `view_bounds`, `in_view`, and `arrow_angle`. Both use one send rule (`Pointing._send_when_due`: `MIN_POST_INTERVAL_S` and `moved_enough`), and all overlay changes go through `Services.send_overlay`. So the markings rule for an old app stays correct.
+3. **One set of boxes at a time**: a new `phone_highlight`, `phone_highlight clear`, and `phone_point_to` replace the tracked boxes. `Pointing.stop()` is now async and drops the box tracker. The registration tracker keeps running: `tracked()`, `guard_registration`, and the pointing target do not change. A start that a newer overlay overtakes is dropped ("no live tracking: newer boxes or a phone_point_to replaced these boxes").
+4. **Scene change** (`Services._scene_changed`): while a tracker moves the overlay (`Pointing.overlay_tracked()`: the box tracker follows, or the pointing target is on the followed registration), the boxes and arrows stay. Otherwise the server clears them as before, now through `send_overlay`. When the box tracker loses the board (3 frames without a trusted match), the server clears the boxes and arrows. `Pointing.state` is "following" while one of the trackers follows. So the page does not show "Scene changed: highlights cleared" for boxes that stay. No `ui/static` change.
+   - **Notes**: `Services.phone_note` and `overlay_note()`. The agent's next `phone_*` tool result ends with one short sentence: "live tracking lost the board: the server cleared the boxes and arrows" or "the board or the phone moved: the server cleared the boxes and arrows". The note goes out one time, only to a call from the MCP client (not from the page). `add_restart_notice` is now `add_phone_notes`: it carries this note and the app restart notice (round 34).
+5. **Tool result**: `HighlightResult.tracking` is "live tracking on: the boxes follow the board while the phone moves", or "no live tracking: <reason>" (no phone screen stream, or the snapshot does not match the live screen). The `ESTIMATE_NOTE` and the `phone_highlight` docstring say: with live tracking the boxes follow the board, and after a move the agent takes a fresh `phone_snapshot` before it says what is visible. New boxes still need a fresh snapshot after a move (the scene guard does not change). `EVIDENCE_RULES` does not change.
+6. **Tests** (`mcp/tests/test_box_tracking.py`, 9 tests, synthetic frames from `test_tracking`, fakes only):
+   - A shifted frame moves the boxes by the shift (about 60 px), on the phone and in the page state (`monitor.bus.phone.highlights`), with the same labels and tags. The page tracking state is "following".
+   - A box whose center leaves the view becomes an arrow (about 180°, with its label). The other box stays a box.
+   - Frames without a match clear the boxes. The tracking state goes to "off", and the next `phone_status` ends with the lost note one time.
+   - A scene change while the tracker follows keeps the boxes. New boxes are still refused until a fresh snapshot.
+   - No stream: `tracking` is the "no live tracking" note. A move then clears the boxes, and the next result gives the scene note. A snapshot that does not match the stream gives the reason.
+   - New boxes and `clear: true` replace the tracked boxes.
+   - A registration tracker and the box tracker follow the same frame. The registration stays valid after a scene change. `phone_point_to` replaces the plain boxes, and its box follows the next frame.
+   - An old app with hidden markings: the tracked boxes do not go to the phone (`[]`), and the server keeps the moved boxes.
+- `mcp/README.md`: "Tracked highlight boxes", "Overlay notes", the `phone_highlight` row, and the scene change text.
+- `uv run pytest`: 730 passed, 1 skipped. `uv run ruff check`, `ruff format --check`, and `prek run --files` on my files: pass.
+
+### Notes
+
+- `server.py`: I kept the uncommitted work of the orchestrator (`send_overlay`, `set_markings`, `app_hides_markings`) and of dd-mcp. My changes there: `phone_note`, `overlay_note()`, `_scene_changed`, `highlight()`, `clear_highlights()`, `add_phone_notes()`, `SCENE_CLEARED_NOTE`, and the `phone_highlight` docstring.
+- With two trackers, each frame costs one feature pass and two matches. Before, it was one feature pass and one match.
+- The tracked box is the bounding box of the moved corners. After a large turn, the box is larger than the part.
+- No test with the real phone or webcam (bench rule). The running MCP server loads these files only at its next start.

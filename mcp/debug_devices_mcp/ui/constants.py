@@ -155,6 +155,14 @@ class ingest:
 
     CALLS_PATH = "/api/ingest/calls"
     IMAGE_PATH = "/api/ingest/calls/{call_id}/images"
+    # The boxes and arrows of a secondary, and the phone screen frames for a secondary's live tracking.
+    OVERLAY_PATH = "/api/ingest/overlay"
+    SCREEN_START_PATH = "/api/ingest/phone-screen"
+    FRAME_PATH = "/api/ingest/phone-frame"
+    FRAME_SEQ_HEADER = "X-Frame-Seq"
+    AFTER_PARAM = "after"
+    FRAME_POLL = timedelta(milliseconds=250)
+    REMOTE_RETRY = timedelta(seconds=1)
     TOKEN_HEADER = "X-Debug-Devices-Token"
     TOKEN_FILE_PREFIX = "ingest-"
     TOKEN_FILE_SUFFIX = ".token"
@@ -198,8 +206,17 @@ class tools:
     BOARD_FIND_NET = "board_find_net"
     BOARD_RENDER = "board_render"
     BOARD_REGISTER_PHOTO = "board_register_photo"
+    PHONE_DEVICES = "phone_devices"
     # Not an MCP tool: the log entry of a crop change on the page.
     WEBCAM_CROP = "webcam_crop"
+    # Not MCP tools: the log entries of the Devices actions of the page (only the user selects the phone).
+    ADB_SELECT = "adb_select"
+    ADB_CLEAR = "adb_clear"
+    ADB_WIFI = "adb_switch_to_wifi"
+    ADB_PAIR = "adb_pair"
+    ADB_CONNECT = "adb_connect"
+    # Not an MCP tool: the Markings toggle of the page.
+    MARKINGS = "markings"
     BENCH_INSTRUCTIONS = "bench_instructions"
     # Their results hold the user's instructions text: other monitors get only the tool name and the status.
     REDACTED = frozenset({BENCH_INSTRUCTIONS})

@@ -187,6 +187,9 @@ async def test_bench_start_runs_every_step_and_bench_stop_frees_everything(lazy:
         assert steps["webcam"]["status"] == "ok"
         assert steps["webcam"]["detail"] == "/dev/video0 64x48"
         assert steps["phone"]["status"] == "ok"
+        # No phone screen here (no scrcpy in the test bench, no primary): its own step says so.
+        assert steps["screen"]["status"] == "error"
+        assert "no phone screen stream" in steps["screen"]["detail"]
         # This fake phone sends no focus data: the report is there, with advice "unknown".
         assert started["focus"]["advice"] == "unknown"
         # A failing step does not stop the others; its error is in the result.
@@ -211,7 +214,7 @@ async def test_bench_start_skips_what_is_not_asked(lazy: Bench) -> None:
     async with Client(build_server(lazy.services, lazy.monitor)) as client:
         started = structured(await client.call_tool("bench_start", {"phone": False, "webcam": False}))
     statuses = {step["name"]: step["status"] for step in started["steps"]}
-    assert statuses == {"page": "ok", "webcam": "skipped", "phone": "skipped", "board": "skipped"}
+    assert statuses == {"page": "ok", "webcam": "skipped", "phone": "skipped", "screen": "skipped", "board": "skipped"}
     assert started["opened_browser"] is True
     assert lazy.spawned == []
 

@@ -84,6 +84,8 @@ object Constants {
         const val MAX_BOXES = 8
         const val MAX_LABEL_LENGTH = 32
         const val MAX_ARROWS = 4
+        const val MIN_TAG_LENGTH = 1
+        const val MAX_TAG_LENGTH = 3
 
         /** Step in snapshot pixels to measure an arrow direction (any size works: the mapping is linear). */
         const val DIRECTION_STEP = 10f
@@ -122,7 +124,7 @@ object Constants {
     }
 
     object Start {
-        /** After an app start the torch is off. The zoom starts at the minimum ratio (see [ZoomLogic.startRatio]). */
+        /** After an app start the torch is off. The zoom starts at 1x, or at the minimum when 1x is outside the range (see [ZoomLogic.startRatio]). */
         const val TORCH_ENABLED = false
     }
 
@@ -142,6 +144,9 @@ object Constants {
         const val REBIND_FAILED = "In-sensor zoom rebind failed"
         const val IN_SENSOR_ZOOM_BIND_FAILED = "Vendor session bind failed, binding again in NORMAL mode"
         const val CAMERA_SETTINGS_EMPTY = "Send at least one of 'in_sensor_zoom' and 'af_mode'"
+        const val OVERLAY_BAD_TAG = "A tag has 1 to 3 characters"
+        const val OVERLAY_VISIBLE_ALONE = "Send 'visible' alone, without 'boxes' or 'arrows'"
+        const val OVERLAY_NEEDS_BOXES = "Send 'boxes' (and optional 'arrows'), or 'visible' alone"
         const val OVERLAY_TOO_MANY = "At most 8 boxes"
         const val OVERLAY_BAD_BOX = "A box must be inside the snapshot, with width and height above 0"
         const val OVERLAY_TOO_MANY_ARROWS = "At most 4 arrows"

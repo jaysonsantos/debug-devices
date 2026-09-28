@@ -25,7 +25,10 @@ class ZoomLogicTest {
         inSensorZoom = InSensorZoomState.OFF,
         overlayBoxes = 0,
         overlayArrows = 0,
-        afMode = AfMode.CONTINUOUS
+        afMode = AfMode.CONTINUOUS,
+        appStartId = "0192f3a4-5b6c-7d8e-9f00-112233445566",
+        previewRegion = PreviewRegion(snapshotX = 0.2f, snapshotY = 0f, width = 0.6f, height = 1f),
+        overlayVisible = true
     )
 
     @Test
@@ -59,9 +62,13 @@ class ZoomLogicTest {
     }
 
     @Test
-    fun `start ratio is the minimum`() {
-        assertEquals(1f, ZoomLogic.startRatio(1f), DELTA)
-        assertEquals(0.6f, ZoomLogic.startRatio(0.6f), DELTA)
+    fun `start ratio is 1x when it is inside the range, else the minimum`() {
+        assertEquals(1f, ZoomLogic.startRatio(1f, 10f), DELTA)
+        // S22: an ultrawide below 1x. Start on the main camera, not the ultrawide.
+        assertEquals(1f, ZoomLogic.startRatio(0.6f, 10f), DELTA)
+        assertEquals(1f, ZoomLogic.startRatio(0.5f, 1f), DELTA)
+        // A camera whose range starts above 1x.
+        assertEquals(1.2f, ZoomLogic.startRatio(1.2f, 8f), DELTA)
     }
 
     @Test

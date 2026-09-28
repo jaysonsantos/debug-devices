@@ -11,8 +11,10 @@ from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
 from debug_devices_mcp.server import Services
 from debug_devices_mcp.ui.board import BoardPanel
 from debug_devices_mcp.ui.constants import SCRCPY_LOG_FILE_NAME
-from debug_devices_mcp.ui.forward import CallForwarder
+from debug_devices_mcp.ui.device_panel import DevicePanel
+from debug_devices_mcp.ui.forward import CallForwarder, token_dir
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
+from debug_devices_mcp.ui.remote_screen import RemoteScreen
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, state_dir
 from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
 
@@ -22,7 +24,13 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     services.scene.add_listener(monitor.scene_changed)
     services.add_overlay_listener(monitor.overlay_changed)
     services.pointing.add_listener(monitor.tracking_changed)
+    services.add_restart_listener(monitor.app_restarted)
     monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
+    monitor.device_panel = DevicePanel(services, monitor)
+    monitor.phone_selection = services.selection
+    monitor.markings_setter = services.set_markings
+    monitor.bus.update_phone(markings_visible=services.markings.visible)
+    services.markings.add_listener(monitor.markings_changed)
 
 
 def build_monitor(settings: Settings, services: Services) -> Monitor:
@@ -106,6 +114,9 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
         own = ScreenTranscoder(monitor.screen, settings.ffmpeg_path, options=SCENE_TRANSCODE)
         monitor.scene_watcher = SceneWatcher(services.scene, screen_feed(monitor.screen_mjpeg, own))
     connect_services(monitor, services)
+    # A secondary reads the phone screen frames of the primary (one scrcpy stream per phone).
+    monitor.remote_screen = RemoteScreen(RemoteMonitor(settings.ui_port, settings.webcam_timeout), token_dir())
+    monitor.remote_screen.watcher = SceneWatcher(services.scene, monitor.remote_screen.feed)
     # When another server has the page on the configured port, this server sends its calls there.
     monitor.forwarder = CallForwarder(
         monitor.bus, RemoteMonitor(settings.ui_port, settings.webcam_timeout), monitor.is_secondary, monitor.origin

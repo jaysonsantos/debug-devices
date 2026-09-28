@@ -85,7 +85,10 @@ class MainActivity : ComponentActivity() {
             onPreviewFlipChanged = { applyPreviewFlip() },
             onCameraBound = { bound -> observe(bound) },
             onFocusTap = { point -> showFocusRing(point) },
-            onOverlayChanged = { overlayView.invalidate() }
+            onOverlayChanged = {
+                overlayView.visibility = if (camera.overlayVisible) View.VISIBLE else View.INVISIBLE
+                overlayView.invalidate()
+            }
         )
         overlayView.scene = { width, height, inset, length -> camera.overlayScene(width, height, inset, length) }
         // The activity stays in portrait, so the preview never restarts. Only the snapshot and the label follow

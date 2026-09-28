@@ -30,7 +30,10 @@ data class CameraStatus(
     @SerialName("in_sensor_zoom") val inSensorZoom: InSensorZoomState,
     @SerialName("overlay_boxes") val overlayBoxes: Int,
     @SerialName("overlay_arrows") val overlayArrows: Int,
-    @SerialName("af_mode") val afMode: AfMode
+    @SerialName("af_mode") val afMode: AfMode,
+    @SerialName("app_start_id") val appStartId: String,
+    @SerialName("preview_region") val previewRegion: PreviewRegion?,
+    @SerialName("overlay_visible") val overlayVisible: Boolean
 )
 
 @Serializable

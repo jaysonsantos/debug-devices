@@ -321,7 +321,11 @@ class BoardPanel:
         geometry = self._access.last_snapshot
         if geometry is None:
             raise ToolError(NO_SNAPSHOT)
-        if geometry.orientation != self._access.orientation.current:
+        current = self._access.orientation.current
+        if (geometry.orientation.flip_horizontal, geometry.orientation.flip_vertical) != (
+            current.flip_horizontal,
+            current.flip_vertical,
+        ):
             raise ToolError(ORIENTATION_CHANGED)
         pairs = [
             {"refdes": point.refdes, "x_px": point.x * geometry.width, "y_px": point.y * geometry.height}

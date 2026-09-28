@@ -92,6 +92,8 @@ class SceneState:
         self._listeners: list[SceneListener] = []
         # The newest phone screen frame (JPEG), and the code that follows each frame (live tracking).
         self.latest_frame: bytes | None = None
+        # Counts the frames: a secondary server asks for frames newer than the last one it got.
+        self.frame_seq = 0
         self._frame_listeners: list[FrameListener] = []
 
     @property
@@ -106,6 +108,7 @@ class SceneState:
 
     async def frame(self, jpeg: bytes) -> None:
         self.latest_frame = jpeg
+        self.frame_seq += 1
         for listener in self._frame_listeners:
             try:
                 await listener(jpeg)

@@ -12,8 +12,12 @@ object ZoomLogic {
         return clamp(next, min, max)
     }
 
-    /** The zoom ratio after an app start: the minimum of the camera. */
-    fun startRatio(minZoomRatio: Float): Float = minZoomRatio
+    /**
+     * The zoom ratio after an app start: 1x (the main camera) when it is inside the range, else the minimum. A phone
+     * with an ultrawide lens has a minimum below 1x, and starting there would start on the ultrawide.
+     */
+    fun startRatio(minZoomRatio: Float, maxZoomRatio: Float): Float =
+        if (Constants.Zoom.UNIT_RATIO in minZoomRatio..maxZoomRatio) Constants.Zoom.UNIT_RATIO else minZoomRatio
 
     /** Throws [ApiException] with [ErrorCode.BAD_REQUEST] when the request is not exactly one finite field. */
     fun validate(request: ZoomRequest) {

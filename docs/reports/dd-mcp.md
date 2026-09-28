@@ -412,3 +412,367 @@ Brief: `reload.md`. Goal: the MCP server that Claude Code or ChatGPT desktop (Co
 - The old server's monitor page logs "timeout graceful shutdown exceeded" from uvicorn at each reload (open page connections). The stop still ends within the timeout. The dd-ui owner can shorten the uvicorn graceful timeout.
 - A code change in the proxy itself (`devreload.py`) reloads the child, not the proxy. A change of the proxy needs a restart of the MCP client.
 - Clients must support `notifications/tools/list_changed` to see new or changed tools. Changed code of existing tools works also without it.
+
+## Bench workflow P1-P2, round 1: meter check
+
+Brief: `docs/briefs/p1-p2-evidence.md`. Source: `docs/reports/bench-workflow-improvements.md` ("P1: Check meter mode and unit before a conclusion").
+
+### What I did
+
+- `multimeter.py`, new region "check":
+  - `UnitFamily` with an explicit `unknown`. `unit_family()` reads the model's unit text: an SI prefix (`p n µ/u m k M`) and a known symbol (Ω in both code points, "ohm", V, A, F, Hz, °C/°F, %). Empty text, "unknown", "?", and any other text are `unknown`.
+  - `MeterStatus`: `confirmed`, `uncertain`, `disputed`, `unreadable`.
+  - `check_reading(reading, expected_mode)`: unit family against the mode (`MODE_FAMILIES`: Ω for resistance and continuity, V for voltage and diode, A for current, F, Hz, °C/°F, %). A conflict gives `disputed`. An unknown unit, the mode "other", or a confidence below `MIN_CONFIRMED_CONFIDENCE` (0.7) gives `uncertain`. `expected_mode` is context: a unit that does not fit it gives `disputed`; another mode of the same family gives `uncertain`; it never raises a status.
+  - `MeterResult`: the model's fields at the top level (the monitor page reads `readable`, `display_text`, `unit`, `mode`, `range`, `confidence`, `flags`, `notes`), plus `status`, `unit_family`, `overload` (OL, 0L, O.L), `value` (only for `confirmed`, and not for an overload), `expected_mode`, `problems`, and `request` ("Take a new frame that shows the LCD symbols and the dial together ... If the symbols stay unclear, ask the user to confirm the physical meter mode.").
+  - Prompt and schema: the model writes `"unknown"` in `unit` when it cannot read the unit symbol, and never takes the unit from the dial alone.
+- `server.py`, `multimeter_read`: new argument `expected_mode`; it returns `MeterResult`. `include_image` still returns the exact image that went to the model, and the monitor log keeps it.
+- `instructions.py`, evidence rule 2: only `confirmed` is a measurement; for the other states, no numeric conclusion; `expected_mode` is context, never proof.
+- Tests (`test_multimeter.py`, `test_server.py`): unit families; clear Ω, kΩ, MΩ, V, and OL; an obscured unit symbol (uncertain, no value); "443 V" in a resistance test (disputed, no value); a unit that does not fit the mode; `expected_mode` never confirms; unreadable; the tool with `expected_mode` and `include_image`.
+
+### Checks
+
+- `uv run pytest`: 374 passed, 1 skipped.
+- Ruff on my files: pass.
+
+### Process note
+
+- I ran `ruff check --fix mcp` and `ruff format mcp` one time on the whole `mcp/` directory by mistake. It changed `mcp/tests/test_devices.py` (dd-ui's file) at 19:50:29: ruff format and safe fixes only. dd-ui must check it. After that I ran ruff only on a list of my files.
+- For dd-ui: the monitor page shows `display_text unit` for every result. It can show `status` too, so that a disputed "443 V" does not look like a measurement.
+
+## Bench workflow P1-P2, round 2: capture ids
+
+Source: "P1: Tie statements to the exact frame".
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/evidence.py`:
+  - `CaptureLog`: records a `Capture` (UUID v7 `capture_id`, UTC `captured_at`, kind `phone_snapshot` or `meter_image`, source, scene epoch). It keeps the last 500 captures.
+  - Scene epoch: the log listens to the existing scene detector (`SceneState.add_listener`). Each scene change starts a new epoch.
+  - `status(capture_id)`: `valid_for_position_claims` only for a `phone_snapshot` of the current epoch while the scene is not marked as changed. A meter image, an unknown id, or a photo from before a move is not valid, with the reason.
+  - `require_current_photo(capture_id)`: the check for tools that take a photo id (rounds 3 and 4); it raises `StaleCaptureError` (a `ToolError`).
+  - `tag_image()`: puts the capture id and time into the `_meta` of the image block.
+  - Tool `capture_status(capture_id)`.
+- `server.py` (small, separate edits): `Services.captures` (attached to the scene in `__post_init__`), `SnapshotInfo.capture_id`/`captured_at`, a "capture id" region at the end of the `phone_snapshot` tool, the capture in `multimeter_read` (recorded right after the frame capture, before the model call), and `register_evidence_tools`. I re-read the file before each edit: dd-ui changed `SnapshotInfo` and the snapshot pipeline (P0) in parallel, and my edits sit next to theirs.
+- `multimeter.py`: `MeterResult.capture_id`/`captured_at`. `multimeter_read` keeps each checked result by its capture id (`CaptureLog.meter_results`) for round 4.
+- Evidence rule 8: position statements name a current `phone_snapshot` capture id; after a scene change an older id is invalid for new position claims.
+- Tests `mcp/tests/test_evidence.py`: UUID v7 and UTC time; different ids for two calls; a meter result and its returned image have the same capture id (image `_meta`); a photo id is valid, then invalid after a scene change; meter images and unknown ids are not valid; the log is bounded.
+
+### Checks
+
+- `uv run pytest`: 379 passed, 1 skipped. Ruff on my files: pass.
+
+## Bench workflow P1-P2, round 3: part identity
+
+Source: "P1: Check physical part identity".
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/board/identity.py`:
+  - `IdentityState`: `visible_marking` (the photo shows a marking; boardview names are only candidates), `candidate` (boardview estimates), `confirmed`.
+  - `identify()`: the pointed pixel goes back to board mm (`homography.unmap_point`, the inverse of the fit). The parts at that point are the parts whose box (plus 1 mm) contains it, else the parts within 3 mm.
+    - With a marking: only an exact marking match can confirm. It also needs a registration that is checked (5 or more pairs), the part on the registered side, and the marking within 6 mm of the part. Otherwise the claim is `visible_marking`, with the reason and a request.
+    - Without a marking (landmark): confirmed only when one part is at the point, no look-alike part is within 15 mm (same refdes letters, same pin count, box size within 1.3x), and the registration is checked. Otherwise `candidate`, with the pointed part and its look-alike parts, and a request for a closer photo.
+    - A part on the other side is never confirmed. The request says to isolate the power safely before the board is turned.
+  - `IdentityRegistry`: the claims of the session (bounded to 100). `report()` evaluates each confirmation again: when its photo id is no longer current (scene change) or its registration is stale, it shows as `candidate`, with the old refdes first in the candidates.
+- `board/tools.py`: new tools `board_identify(photo_id, marking, registration_id, x_px, y_px)` (it refuses a stale photo id through the capture log and a stale registration) and `board_identity()`. `BoardSession.identities`, `BoardSession.photos` (the capture log, set in `Services.connect_board`), and `BoardSession.use_board()` (another board clears the claims). `board_locate_in_photo` returns `identity: "candidate"` and a note that positions are boardview estimates. `board_match_marking` returns `identity: "visible_marking"`.
+- `board/homography.py`: `unmap_point()`.
+- `server.py`: one line in `connect_board` (`self.board.photos = self.captures`).
+- Evidence rule 9: say which identity state a part name has; only confirmed is a physical fact.
+- Fixture `mcp/tests/fixtures/boardview/identity.json` (synthetic, invented names; README updated).
+- Tests `mcp/tests/test_board_identity.py`: four similar coils give candidates, not one refdes; a clear marking plus a checked registration confirms one part; a scene change removes that confirmation and refuses the old photo id; an opposite-side target is not confirmed; a marking without registration stays `visible_marking`; a unique connector confirms by landmark; a 4-pair registration does not confirm; `board_locate_in_photo` and `board_match_marking` never confirm.
+
+### Checks
+
+- `uv run pytest`: 528 passed, 1 skipped (with dd-ui's new tests). Ruff on my files: pass.
+
+## Bench workflow P1-P2, round 4: bench state
+
+Source: "P2: Keep a compact bench state".
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/bench_state.py`:
+  - `BenchState`: power (`unknown`, `powered`, `isolated`; the user's confirmation and its time; the residual-voltage measurement), meter mode (from a confirmed reading, or confirmed by the user), probe contact (with a current photo id), confirmed measurements (source capture id, time, label, mode, value, unit, LCD text, overload, confidence state), part candidates (kept apart from the measurements), photo ids (last 20), steps (text, kind, done, evidence id), and the last probe short. `next_step` is the first uncompleted step.
+  - `BenchStateStore`: reads the file on each call (another MCP server can write it) and writes it atomically (temporary file, then rename). Without a path it keeps the record in memory: `Services` built directly (tests) uses that.
+  - Safety gate (`gate()`): a resistance, continuity, or diode step needs the power `isolated`, the user's confirmation, and a residual voltage of at most `SAFE_RESIDUAL_VOLTS` (0.5 V) from a confirmed voltage reading taken after the confirmation. `mV` is converted.
+  - Tools: `bench_state()`; `bench_state_update(...)` (power, user confirmation, meter mode confirmed by the user, probe contact with `photo_id`, part candidates, new steps, completion of a visual step with a photo id; photo ids are checked with the capture log); `bench_record_measurement(capture_id, label, step_id)` (only a `confirmed` meter result, by its capture id; it completes the step when the mode fits the step kind, and it refuses a resistance, continuity, or diode step without the gate); `bench_begin_step(step_id)` (refuses the step and lists what is missing); `bench_probe_short()` (power back to `unknown`, confirmation and residual check cleared, a power check step inserted as the next step). A safe residual reading completes the open power check steps.
+- `instructions.py`: `bench_instructions` returns `current_step` (the next uncompleted step) after the user's text. `DEFAULT_BENCH_STATE_FILE` (next to `instructions.md`). Evidence rule 10.
+- Settings: `--bench-state-file` / `DEBUG_DEVICES_BENCH_STATE_FILE` (empty means the default). `.env.example` and `.gitignore` (`bench-state.json`) updated. The test settings point the file into `tmp_path`.
+- `server.py` (small, separate edits): `Services.bench`, the store from the settings in `from_settings`, `register_bench_state_tools`, and the current-step callback for `register_instructions_tool`.
+- `pyproject.toml`: `bench_state.py` gets the same per-file ruff rule as `board/tools.py` (the arguments of an MCP tool function are the tool API).
+- The record holds only what the agent passes (for example a few part names). It copies no board file data.
+- Docs: `mcp/README.md` (the four features under "Evidence rules"), `README.md` (tool table).
+- Tests `mcp/tests/test_bench_state.py` (13): low-confidence and disputed results cannot enter; the full gate for a resistance step (refused before isolation, refused without the user's confirmation, refused without a residual check, then allowed; the measurement completes the step, and the completed step is no longer next); an unsafe residual blocks; a residual taken before the confirmation does not count; a probe short goes back to the power check and `bench_instructions` shows it; a safe residual completes the power check; a probe contact needs a current photo (refused after a scene change); measurement steps complete only with a measurement, visual steps with a photo; the file store (round trip, no temporary file left, a bad file gives a clear error); the gate lists all missing items; `.gitignore` has the file; the setting.
+
+### Checks
+
+- `uv run pytest`: 541 passed, 1 skipped. No `bench-state.json` was made in the repo.
+- `nix develop --command prek run --files <my files>`: all hooks pass (after one `typos` fix in this report).
+- I did not edit the user's `instructions.md`.
+
+### Open items (all four rounds)
+
+- The report's "Local continuity update" (mark the completed measurement in the user's `instructions.md`) is the user's text: I did not change it. The bench record now carries the steps, and `bench_instructions` shows its current step.
+- The monitor page shows `display_text unit` of a meter result without its `status` (dd-ui's page).
+- I ran ruff format and `ruff check --fix` on the shared `server.py`, `config.py`, and `constants.py` (they were in my file list). I did not check line by line if this changed any line of dd-ui in those files; dd-ui can check with `git diff`.
+
+## Bench feedback 1, item 5: board_parts_at_photo
+
+Brief: `docs/briefs/bench-feedback-1.md`, "dd-mcp part".
+
+### What I did
+
+- New tool `board_parts_at_photo(registration_id, x_px, y_px, radius_px=20)` in `board/tools.py` (with the identity tools): the inverse of `board_locate_in_photo`. The pixel goes back to board mm (`unmap_point`), and the radius in pixels becomes mm at that point. It returns the parts of the registered side whose box is within the radius, nearest first: refdes, side, center, distance to the box (0 inside), distance to the center, and `inside_box`. The result has `identity: "candidate"` and `evidence: "supporting evidence: boardview positions mapped through the photo registration, not a visual fact ..."`. At most 10 parts.
+- It uses the scene guard and the strict photo check of item 6.
+- Tests `mcp/tests/test_board_parts_at.py`: the pixel of a coil gives that coil (inside its box, 20 px = 2 mm); a larger radius adds its two neighbours at 5.08 mm, in distance order; a bottom part is not listed for a top registration.
+
+### Open item
+
+- With live tracking, the tool still needs the same scene and view as the registered photo. The tracker maps the live frames, not an older snapshot, so it cannot map a snapshot pixel after a move.
+
+## Bench feedback 1, item 6: registration reuse for a newer phone_snapshot
+
+### Problem found
+
+`Pointing._board_to_snapshot` only scales the registration to the size of the last snapshot. A zoom, a flip, or a turn is our own camera command, so the scene watcher takes a new reference and the registration stays valid while its pixel mapping is wrong.
+
+### What I did
+
+- `evidence.py`: `CameraView` (zoom ratio to 3 decimals, in-sensor zoom mode, lens focal length, image turn, flips) from the camera status and the transform that `Services.phone_snapshot` already reads. Each `phone_snapshot` capture records its view. `CaptureLog.reuse_problem(registered_photo_id)`: none when the last photo is the registered photo, or when both photos are of the current scene epoch with the same view; otherwise the reason (for example "the camera view changed after the registered photo (zoom_ratio): register your last phone_snapshot again").
+- `board/tools.py`: `Registration.photo_id` (the last `phone_snapshot` at registration time); `BoardSession.current_photo_id` and `BoardSession.snapshot_guard` (set by the server).
+- `server.py` (small edits): `Services.last_view` (set in `Services.phone_snapshot`, one line after the status call), the view in the capture record, `guard_snapshot_registration()`, and a call to it from `guard_registration()` when the live tracker does not follow the registration. A stale registration keeps its own message.
+- Result: `board_locate_in_photo` (also with `highlight`), `board_identify`, and `board_parts_at_photo` accept a newer `phone_snapshot` of the same scene and view, and refuse it after a zoom, flip, turn, sensor mode, or lens change with a clear message. `board_identify` and `board_parts_at_photo` use the strict check also with live tracking.
+- Tests (`test_board_parts_at.py`): a newer snapshot with the same view works for `board_parts_at_photo` and `board_locate_in_photo`; after `phone_zoom` 2.0 and a new snapshot, `board_parts_at_photo`, `board_locate_in_photo`, and `board_identify` refuse with "camera view changed (zoom_ratio)"; the rules of `reuse_problem` (same photo, same view, flip change, scene change, unknown photo).
+
+### For dd-ui
+
+- `phone_point_to` goes through `Pointing._registration`, which calls only `scene.guard()`. Without the tracker it can map a registration to a snapshot with another zoom. Calling `Services.guard_snapshot_registration(registration_id)` there (when the tracker does not follow) closes that gap.
+
+### Checks
+
+- `uv run pytest`: 545 passed, 1 skipped. Ruff on my files: pass.
+
+## Bench feedback 1, item 7: dim LCD (webcam controls and hint)
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/webcam_controls.py`:
+  - `V4l2Controls` reads the controls with `v4l2-ctl -d <webcam> --list-ctrls` (parsed into name, type, value, range, default, flags) and sets them with `--set-ctrl name=value,...`. It checks each value against the range of the device first.
+  - `WebcamControls`: brightness, contrast, gain, `auto_exposure` (true: automatic, V4L2 menu 3; false: manual, 1), and `exposure` (`exposure_time_absolute`). A fixed exposure turns the automatic exposure off first, in the same call.
+  - `WebcamControlStore`: `webcam-controls.json` in the state directory (not the repo, and not `ui-settings.json`). `ensure_applied()` sends the saved values one time per server process before the first webcam use; a failure only logs.
+  - Tool `webcam_controls(brightness, contrast, gain, auto_exposure, exposure)`: no argument reads (current values and ranges); arguments set, check, and save.
+- `multimeter.py`: `dim_hint()`. When the result is not confirmed and the model's notes say that the LCD is dim or faint, `request` starts with "The LCD is dim: turn on the meter backlight (the <meter model> backlight key), or raise the webcam exposure or brightness (webcam_controls), then call multimeter_read again." `check_reading()` takes the meter model (from `--meter-model`, for example "PROSTER T21D").
+- `server.py`: `Services.webcam_controls` (memory store by default; the state directory file in `from_settings`), `ensure_applied()` before `webcam_snapshot` and before `multimeter_read` with the webcam, the meter model in the check, and the tool registration. `config.py`: `--v4l2-ctl-path` (`.env.example` updated).
+- A UI setting for these controls is for dd-ui later: the page can call the `webcam_controls` tool.
+- Tests `mcp/tests/test_webcam_controls.py` (8, fake `v4l2-ctl` only): parsing, the order of the exposure settings, set + range check + save, apply one time per process, no command without saved values, the tool (read, set, refuse out of range), the dim hint with and without a meter model, and no hint for a confirmed or a blurred (not dim) reading.
+
+### Checks
+
+- `uv run pytest`: 561 passed, 1 skipped. `prek run --files <my files>`: pass.
+- Hardware: no test on the real webcam (the orchestrator stopped hardware use for the live bench session). Before that message I ran `v4l2-ctl -d /dev/video0 --list-ctrls` one time (read only) to see the controls of this webcam: brightness -64..64, contrast 0..64, gain 0..100, `auto_exposure` menu (3 = aperture priority), `exposure_time_absolute` 1..5000.
+
+## Bench feedback 1, addition: board session over a server restart
+
+Problem from the bench session: after a server restart, `board_register_photo` said "no board is open".
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/board/session_store.py`: `BoardSessionRecord` (board path, board SHA-256, the registrations as JSON with their photo capture ids, the last registration id) and `BoardSessionStore` (a JSON file, written atomically; without a path it stays in memory). The file is `board-session.json` in the state directory (`$XDG_STATE_HOME/debug-devices` or `~/.local/state/debug-devices`), not in the repo and not `ui-settings.json`.
+- `board/tools.py`:
+  - `BoardSession.with_store()`, `save()`, and `restore()`. `board_open` records the absolute path that it got (the path in the obv-dump output can differ).
+  - `restore()` runs one time, at the first board tool call after a start: it opens the recorded board again with `obv-dump`. The restored registrations are stale: a new process has no capture ids and no scene reference for them, so it cannot check them. A changed board file (another SHA-256) drops the registrations; a missing file leaves no board open. `restore_note` says what happened.
+  - `board_tool(server, session)` replaces `@server.tool()` for the 12 board tools: restore before the tool, save after it (also after an error). `functools.wraps` keeps the signature and the description for the MCP schema.
+- `server.py`: `from_settings` gives the board session the file in the state directory (one line). Tests never call `from_settings`, so they never write the real state directory.
+- Tests `mcp/tests/test_board_restart.py` (4, `tmp_path` only): after a restart, `board_find_part` works without `board_open` (one obv-dump run) and the old registration is refused as stale; a changed board hash drops the registrations; a missing board file leaves "no board is open" and a note; without a record nothing runs and no file is written.
+
+### Checks
+
+- `uv run pytest`: 565 passed, 1 skipped. `prek run --files <my files>`: pass.
+- No real phone, webcam, or running server was used (live bench session).
+
+### Open item
+
+- `restore_note` is only in the log and on the session object. A tool result (for example `board_open` or the stale-registration message) can show it; that is a small follow-up.
+
+## Bench feedback 2, items 1 and 2: multi-frame meter check and the user-confirmed mode
+
+Brief: `docs/briefs/bench-feedback-2.md`, "dd-mcp part". Seen on the bench: "51.0 V" (the LCD showed 5.10 V) and "93.2 V" at a USB-C point marked confirmed; "diode" read twice while the dial was on DC V.
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/meter_frames.py`: `signature()` (the digits and the decimal point position of the LCD text), `base_value()` (the value in V or A with the unit prefix applied), and `combine()`. The combined status is the worst frame status; then:
+  - a moved decimal point between frames ("5.10" and "51.0") gives `disputed`;
+  - a value above `--max-voltage` (default 30 V) or `--max-current` (default 10 A) gives `disputed`;
+  - digits that change with the same decimal point give `uncertain`, with `value_min`/`value_max`;
+  - `frames` (each frame: capture id, time, LCD text, unit, mode, value, confidence, status) and `stable` are in the result.
+- `server.py`: `read_meter()` (used by `multimeter_read`, and by `bench_measure` in item 3). It captures `frames` images (default 2, at most 3) `--meter-frame-interval` apart (default 1 s) and starts each model call at once, so the calls run in parallel. Every image has its own capture id; the result has the id of the first image, and every frame id finds the result (`CaptureLog.meter_results`). `include_image` returns every frame image, each with its capture id in `_meta`.
+- Item 2: `check_reading(..., user_mode)`: a mode that the user confirmed on the dial replaces the model's mode for the unit check; the result keeps `model_mode` and has `mode_source: "user"`. `bench_state.recent_user_mode()` gives that mode when the user confirmed it in the last 10 minutes (`USER_MODE_MAX_AGE`). With the user's mode, a confirmation needs 2 frames that agree; a unit of another family stays `disputed`. The server cannot see a dial change; the time limit and the unit family check cover it.
+- Settings `--max-voltage`, `--max-current`, `--meter-frame-interval` (`.env.example` updated; the test settings use an interval of 0). Evidence rule 2 mentions the frames and the user's mode.
+- Tests `mcp/tests/test_meter_frames.py` (15): the signature; equal frames confirmed; a moved decimal point disputed; the voltage and current limits with prefixes (93.2 V and 12 A disputed, 900 mV and 250 mA confirmed); changing digits uncertain with the range; the worst status wins; the tool returns every frame image with matching ids; the tool disputes "5.10" + "51.0"; a recent user mode confirms "diode" + V as DC V with 2 frames and not with 1; a conflicting unit stays disputed; a user mode older than 10 minutes is not used.
+- Changed tests: `test_server.py` (2 webcam captures by default) and dd-ui's `test_ui_app.py` (the log has 2 images of the model input: two lines).
+
+### Checks
+
+- `uv run pytest`: 616 passed, 1 skipped. Fakes only (live bench session).
+
+### Cost
+
+- Two frames mean two model calls per `multimeter_read` (in parallel, so the time is about one call plus 1 s). `frames: 1` keeps the old cost, but a value can then only be as good as one frame.
+
+## Bench feedback 2, item 3: bench_measure
+
+### What I did
+
+- `server.py`:
+  - The body of the `phone_snapshot` tool is now the function `take_phone_snapshot(services, save_path, max_side)`, unchanged (including dd-ui's `carry` of a stale registration). The tool calls it.
+  - New tool `bench_measure(expected_mode, frames=2, save_path, max_side, include_meter_images=False)`, in its own region `register_bench_measure_tools`. It starts `read_meter()` (webcam) as a task and takes the phone snapshot at the same moment. It returns a `BenchMeasurement`: `measurement_id` (UUID v7), `meter` (the checked multi-frame result, with its capture id), `photo` (the `SnapshotInfo` with its capture id), `gap_seconds` (first meter frame to the photo), and a note. Content: the JSON, the photo, and (with `include_meter_images`) the meter frames, each image with its capture id in `_meta`. If the photo fails, the meter task is cancelled.
+- Evidence rule 8: use `bench_measure` when a measurement needs the photo of the probe contact.
+- Tests `mcp/tests/test_bench_measure.py` (3): the value and the photo have different capture ids, the photo is valid for a position claim, the images come in order (photo, then the meter frames) with their ids, the meter result is in the capture log for `bench_record_measurement`; without meter images only the photo; a phone failure gives a tool error.
+
+### Checks
+
+- `uv run pytest`: all pass (fakes only).
+
+### For dd-ui
+
+- `phone_snapshot` now calls `take_phone_snapshot()`: a change to the snapshot pipeline goes there.
+
+## Bench feedback 2, item 8: side labels of boardview files
+
+### What I did
+
+- `board/model.py`:
+  - Through-hole parts and mounting holes (names `MH*`, `H<n>`, `HOLE*`, `SCREW*`, `STANDOFF*`, `SPACER*`) get the side `both`, and their pins too. `Part.labeled_side` keeps the label of the file when it differs.
+  - `check_sides()`: for each part, the nearest part of the same type (same refdes letters, same pin count) within 3 mm; the file is "mixed" when at least 10 such pairs, and at least 30 % of them, have opposite labels. It uses a 3 mm grid (0.28 s for the target board, index included).
+  - `SideLabels` and `Board.apply_side_labels()`: "auto" (the check), "mixed" (the user says that the labels are not reliable), "trust" (no warning). `Board.side_ok()` does not rule a part out by its label in a mixed file.
+- `board/tools.py`: `board_open(path, side_labels="auto")`; `BoardSummary.relabeled_both_sides` and `side_warning`. In a mixed file, `board_locate_in_photo` keeps the pins of both labels and adds the warning to its notes (`on_registered_side` still says what the label says), and `board_parts_at_photo` lists parts of both labels with `side_warning`. The session record keeps the choice over a restart.
+- `board/identity.py`: in a mixed file, an other-side label no longer refuses a confirmation: the other checks decide, and the reason says that the labels are mixed. In a file with reliable labels, the refusal stays.
+- Fixture `mcp/tests/fixtures/boardview/sides.json` (synthetic, invented names; README updated).
+- Tests `mcp/tests/test_board_sides.py` (5): both sides for mounting holes and a through-hole connector; a mixed file is detected and the clean fixture is not; the tools warn instead of ruling out (a bottom-labelled capacitor listed for a top registration; a bottom-labelled marked IC confirmed with the note); the user's choice overrides the check; "mixed" keeps over a restart.
+
+### Result on the target board (local only, counts)
+
+- 64 parts are now on both sides (through-hole parts and mounting holes).
+- The check says "not mixed": 263 of 2216 same-type neighbour pairs (12 %) have opposite labels. Per 20 mm area, the highest share is 42 % (8 of 19), and 6 areas have 25 % or more. The distribution is smooth, so the check cannot tell mislabelled parts from normal neighbours on the two sides of a double-sided board, and I cannot look at the board to check. For this file, open it with `board_open(path, side_labels="mixed")`, as the user reported mixed labels.
+
+### For dd-ui
+
+- The pointing (`pointer.plan`, `OTHER_SIDE_MESSAGE`) still rules parts out by `on_side`. `Board.side_ok()` gives the same answer as `on_side` unless the file is mixed.
+
+## Bench feedback 2, item 9: bench record
+
+### What I did
+
+- `bench_state.py`:
+  - `Measurement.power_state` and `power_confirmed_by_user`: the power state of the record and the user's confirmation when the measurement entered it.
+  - `bench_record_measurement(..., done_before_gate)`: the user's reason when a resistance, continuity, or diode test was already done before the gate was complete (the bench case: the test with the power off, before the residual-voltage check). The measurement then completes its step and keeps the reason. Without the reason the refusal stays, and it names the parameter. `bench_begin_step` stays strict for new steps.
+  - `change_step()`: `bench_state_update(skip_step=..., step_reason=...)` skips a step; `complete_step` with `step_reason` and no `photo_id` completes a step from the user's report. `Step.completed_by` (`evidence`, `user_report`, `skipped`) and `Step.reason`. The next step then moves on.
+  - `add_photo()`: every `phone_snapshot` (also the one of `bench_measure`) adds its capture id to `photo_ids` (up to 1000; no duplicates). `take_phone_snapshot()` in `server.py` calls it.
+- Tests (`test_bench_state.py`, 4 new): the power state on a measurement; a test done before the gate attaches with the reason (and not without it); skip and complete with a reason move the next step; every photo id is in the record, in order.
+
+### Checks (items 1, 2, 3, 8, 9)
+
+- `uv run pytest`: 681 passed, 1 skipped. `nix develop --command prek run --files <my files>`: pass.
+- Fakes only: no real phone, no real webcam, no restart of a running server (live bench session). One local `obv-dump` run on the target board for the side-label counts (item 8), with counts only in the output.
+
+## Meter decimal point, round 1: digits and decimal point as separate fields
+
+Brief: `docs/briefs/meter-decimal.md` (dd-mcp part). Bench case: the Proster T21D showed 1.415 V; three frames read "14.15", so the frame check could not find the wrong point. Rule of the brief: a new check can only lower a status.
+
+### What I did
+
+- `multimeter.py`, schema: two new fields before `value`: `digits` (the digit characters left to right, no sign, no point) and `digits_before_point` (null when there is no point). The strict schema sends them as required and nullable; the Python default `None` is only for local callers and old test data.
+- Prompt: "Find the decimal point first: a small dot at the bottom of the LCD between two digits. Say between which digits it is ..." and `display_text` and `value` must agree with the two fields. The `value` description says: the digits with the point where the LCD shows it.
+- Check `consistency_problems()`: the signature of `display_text` (digits and point position; `signature()` moved from `meter_frames.py` to `multimeter.py`, and `meter_frames` imports it) must equal the two fields, and `value` must equal the number that the LCD text makes (with its sign, in the unit as shown). A mismatch adds "the digits, the decimal point, and the value of the model do not agree (...)" and lowers "confirmed" to "uncertain". Not checked: an unreadable display, OL, no digits, and missing fields (only the value is compared then).
+- `lower(status, new_problems, problems)`: the one helper for these checks; it can only lower "confirmed" to "uncertain".
+- `MeterResult.digits` and `digits_before_point`: the model's fields as evidence.
+- Tests `mcp/tests/test_meter_decimal.py` (round 1 part): the schema fields; agreeing answers stay confirmed ("1.415", "-0.123", "443.0", "512"); "1.415" with value 14.15 is uncertain; "14.15" with the point field 1 is uncertain; OL and old data are not checked; a disputed result stays disputed.
+
+### Checks
+
+- `uv run pytest`: 683 passed before; all pass after (fakes only). The strict-mode schema test passes.
+
+## Meter decimal point, round 2: meter display profile (meter_counts)
+
+### What I did
+
+- Setting `meter_counts` (`--meter-counts`, `DEBUG_DEVICES_METER_COUNTS`, default 0 = unknown, no check). `.env.example` and `mcp/README.md` updated. The test settings remove the variable.
+- `multimeter.py`, `display_problems(reading, counts)` (called in `check_reading(..., counts)`; it can only lower "confirmed" to "uncertain"):
+  - a. the digit count must be the digit count of the display (6000 counts: 4 digits). "51.0" and "93.2": "the meter shows 4 digits; the model read 3 (...): a digit or the decimal point is probably wrong".
+  - b. the digits as one integer must be below the count (6000: at most 5999).
+  - c. auto range (flag AUTO or range "auto"): a leading zero with the point after the second digit or later, or with no point ("05.10", "0510"), is not possible. "0.123" is possible; in a manual range the leading zero is not checked.
+  - Not checked: unreadable, OL, no digits.
+- The prompt names the digit count when it is known: "Its display has 6000 counts: it shows 4 digits." (`VisionClient.meter_counts`, set in `Services.from_settings`). This helps the model; it is not a check.
+- `server.py`: `read_meter()` passes `settings.meter_counts` to `check_reading()` (one argument), and `from_settings` sets `vision.meter_counts` (one line). The orchestrator's markings fix is untouched.
+- Tests (round 2 part of `test_meter_decimal.py`): "51.0" and "93.2" with 6000 counts are uncertain; "6.123" is above the counts; "05.10" in auto range (flag or range) is uncertain, "0.123" in auto range and "05.10" in a manual range stay confirmed; "1.415", "5.100", "443.0", "5999" stay confirmed; unknown counts check nothing; the prompt names 4 digits.
+
+### Checks
+
+- `uv run pytest`: all pass (fakes only).
+
+## Meter decimal point, round 3: expected value as context
+
+### What I did
+
+- `meter_frames.py`, region "expected value": `expected_problems(result, expected, counts)`. It takes the number that the LCD text shows (digits, point, sign: the model's `value` is only kept for a confirmed result) and converts it to the base unit of its family (V, A, Ω; `multimeter.unit_parts()` gives the prefix). When it is outside [expected / `EXPECTED_BAND`, expected x `EXPECTED_BAND`] (`EXPECTED_BAND = 3.0`; no check for 0 or no value, OL, or other families):
+  - the problem "14.15 V is 4.3 × the expected 3.3 V: check the decimal point; ask the user to read the LCD";
+  - the same digits with the point in the other positions: the nearest value inside the band is named, for example "1.415 V, with the point one place to the left, is near the expected 3.3 V". With `meter_counts` known and auto range, a position with an impossible leading zero is not named.
+- `combine(..., expected_value=..., counts=...)` (keyword-only) runs it on the first frame and lowers "confirmed" to "uncertain" with `lower()`. The request then says: "Check the decimal point: ask the user to read the LCD, or read the meter again with the LCD larger in the frame." `MeterResult.expected_value` keeps the context.
+- `server.py`: `expected_value` on `multimeter_read` and `bench_measure` (with the tool docs: base unit, context only, the band, the point shift, and the `meter_counts` checks), passed through `read_meter()` to `combine()`. `pyproject.toml`: `server.py` gets the same per-file ruff rule as `board/tools.py` (the arguments of a tool function are the tool API).
+- `instructions.py`, evidence rule 2: pass `expected_value` when the test has a nominal value; it is context, never proof; a value far from it is more likely a misplaced decimal point: ask the user to read the LCD.
+- Tests (round 3 part of `test_meter_decimal.py`): "14.15" x 3 with expected 3.3 (the exact brief texts); a value below the band names a shift to the right; a value in the band stays confirmed; expected 0 checks nothing; mV and kΩ converted; an impossible shift is not named; the expected value never raises a status.
+
+### Checks
+
+- `uv run pytest`: all pass (fakes only).
+
+## Meter decimal point, round 4: tests of the brief's cases
+
+### What I did
+
+Tests through the tools (`multimeter_read`, `bench_measure`) with fake vision answers, in the round 4 part of `mcp/tests/test_meter_decimal.py`:
+
+- "14.15" (digits "1415", 2 before the point) in 3 frames with `expected_value` 3.3: "uncertain", no value, and a problem names 1.415 V.
+- "51.0" with `meter_counts` 6000: the problem "the meter shows 4 digits; the model read 3". The status is "disputed", not only "uncertain", because 51.0 V is also above the 30 V bench limit. The same count check alone gives "uncertain": "5.10" (3 digits, below the limit) is "confirmed" without a count and "uncertain" with 6000 counts.
+- A self-contradicting answer (display "1.415", value 14.15): "uncertain" with "the digits, the decimal point, and the value of the model do not agree".
+- "1.415" in 3 frames with `expected_value` 3.3 and 6000 counts: "confirmed", value 1.415, with the model's digits and point in the result.
+- `bench_measure(expected_value=3.3)` with a "14.15" answer: the meter part is "uncertain" and keeps the expected value.
+- The strict-mode schema test (`test_sent_schema_is_strict`) passes with the two new fields.
+
+### Checks (rounds 1-4)
+
+- `uv run pytest`: 710 passed, 1 skipped (683 before). `nix develop --command prek run --files <my files>`: all pass.
+- Bench rule kept: fakes only, no webcam or phone, no change to `.env` or the settings file, no restart, no change to `ui/static/`. The orchestrator's markings fix in `server.py` is untouched (`set_markings`, `_set_old_app_markings`, `app_hides_markings`).
+- The running MCP server does not load these files until its next start.
+
+### Open items
+
+- The fields and the checks can only lower a result. If the model puts the point in the wrong place in every frame, and there is no expected value and no count, a wrong value can still be "confirmed". Set `DEBUG_DEVICES_METER_COUNTS=6000` for the Proster T21D after "bench done" (the `.env` change is the user's), and pass `expected_value` for rails with a nominal value.
+- The brief's "not now" items (two-pass LCD zoom, a live check with the real meter) wait for the user's decision after "bench done".
+- For dd-ui (no change now, `ui/static/` is frozen): the page shows `display_text unit`; it can also show `status` and, for a result far from the expected value, the named point shift.
+
+## Meter decimal point, round 5: the display profile only for volts and amperes
+
+### What I did
+
+The display profile (`--meter-counts`) gave false "uncertain" results for real readings. Many meters blank the leading digit in the lowest range of a function: a 6000-count meter shows " 12.3" mV (600.0 mV range), " 51.0" Ω (600.0 Ω range), and "50.0" % duty with 3 digits.
+
+- `multimeter.py`: the new constant `PROFILE_FAMILIES` (voltage, current) and the helper `uses_display_profile(unit, counts)`. `display_problems` runs its checks (digit count, counts limit, leading zero) only for these two families. This is the same scope as the bench limit. Frequency and capacitance often have other counts (for example 9999).
+- The "fewer digits" rule is only for the base unit without a prefix (V, A): "51.0" V and "93.2" V stay "uncertain". A reading with a prefix (mV, uA, mA) can be the lowest range with a blank leading digit. "More digits", the counts limit, and the leading zero in auto range stay for all prefixes of V and A.
+- `meter_frames.py`: the point-shift suggestion for `expected_value` uses the same scope for its leading-zero filter.
+- The prompt line for the counts changed: "For volts and amperes, its display has 6000 counts: at most 4 digits. The lowest range can show a blank for the leading digit: do not add a zero for it." The old line ("it shows 4 digits") told the model a rule that is now false. It could also make the model add a "0" for a blank digit ("012.3" mV). This is a prompt change. The orchestrator approved it.
+- Docs: `mcp/README.md` (the `--meter-counts` row and the "Decimal point" bullet), the `multimeter_read` docstring in `server.py`, the `meter_counts` description in `config.py`, and the comment in `.env.example`. In `server.py` I changed only the docstring; the markings fix is not changed.
+
+### Tests (round 5 part of `mcp/tests/test_meter_decimal.py`)
+
+- Not lowered with 6000 counts: "12.3" mV, "51.0" Ω, "50.0" %, "9.999" kHz, "12.3" uA, "12.3" mA.
+- Still "uncertain": "51.0" and "93.2" in V and in A (the problem "the meter shows 4 digits; the model read 3").
+- They stay for prefixes: "123.45" mV (more digits), "612.3" mV (above the counts), "012.3" mV in auto range (leading zero).
+- Other functions have no limit: "9999" Hz, "06.80" uF in auto range, and "0.4430" MΩ are "confirmed".
+- Through `multimeter_read` with a fake vision answer: "12.3" mV with 6000 counts is "confirmed", value 12.3.
+- The prompt test has the new text.
+
+### Checks
+
+- `uv run pytest`: 721 passed, 1 skipped. `uv run ruff check` and `ruff format --check` on my files: pass. `nix develop --command prek run --files <my files> mcp/README.md .env.example`: all pass.
+- Bench rule kept: fakes only, no webcam or phone, no change to `.env` or the settings file, no restart, no change to `ui/static/`. Nothing committed.
