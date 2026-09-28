@@ -1,6 +1,7 @@
 """Shared fakes. Run the tests with `uv run pytest` from the repo root."""
 
 import io
+import socket
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -81,3 +82,10 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
 def private_runtime_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """The monitor writes its ingest token file to $XDG_RUNTIME_DIR: keep test files out of the real one."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("runtime")))
+
+
+def free_port() -> int:
+    """A local port that no program uses now: tests never use the user's page port 18766."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]

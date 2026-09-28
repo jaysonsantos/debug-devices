@@ -25,7 +25,7 @@ from debug_devices_mcp.ui.setup import build_monitor
 from debug_devices_mcp.webcam import Crop
 from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
 
-from .conftest import JPEG, make_jpeg
+from .conftest import JPEG, free_port, make_jpeg
 from .test_remote_webcam import identity
 from .test_server import FakePhone, make_services, no_vision
 from .test_webcam_stream import FakeStreamProcess, mpjpeg
@@ -157,6 +157,8 @@ def test_build_monitor_takes_over_the_webcam_and_the_model(
     settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # A free port, never the user's 18766: a later request of this monitor must not reach the running dev monitor.
+    settings = settings.model_copy(update={"ui_port": free_port()})
     services = make_services(settings, FakePhone(), no_vision())
     monitor = build_monitor(settings, services)
     assert monitor.stream is not None

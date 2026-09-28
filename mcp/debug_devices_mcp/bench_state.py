@@ -28,6 +28,7 @@ from enum import StrEnum
 from functools import partial
 from pathlib import Path
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
@@ -62,6 +63,8 @@ LOCK_RETRY = timedelta(milliseconds=10)
 # The background retry of an unsafe reading that could not be saved (then the next write saves it).
 FLUSH_DELAY = timedelta(seconds=5)
 FLUSH_ATTEMPTS = 12
+# The last save of kept unsafe readings at exit: the lock wait, and a little more.
+EXIT_SAVE_TIMEOUT = LOCK_TIMEOUT + timedelta(seconds=1)
 # A mode that the user confirmed on the dial is context for multimeter_read for this long.
 USER_MODE_MAX_AGE = timedelta(minutes=10)
 USER_SOURCE = "user"
@@ -507,15 +510,26 @@ class BenchStateStore:
             self._flush_task = asyncio.get_running_loop().create_task(self._flush())
 
     async def save_unsaved_at_exit(self) -> None:
-        """One more try at exit (a stop or a reload of the server): a kept unsafe reading is in memory only."""
+        """One more try at exit (a stop, Ctrl-C, SIGTERM, or a reload): a kept unsafe reading is in memory only.
+
+        The MCP shutdown cancels the lifespan, so the save runs shielded, with a limit. It never raises: a busy lock
+        or a file error (a full disk, a read-only folder) goes to the log.
+        """
         if self._flush_task is not None:
             self._flush_task.cancel()
         if not self.unsaved:
             return
-        try:
-            await self.update_async(lambda _state: None)
-        except ToolError as exc:
-            logger.warning("%s unsafe readings are not in the bench state file at exit: %s", self.unsaved, exc)
+        with anyio.move_on_after(EXIT_SAVE_TIMEOUT.total_seconds(), shield=True) as scope:
+            try:
+                await self.update_async(lambda _state: None)
+            except (ToolError, OSError) as exc:
+                logger.warning("%s unsafe readings are not in the bench state file at exit: %s", self.unsaved, exc)
+        if scope.cancelled_caught:
+            logger.warning(
+                "%s unsafe readings are not in the bench state file at exit: the save did not end in %g s",
+                self.unsaved,
+                EXIT_SAVE_TIMEOUT.total_seconds(),
+            )
 
     async def _flush(self) -> None:
         for _ in range(FLUSH_ATTEMPTS):

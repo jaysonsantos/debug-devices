@@ -7,8 +7,9 @@ Firefox is necessary: the phone screen uses WebCodecs H.264. Run it from the rep
     uv run --with playwright python scripts/record_demo.py --fake-phone docs/images/demo-meter.jpg
 
 With `--fake-phone`, the script starts scripts/fake_phone.py with that photo as the snapshot and a separate demo
-MCP server (fake adb, its own state folder, no phone screen). The demo server asks the monitor on port 18766 for
-the webcam, so a monitor must run there. Without `--fake-phone`, the script records the page at `--url` and uses
+MCP server (fake adb, its own state folder, no phone screen). The demo server serves its page on a free port and
+takes the webcam frames of the monitor on port 18766 (the webcam sharing asks that port too), so a monitor must run
+there, with a crop box. Without `--fake-phone`, the script records the page at `--url` and uses
 the real phone of that monitor.
 
 PRIVACY: the webcam can see more than the multimeter. Outside the crop box, the recorder darkens and blurs the
@@ -23,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -44,8 +46,9 @@ FAKE_SERIAL = "fake-phone-0001"
 DEFAULT_URL = "http://127.0.0.1:18766/"
 DEFAULT_WEBP = REPO_ROOT / "docs" / "images" / "monitor-demo.webp"
 DEFAULT_MP4 = REPO_ROOT / "docs" / "images" / "monitor-demo.mp4"
-# The demo server finds the webcam owner on this port and binds a free port for its own page.
-OWNER_UI_PORT = "18766"
+# The demo server binds a free port for its own page (never the user's 18766); it finds the webcam owner on 18766
+# through the webcam sharing.
+ANY_FREE_PORT = 0
 DEMO_FORWARD_PORT = "18865"
 # The multimeter in the 1920x1080 webcam frame (x, y, width, height). The demo page shows only this part sharp.
 DEFAULT_DEMO_CROP = "870,60,470,800"
@@ -148,6 +151,13 @@ def drain(stream: IO[str]) -> None:
         pass
 
 
+def free_port() -> int:
+    """A port that no program uses now, for the demo server's page."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", ANY_FREE_PORT))
+        return probe.getsockname()[1]
+
+
 def wait_for_url(server: subprocess.Popen[str]) -> str:
     assert server.stderr is not None
     deadline = time.monotonic() + SERVER_START_TIMEOUT
@@ -176,7 +186,7 @@ def demo_servers(snapshot: Path, demo_crop: str) -> Iterator[str]:
         environ = os.environ | {"XDG_STATE_HOME": state, "DEBUG_DEVICES_ADB_PATH": str(FAKE_ADB)}
         command = [
             "uv", "run", "--directory", str(REPO_ROOT), "debug-devices-mcp",
-            "--ui-port", OWNER_UI_PORT, "--no-ui-open-browser", "--no-phone-screen",
+            "--ui-port", str(free_port()), "--no-ui-open-browser", "--no-phone-screen",
             "--adb-serial", FAKE_SERIAL, "--local-forward-port", DEMO_FORWARD_PORT,
         ]  # fmt: skip
         # Stdin stays open: the stdio server stops when it closes.

@@ -8,6 +8,7 @@ before the watchdog fires.
 import contextlib
 import logging
 import os
+import signal
 import sys
 import threading
 from collections.abc import Callable
@@ -29,6 +30,17 @@ def _force_exit(exit_function: ExitFunction) -> None:
         with contextlib.suppress(OSError, ValueError):
             stream.flush()
     exit_function(EXIT_CODE)
+
+
+def route_sigterm_to_ctrl_c() -> None:
+    """SIGTERM (for example from the dev reload or a process manager) takes the Ctrl-C path: the event loop cancels
+    the server, so the lifespan cleanup runs (the last save of kept unsafe readings, N33). Without this, SIGTERM ends
+    the process with no cleanup."""
+    signal.signal(signal.SIGTERM, _as_ctrl_c)
+
+
+def _as_ctrl_c(_signum: int, _frame: object) -> None:
+    signal.raise_signal(signal.SIGINT)
 
 
 def arm_exit_watchdog(grace: timedelta = EXIT_GRACE, exit_function: ExitFunction = os._exit) -> threading.Timer:

@@ -12,6 +12,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ContentBlock, TextContent
@@ -165,6 +166,17 @@ SNAPSHOT_RETRY_HINT = (
     "the server retried the snapshot for {seconds:g} s (the camera was not ready): bring the app to the front, or "
     "call phone_connect"
 )
+# Services.aclose at exit: the save of kept unsafe readings and the client close (shielded).
+CLOSE_TIMEOUT = timedelta(seconds=10)
+
+
+@dataclass(frozen=True)
+class SnapshotDeadline:
+    # The event loop time of the deadline, and its length for the messages.
+    at: float
+    seconds: float
+
+
 SNAPSHOT_NO_ANSWER = (
     "the phone did not answer the snapshot in {seconds:g} s: bring the app to the front, or call phone_connect"
 )
@@ -635,18 +647,24 @@ class Services:
         status = await self.af_mode_sync.ensure(status)
         return await self.markings_sync.ensure(status)
 
-    async def snapshot_when_ready(self) -> Still:
-        """One still. During a camera rebind the app answers 503 camera_not_ready (after its own wait): try again every
-        poll interval until the app start timeout ends (a hard deadline, as in wait_until_ready: it also stops a
+    def snapshot_deadline(self) -> SnapshotDeadline:
+        """One hard deadline for a phone snapshot, its status read and its still: the longer of the app start timeout
+        and the snapshot timeout, so --phone-snapshot-timeout has an effect (N59)."""
+        settings = self.settings
+        seconds = max(settings.app_start_timeout, settings.phone_snapshot_timeout).total_seconds()
+        return SnapshotDeadline(at=asyncio.get_running_loop().time() + seconds, seconds=seconds)
+
+    async def when_camera_ready[T](self, call: Callable[[], Awaitable[T]], deadline: SnapshotDeadline) -> T:
+        """Call the app. During a camera rebind or the app start, it answers 503 camera_not_ready (after its own wait):
+        try again every poll interval until the deadline (a hard deadline, as in wait_until_ready: it also stops a
         request that is still running), then raise that error with the retry time and a hint. Other errors do not
-        retry (N45)."""
-        seconds = self.settings.app_start_timeout.total_seconds()
+        retry (N45, N62)."""
         last: PhoneApiError | None = None
         try:
-            async with asyncio.timeout(seconds):
+            async with asyncio.timeout_at(deadline.at):
                 while True:
                     try:
-                        return await self.phone.snapshot()
+                        return await call()
                     except PhoneApiError as exc:
                         if exc.error.error != ApiErrorCode.CAMERA_NOT_READY:
                             raise
@@ -654,20 +672,26 @@ class Services:
                     await asyncio.sleep(self.settings.poll_interval.total_seconds())
         except TimeoutError:
             if last is None:
-                raise PhoneError(SNAPSHOT_NO_ANSWER.format(seconds=seconds)) from None
-            message = f"{last.error.message}; {SNAPSHOT_RETRY_HINT.format(seconds=seconds)}"
+                raise PhoneError(SNAPSHOT_NO_ANSWER.format(seconds=deadline.seconds)) from None
+            message = f"{last.error.message}; {SNAPSHOT_RETRY_HINT.format(seconds=deadline.seconds)}"
             raise PhoneApiError(last.status, last.error.model_copy(update={"message": message})) from None
+
+    async def snapshot_when_ready(self) -> Still:
+        """One still, with its own snapshot deadline (when_camera_ready)."""
+        return await self.when_camera_ready(self.phone.snapshot, self.snapshot_deadline())
 
     async def phone_snapshot(self) -> tuple[bytes, ImageTransform]:
         """One phone still, shown like the monitor preview: turned by the remaining turn, then the user's flips.
 
         The still's `X-Rotation-Degrees` header gives its rotation; an older app without it: the status read just
-        before (orientation.py has the geometry).
+        before (orientation.py has the geometry). The status read and the still share one deadline, and both retry a
+        503 camera_not_ready (the app start state, a camera rebind).
         """
-        status = await self.phone.status()
+        deadline = self.snapshot_deadline()
+        status = await self.when_camera_ready(self.phone.status, deadline)
         self.seen_status(status)
         await self.check_app_start(status)
-        still = await self.snapshot_when_ready()
+        still = await self.when_camera_ready(self.phone.snapshot, deadline)
         # The still's own headers (C12 of QA round 4): the phone can turn, or the app restart, after the status.
         if still.app_start_id is not None and still.app_start_id != status.app_start_id:
             status = status.model_copy(update={"app_start_id": still.app_start_id})
@@ -741,10 +765,17 @@ class Services:
         )
 
     async def aclose(self) -> None:
-        # An unsafe reading that this server could not save yet (the lock was busy) gets one more try (N33).
-        await self.bench.save_unsaved_at_exit()
-        await self.phone.aclose()
-        await self.vision.aclose()
+        """At exit. The MCP shutdown (Ctrl-C, SIGTERM) cancels the lifespan, so this runs shielded, with a limit (as
+        Monitor.stop), and the clients always close (N57)."""
+        with anyio.move_on_after(CLOSE_TIMEOUT.total_seconds(), shield=True):
+            try:
+                # An unsafe reading that this server could not save yet (the lock was busy) gets one more try (N33).
+                await self.bench.save_unsaved_at_exit()
+            finally:
+                try:
+                    await self.phone.aclose()
+                finally:
+                    await self.vision.aclose()
 
 
 @contextmanager
@@ -1320,23 +1351,29 @@ PHOTO_LATE_LIMIT = timedelta(seconds=5)
 BENCH_MEASURE_NOTE = (
     "The meter value and the photo belong together when `warning` is empty: name both capture ids "
     "(meter.capture_id, photo.capture_id) when you report the value and where the probes touch. When the photo comes "
-    f"more than {PHOTO_LATE_LIMIT.total_seconds():g} s after the last meter frame (for example after a snapshot "
-    'retry), `warning` says so: then measure again. Only a meter status "confirmed" is a measurement.'
+    f"more than {PHOTO_LATE_LIMIT.total_seconds():g} s after the last meter frame or before the first one (for "
+    "example after a snapshot retry, or a slow webcam start), `warning` says so: then measure again. Only a meter "
+    'status "confirmed" is a measurement.'
 )
 
 
 def photo_delay_warning(meter: MeterResult, photo: SnapshotInfo, limit: timedelta) -> str | None:
-    """A warning when the photo comes more than `limit` after the last meter frame, else None."""
-    times = [frame.captured_at for frame in meter.frames] or [meter.captured_at]
-    last = max((time for time in times if time is not None), default=None)
-    if photo.captured_at is None or last is None:
+    """A warning when the photo comes more than `limit` after the last meter frame, or more than `limit` before the
+    first one (for example a slow webcam start, N60), else None."""
+    times = [time for time in [frame.captured_at for frame in meter.frames] or [meter.captured_at] if time]
+    if photo.captured_at is None or not times:
         return None
-    late = (photo.captured_at - last).total_seconds()
-    if late <= limit.total_seconds():
+    late = (photo.captured_at - max(times)).total_seconds()
+    early = (min(times) - photo.captured_at).total_seconds()
+    if late > limit.total_seconds():
+        when = f"{late:.1f} s after the last meter frame"
+    elif early > limit.total_seconds():
+        when = f"{early:.1f} s before the first meter frame"
+    else:
         return None
     return (
-        f"the photo came {late:.1f} s after the last meter frame (limit {limit.total_seconds():g} s): the probes can "
-        "have moved, so the value and the photo do not belong together; measure again (bench_measure)"
+        f"the photo came {when} (limit {limit.total_seconds():g} s): the probes can have moved, so the value and the "
+        "photo do not belong together; measure again (bench_measure)"
     )
 
 
@@ -1432,12 +1469,15 @@ def build_server(
                 await monitor.start()
             yield
         finally:
-            expiry.cancel()
-            if monitor is not None:
-                await monitor.stop()
-            await services.aclose()
-            if after_stop is not None:
-                after_stop()
+            try:
+                expiry.cancel()
+                if monitor is not None:
+                    await monitor.stop()
+                await services.aclose()
+            finally:
+                # The exit watchdog (shutdown.py) runs also when the cleanup fails (N57).
+                if after_stop is not None:
+                    after_stop()
 
     instructions_file = services.settings.instructions_file
     instructions = server_instructions(instructions_file, TOOL_GUIDE)

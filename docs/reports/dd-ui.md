@@ -1881,3 +1881,20 @@ Base: `3a2fd23`. No "N44" is in my files (the rename is for dd-mcp and dd-androi
   - a stale port (a real local socket that accepts and never answers): the lookup ends within 2 s with a probe timeout of 0.3 s, while the webcam timeout is 20 s.
 - `test_remote_ports.py`: the owner in these tests has a crop box now; the fake also records the asked paths.
 - `uv run pytest`: 1092 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 48: QA round 14 (dd-ui part)
+
+Base: `2e6793c`.
+
+### What I did
+
+1. **N55, the short probe only for the other ports**: `RemoteMonitor._whoami` uses `remote.PROBE_TIMEOUT` (2 s) only for a port that is not the own port. The own port keeps the client timeout, as before round 13. So the primary lookup, `_other_monitor_runs`, the forwarder, and the remote screen (all only the own port) find a busy primary again. The webcam sharing keeps the short probe for the other ports.
+2. **N56, `scripts/record_demo.py`**: the demo server binds a free port for its own page (`free_port()`, as its comment said), never 18766. It still gets the webcam frames of the monitor on 18766 through the webcam sharing (it asks the default port), so that monitor must run and have a crop box (N51). The docstring says so. `DEFAULT_URL` (18766) stays: it is for recording the user's own page without `--fake-phone`.
+3. **`test_ui_app.py`** (`test_build_monitor_takes_over_the_webcam_and_the_model`): the settings use a free port (`conftest.free_port()`, shared now with `test_qa_round13.py`), not 18766.
+- `mcp/README.md`: the 2 s probe is only for the other page ports, each stale port adds at most 2 s to a webcam lookup (the wording of the Round 13 check), and the own port keeps the normal timeout.
+
+### Tests
+
+- New `mcp/tests/test_qa_round14.py` (2 tests, a real local HTTP responder that answers `/api/whoami` after 0.5 s, and a probe of 0.2 s): on the own port (the primary lookup) it is found; as another port of the webcam sharing, the probe cuts it.
+- `scripts/record_demo.py` imports and `free_port()` gives a port that is not 18766. I did not record a demo: that needs the real webcam and the running monitor.
+- `uv run pytest`: 1096 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

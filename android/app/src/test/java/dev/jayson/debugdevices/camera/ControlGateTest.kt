@@ -7,9 +7,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -183,6 +185,62 @@ class ControlGateTest {
         mutex.late = false
         assertFalse(mutex.isLocked)
         assertEquals(1, gate.control { 1 })
+    }
+
+    @Test
+    fun `a cancel before the snapshot does not leak the lock (N61)`() = runTest {
+        val mutex = Mutex()
+        val gate = ControlGate(mutex).apply { start {} }
+        val snapshot = launch {
+            // The call is cancelled already: lock() still takes the free lock, then the wait throws.
+            cancel()
+            gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) { STILL }
+        }
+        snapshot.join()
+        assertTrue(snapshot.isCancelled)
+        assertFalse(mutex.isLocked)
+        assertEquals(1, gate.control { 1 })
+    }
+
+    @Test
+    fun `a cancel right after the lock does not leak the lock (N61)`() = runTest {
+        val mutex = LateMutex(backgroundScope, SLOW_CHANGE_MILLIS)
+        val gate = ControlGate(mutex).apply { start {} }
+        mutex.late = true
+        val snapshot = launch { gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) { STILL } }
+        // The snapshot has the lock, and lock() has not returned yet.
+        advanceTimeBy(SLOW_CHANGE_MILLIS / 2)
+        assertTrue(mutex.isLocked)
+        snapshot.cancel()
+        snapshot.join()
+        mutex.late = false
+        assertTrue(snapshot.isCancelled)
+        assertFalse(mutex.isLocked)
+        assertEquals(1, gate.control { 1 })
+    }
+
+    @Test
+    fun `a cancel during the wait keeps the lock of the running change (N61)`() = runTest {
+        val mutex = Mutex()
+        val gate = ControlGate(mutex).apply { start {} }
+        var changeDone = false
+        val change = launch {
+            gate.control {
+                delay(SLOW_CHANGE_MILLIS)
+                changeDone = true
+            }
+        }
+        runCurrent()
+        val snapshot = launch { gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) { STILL } }
+        runCurrent()
+        snapshot.cancel()
+        snapshot.join()
+        // The cancelled snapshot never had the lock: the change still owns it and ends normally.
+        assertTrue(mutex.isLocked)
+        change.join()
+        assertTrue(changeDone)
+        assertFalse(mutex.isLocked)
+        assertEquals(STILL, gate.snapshot(Constants.Snapshot.SNAPSHOT_READY_WAIT_MILLIS) { STILL })
     }
 
     private companion object {

@@ -3,7 +3,6 @@ its crop box (N51), and a short probe for a stale page port. Fakes only, except 
 never answers (the stale port)."""
 
 import asyncio
-import socket
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -19,6 +18,7 @@ from debug_devices_mcp.ui.constants import defaults, remote
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
 from debug_devices_mcp.ui.settings import SettingsStore
 
+from .conftest import free_port
 from .test_markings import START
 from .test_remote_ports import DEVICE, PAGE_PORT, BusyWebcam, Monitors, whoami
 from .test_server import FakePhone, make_services
@@ -114,12 +114,6 @@ async def test_multimeter_read_sends_no_frame_without_the_owners_crop(settings: 
 # endregion: N51 frames of another monitor only with its crop
 
 # region: a stale page port
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 async def test_a_stale_page_port_does_not_make_the_lookup_wait(monkeypatch: pytest.MonkeyPatch) -> None:

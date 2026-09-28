@@ -38,19 +38,20 @@ class ControlGate(private val lock: Mutex = Mutex()) {
      */
     suspend fun <T> snapshot(waitMillis: Long, block: suspend () -> T): T {
         checkReady()
-        // N46: the timeout can fire after lock() returned, right before the wait block ends. Then the block result is
-        // lost but the lock is taken: the flag keeps that lock owned by this snapshot, so the finally unlocks it.
+        // The lock can be taken also when the wait does not end normally: N46, the timeout fires after lock()
+        // returned (the wait gives null), and N61, a cancel of the call after lock() returned (the wait throws). The
+        // flag says that this snapshot owns the lock, so the finally unlocks it in every case, and only then.
         var locked = false
-        withTimeoutOrNull(waitMillis) {
-            lock.lock()
-            locked = true
-        }
-        if (!locked) throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_CHANGE_RUNNING)
         try {
+            withTimeoutOrNull(waitMillis) {
+                lock.lock()
+                locked = true
+            }
+            if (!locked) throw ApiException(ErrorCode.CAMERA_NOT_READY, Constants.Messages.CAMERA_CHANGE_RUNNING)
             checkReady()
             return block()
         } finally {
-            lock.unlock()
+            if (locked) lock.unlock()
         }
     }
 

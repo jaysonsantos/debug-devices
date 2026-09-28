@@ -1197,3 +1197,33 @@ I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.
 ### Checks
 
 - `uv run pytest`: 1094 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## QA round 14 (dd-mcp section of `docs/briefs/qa-round14.md`)
+
+### What I did
+
+- N57 and N58 (the exit path):
+  - `BenchStateStore.save_unsaved_at_exit` runs shielded, with a limit (`anyio.move_on_after(EXIT_SAVE_TIMEOUT, shield=True)`, the lock wait plus 1 s), as `Monitor.stop` does. It catches `OSError` as well as `ToolError` and logs it. It never raises.
+  - `Services.aclose` runs shielded, with a limit (`CLOSE_TIMEOUT`, 10 s). It always closes the phone and vision clients (nested `finally`).
+  - The lifespan always calls `after_stop` (the exit watchdog) in a `finally`.
+- N33, SIGTERM: `shutdown.route_sigterm_to_ctrl_c` (new; `__main__.py` calls it before the server runs) makes SIGTERM raise SIGINT. So SIGTERM takes the Ctrl-C path of the event loop: the server is cancelled, the lifespan cleanup runs, and the kept reading is saved. This includes the SIGTERM of the dev reload.
+- N59: `Services.snapshot_deadline` is `max(app_start_timeout, phone_snapshot_timeout)`, so `--phone-snapshot-timeout` has an effect again.
+- N62: `Services.when_camera_ready` (new, from `snapshot_when_ready`) retries a 503 `camera_not_ready` under a given deadline and gives the same hint. `phone_snapshot` uses one deadline for the status read and the still, and `bench_measure` uses the same path. A start-state 503 on the status read is now retried, and the final error has "the server retried the snapshot for N s ... bring the app to the front, or call phone_connect".
+- N60: `photo_delay_warning` checks both directions: more than 5 s after the last meter frame, or more than 5 s before the first one (a slow webcam start). `BENCH_MEASURE_NOTE` says so.
+- Docs: `mcp/README.md` ("Bench measure", "Snapshot during a camera change", and the save at exit).
+
+### Tests
+
+- `mcp/tests/test_exit_save.py` (new; all through the server lifespan, with one kept unsafe reading):
+  - Ctrl-C (a cancelled scope): the reading is in the file, the phone and vision clients are closed, and `after_stop` runs.
+  - A read-only state folder: a warning with "Permission denied" in the log; the clients are closed and `after_stop` runs. The test is skipped for root.
+  - SIGTERM sent to the process with `route_sigterm_to_ctrl_c`: `KeyboardInterrupt` as with Ctrl-C, and the reading is saved, the clients are closed, and `after_stop` runs.
+- `mcp/tests/test_snapshot_retry.py`:
+  - N59: a snapshot of 0.2 s with `app_start_timeout` 50 ms and `phone_snapshot_timeout` 2 s gives the still.
+  - N62: two start-state 503 answers on the status read, then 200, work for `phone_snapshot` and `bench_measure`. A start-state 503 until the deadline gives the app's message and the hint.
+  - N60: a photo 10 s before the first frame gets a warning, 4 s before gets none, and 6 s after gets a warning.
+  - The earlier deadline tests now set both timeouts (`short_deadline`).
+
+### Checks
+
+- `uv run pytest`: 1103 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

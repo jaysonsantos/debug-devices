@@ -85,10 +85,11 @@ class RemoteMonitor:
         return list(dict.fromkeys([self.port, *others]))
 
     async def _whoami(self, port: int) -> MonitorIdentity | None:
+        # The short probe only for the other ports of the webcam sharing (N55 of QA round 13): the own port (the
+        # primary lookup, the forwarder, the remote screen) keeps the client timeout, so a busy primary is still found.
+        timeout = remote.PROBE_TIMEOUT.total_seconds() if port != self.port else httpx.USE_CLIENT_DEFAULT
         try:
-            response = await self._http.get(
-                f"{self._url(port)}{remote.WHOAMI_PATH}", timeout=remote.PROBE_TIMEOUT.total_seconds()
-            )
+            response = await self._http.get(f"{self._url(port)}{remote.WHOAMI_PATH}", timeout=timeout)
             identity = MonitorIdentity.model_validate_json(response.content) if response.status_code == OK else None
         except httpx.HTTPError, ValidationError:
             return None

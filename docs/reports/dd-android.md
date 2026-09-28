@@ -682,6 +682,24 @@ Brief: `docs/briefs/qa-round13.md`, dd-android-2. QA: `docs/reports/dd-qa.md`, "
 - Device check on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked, my own forward `tcp:18775`): 3 app starts. In each, after the first status 200, I sent `POST /v1/camera {"in_sensor_zoom":true}` and a snapshot 50 ms later. All 3 snapshots gave 200 (2.0-2.7 s). In these runs the snapshot took the lock first, and the new bind waited for it. The log of run 3 shows the capture from 27.916 to 29.203, then the new bind (709 ms) ended at 30.039. The round N45 check showed the other order (the snapshot waited for the new bind). No crash. End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward. The MCP forward `tcp:18765` stays.
 - Not in this brief, not changed: the notes (a), (b), and (c) in the N45 row of the Round 12 check (a total failure of a new bind, a pause during a new bind, a pause during `takePicture`).
 
+### Round: QA round 14 (N61)
+
+Brief: `docs/briefs/qa-round14.md`, dd-android-2. QA: `docs/reports/dd-qa.md`, "Round 13: check", N61. Base commit: `2e6793c`.
+
+- **N61 (a cancel of the call can leak the camera lock):** in `ControlGate.snapshot`, one `try`/`finally` now contains the wait and the snapshot block. The `finally` unlocks only when the flag `locked` is set, which happens after `lock()` returns. This covers these cases:
+  - N46: the own timeout fires after `lock()` returned (the wait gives `null`). The snapshot owns the lock and runs.
+  - N61: the call is cancelled after `lock()` returned (the wait throws `JobCancellationException`). The `finally` unlocks, then the cancel goes to the caller. Before, the code never reached its `try`/`finally`, and the lock stayed taken.
+  - A cancel while the snapshot waits for a change: `Mutex.lock` throws without the lock, the flag stays false, and the `finally` does not unlock. The running change keeps its lock.
+- New unit tests in `ControlGateTest`, 192 in total, all pass (`--no-daemon`):
+  - A cancel before the snapshot: the job is cancelled before `gate.snapshot`, so `lock()` takes the free lock (fast path) and the wait throws. The lock is free after it, and a change runs.
+  - A cancel right after the lock: the test mutex has the lock, and `lock()` has not returned yet (a pause without a cancel check). The job is cancelled in that time. The lock is free after it, and a change runs.
+  - A cancel during the wait: a change holds the lock, and the snapshot job is cancelled while it waits. The change still owns the lock and ends normally. Then a snapshot runs.
+  - With the committed code (`2e6793c`), the first two tests fail. With a wrong fix that unlocks without the flag, the third test fails (and the N45 503 test too). The server and gate tests passed 6 of 6 repeated runs.
+- Lint: ktlint and `prek run --files` pass on the changed files, and the file hashes are the same before and after.
+- Device smoke test on the S22 (page-selected `192.0.2.79:33597`, connected and unlocked, my own forward `tcp:18775`): I aborted a snapshot on the client side after 0.1, 0.3, 0.6, 1.0, and 1.5 s (`curl -m`). Each time, `POST /v1/rotation {"degrees":90}` and `{"auto":true}` right after it gave 200 (0.05-1.23 s), and a full snapshot after that gave 200. No crash and no "Unexpected error" line.
+  - Limit: the rotation waited up to 1.2 s after an abort, so the aborted capture probably ran to its end: this test does not show that Ktor cancels the call on a client abort. It checks only that a client abort does not block the camera. The unit tests cover the N61 path.
+  - End state: no boxes, zoom 1x, torch off, flips false, rotation auto. I removed my forward. The MCP forward `tcp:18765` stays.
+
 ## What works
 
 Build and unit tests (63 tests: `ZoomLogicTest` 16, `ControlGateTest` 4, `ApiServerTest` 29 with a fake camera, `OrientationLogicTest` 10, `RotationStateTest` 4), from `android/`:
