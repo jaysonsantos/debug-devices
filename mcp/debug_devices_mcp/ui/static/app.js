@@ -707,6 +707,8 @@ function applySettings(view) {
   $("settings-file").textContent = view.settings_file;
   drawCrop();
   showViewRotation();
+  // A new or cleared crop box: the meter picture takes its ratio, or shows the note.
+  if (meterPipShown()) placeMeterPip();
 }
 
 async function saveSettings(saved) {
@@ -875,6 +877,7 @@ function setupFullscreen() {
   setupSnapshotZoom();
   setupFlips();
   setupLiveZoom();
+  setupMeterPip();
   setupFocusTap();
   setupHighlights();
   setupMarkings();
@@ -1079,6 +1082,222 @@ function setupFlips() {
 }
 
 // endregion: snapshot flips
+
+// region: meter picture (phone full screen)
+
+// In the phone full screen view, a panel shows the live meter: only the webcam crop box, drawn from the webcam stream
+// that the page has already (no new stream), and the last meter value that the page knows (no vision call). The user
+// moves it, resizes it, and hides it; the page remembers that per browser. Nothing on it reaches the phone view.
+const METER_PIP_STORAGE_KEY = "debug-devices.meter-pip";
+const METER_PIP_DRAW_MS = 100;
+const METER_PIP_MARGIN_PX = 16;
+// The width, as a part of the screen width: the default, the largest, and the smallest in pixels.
+const METER_PIP_DEFAULT_WIDTH = 0.25;
+const METER_PIP_MAX_WIDTH = 0.6;
+const METER_PIP_MIN_WIDTH_PX = 140;
+// The picture height at most, as a part of the screen height.
+const METER_PIP_MAX_PICTURE_HEIGHT = 0.6;
+const METER_PIP_NO_VALUE = "no meter value yet";
+const meterPip = { layout: null, visible: true, timer: null, drag: null, last: null };
+
+function loadMeterPip() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(METER_PIP_STORAGE_KEY) ?? "null");
+    if (!saved || typeof saved !== "object") return;
+    meterPip.visible = saved.visible !== false;
+    const { left, top, width } = saved;
+    if ([left, top, width].every(Number.isFinite)) meterPip.layout = { left, top, width };
+  } catch {
+    // No storage (a private window, blocked site data): the default place.
+  }
+}
+
+function saveMeterPip() {
+  try {
+    localStorage.setItem(METER_PIP_STORAGE_KEY, JSON.stringify({ ...meterPip.layout, visible: meterPip.visible }));
+  } catch {
+    // No storage: the choice lasts until a reload.
+  }
+}
+
+function meterPipShown() {
+  return meterPip.visible && document.fullscreenElement === $("phone-view");
+}
+
+function cropRatio() {
+  const crop = state.crop;
+  return crop?.width && crop?.height ? crop.width / crop.height : null;
+}
+
+const clampTo = (value, low, high) => Math.min(Math.max(value, low), Math.max(low, high));
+
+// Place and size the panel from the layout (parts of the screen), inside the screen. Resize keeps the crop ratio.
+function placeMeterPip() {
+  const panel = $("meter-pip");
+  const canvas = $("meter-pip-canvas");
+  const view = $("phone-view").getBoundingClientRect();
+  const ratio = cropRatio();
+  let width = clampTo(
+    (meterPip.layout?.width ?? METER_PIP_DEFAULT_WIDTH) * view.width,
+    METER_PIP_MIN_WIDTH_PX,
+    METER_PIP_MAX_WIDTH * view.width,
+  );
+  if (ratio) width = Math.max(METER_PIP_MIN_WIDTH_PX, Math.min(width, METER_PIP_MAX_PICTURE_HEIGHT * view.height * ratio));
+  panel.style.width = `${width}px`;
+  canvas.hidden = !ratio;
+  $("meter-pip-none").hidden = Boolean(ratio);
+  if (ratio) {
+    canvas.style.aspectRatio = `${state.crop.width} / ${state.crop.height}`;
+    const scale = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(canvas.clientWidth * scale));
+    canvas.height = Math.max(1, Math.round((canvas.clientWidth / ratio) * scale));
+  }
+  const size = { width: panel.offsetWidth, height: panel.offsetHeight };
+  const left = meterPip.layout ? meterPip.layout.left * view.width : view.width - size.width - METER_PIP_MARGIN_PX;
+  const top = meterPip.layout ? meterPip.layout.top * view.height : view.height - size.height - METER_PIP_MARGIN_PX;
+  const x = clampTo(left, 0, view.width - size.width);
+  const y = clampTo(top, 0, view.height - size.height);
+  panel.style.left = `${x}px`;
+  panel.style.top = `${y}px`;
+  meterPip.layout = { left: x / view.width, top: y / view.height, width: width / view.width };
+  drawMeterPip();
+}
+
+// Only the crop box of the current webcam frame goes into the canvas.
+function drawMeterPip() {
+  const img = $("webcam");
+  const crop = state.crop;
+  const canvas = $("meter-pip-canvas");
+  if (!crop || canvas.hidden || document.hidden || !img.naturalWidth) return;
+  const scale = img.naturalWidth / (state.frame.width || img.naturalWidth);
+  try {
+    canvas
+      .getContext("2d")
+      .drawImage(img, crop.x * scale, crop.y * scale, crop.width * scale, crop.height * scale, 0, 0, canvas.width, canvas.height);
+  } catch {
+    // A broken frame (the stream restarts): the next one draws.
+  }
+}
+
+function updateMeterPip() {
+  const shown = meterPipShown();
+  $("meter-pip").hidden = !shown;
+  for (const button of document.querySelectorAll("[data-meter-pip]")) {
+    button.setAttribute("aria-pressed", String(meterPip.visible));
+  }
+  clearInterval(meterPip.timer);
+  meterPip.timer = null;
+  if (!shown) return;
+  placeMeterPip();
+  meterPip.timer = setInterval(drawMeterPip, METER_PIP_DRAW_MS);
+}
+
+function setMeterPipVisible(visible) {
+  meterPip.visible = visible;
+  saveMeterPip();
+  updateMeterPip();
+}
+
+// The last meter value that the page knows: a multimeter_read result or a staged capture, the newest one.
+function showMeterValue(text, status, at) {
+  const time = new Date(at);
+  if (Number.isNaN(time.getTime()) || (meterPip.last && time <= meterPip.last)) return;
+  meterPip.last = time;
+  $("meter-pip-value").textContent = `${text}${status ? ` (${status})` : ""} · ${formatTime(at)}`;
+  // A longer text can make the panel higher: keep it inside the screen.
+  if (meterPipShown()) placeMeterPip();
+}
+
+function meterPipCall(call) {
+  const reading = call.details?.reading;
+  if (call.tool !== MULTIMETER_TOOL || call.status !== "ok" || !reading) return;
+  const text = reading.readable ? `${reading.display_text} ${reading.unit}`.trim() : "not readable";
+  showMeterValue(text, reading.status, reading.captured_at ?? call.started_at);
+}
+
+function meterPipStaged(list) {
+  for (const capture of list.captures ?? []) {
+    if (capture.meter_text) showMeterValue(capture.meter_text, capture.meter_status, capture.captured_at);
+  }
+}
+
+// Space or C in full screen: the page flash and the staged message are outside the full screen view.
+function meterPipFlash() {
+  const panel = $("meter-pip");
+  panel.classList.remove("flash");
+  void panel.offsetWidth; // restart the animation
+  panel.classList.add("flash");
+}
+
+function meterPipStatus(text, isError) {
+  const status = $("meter-pip-status");
+  status.textContent = text;
+  status.hidden = !text;
+  status.classList.toggle("error", isError);
+  if (meterPipShown()) placeMeterPip();
+}
+
+function startMeterPipDrag(event) {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  const panel = $("meter-pip");
+  const rect = panel.getBoundingClientRect();
+  const resize = Boolean(event.target.closest(".meter-pip-resize"));
+  meterPip.drag = { resize, x: event.clientX, y: event.clientY, rect };
+  panel.classList.add("dragging");
+  panel.setPointerCapture(event.pointerId);
+  event.preventDefault();
+}
+
+function moveMeterPipDrag(event) {
+  const drag = meterPip.drag;
+  if (!drag) return;
+  const view = $("phone-view").getBoundingClientRect();
+  const dx = event.clientX - drag.x;
+  const dy = event.clientY - drag.y;
+  const left = (drag.rect.left - view.left) / view.width;
+  const top = (drag.rect.top - view.top) / view.height;
+  if (drag.resize) {
+    // The top left corner stays; the larger move (the height move in width units) sets the new width.
+    const byHeight = dy * (drag.rect.width / drag.rect.height);
+    const grow = Math.abs(dx) >= Math.abs(byHeight) ? dx : byHeight;
+    meterPip.layout = { left, top, width: (drag.rect.width + grow) / view.width };
+  } else {
+    meterPip.layout = { ...meterPip.layout, left: left + dx / view.width, top: top + dy / view.height };
+  }
+  placeMeterPip();
+}
+
+function endMeterPipDrag() {
+  if (!meterPip.drag) return;
+  meterPip.drag = null;
+  $("meter-pip").classList.remove("dragging");
+  saveMeterPip();
+}
+
+function setupMeterPip() {
+  const panel = $("meter-pip");
+  loadMeterPip();
+  // Nothing on the panel reaches the phone view: no focus tap, no wheel zoom, no double-click full screen.
+  for (const type of ["pointerdown", "click", "dblclick", "wheel", "contextmenu"]) {
+    panel.addEventListener(type, (event) => event.stopPropagation());
+  }
+  panel.addEventListener("wheel", (event) => event.preventDefault(), { passive: false });
+  panel.addEventListener("pointerdown", startMeterPipDrag);
+  panel.addEventListener("pointermove", moveMeterPipDrag);
+  panel.addEventListener("pointerup", endMeterPipDrag);
+  panel.addEventListener("pointercancel", endMeterPipDrag);
+  $("meter-pip-hide").addEventListener("click", () => setMeterPipVisible(false));
+  for (const button of document.querySelectorAll("[data-meter-pip]")) {
+    button.addEventListener("click", () => setMeterPipVisible(!meterPip.visible));
+  }
+  document.addEventListener("fullscreenchange", updateMeterPip);
+  window.addEventListener("resize", () => {
+    if (meterPipShown()) placeMeterPip();
+  });
+  updateMeterPip();
+}
+
+// endregion: meter picture (phone full screen)
 
 // region: live zoom
 
@@ -1936,6 +2155,7 @@ function stagedFlash() {
   staged.flashTimer = setTimeout(() => {
     flash.hidden = true;
   }, STAGED_FLASH_MS);
+  meterPipFlash();
 }
 
 function stagedMessage(text, isError = false) {
@@ -1943,6 +2163,7 @@ function stagedMessage(text, isError = false) {
   message.textContent = text;
   message.classList.toggle("error", isError);
   if (text) $("staged-panel").hidden = false;
+  meterPipStatus(text, isError);
 }
 
 function newRequestId() {
@@ -2031,6 +2252,7 @@ function stagedItem(capture) {
 
 function showStaged(list) {
   const captures = list.captures ?? [];
+  meterPipStaged(list);
   $("staged-count").textContent = `${captures.length} staged`;
   $("staged-count").classList.toggle("mcp", captures.length > 0);
   $("staged-panel").hidden = captures.length === 0 && !$("staged-message").textContent;
@@ -2314,6 +2536,7 @@ function connectEvents() {
     renderCall(call);
     boardCallFinished(call);
     showAnnotated(call);
+    meterPipCall(call);
   });
   // After a reconnect, another code version means a new server (dev reload): load the new page.
   source.addEventListener("version", (event) => {
@@ -2335,6 +2558,7 @@ async function loadState() {
   for (const call of view.calls) {
     renderCall(call);
     showAnnotated(call);
+    meterPipCall(call);
   }
 }
 

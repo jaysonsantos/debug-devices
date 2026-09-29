@@ -2183,3 +2183,49 @@ The proxy works on TCP:
 - `uv run pytest`: 1153 passed, 1 skipped (no Python change). ruff: pass. `prek run --files` on `app.js` and `mcp/README.md`: pass.
 
 No commit.
+
+## Round 57: the meter picture in the phone full screen view (docs/briefs/fullscreen-meter-pip.md)
+
+### What I did
+
+- `index.html`: a panel `#meter-pip` inside `#phone-view`. In full screen, the browser shows only that element, so the panel must be inside it. The panel has a bar with "Meter" and ×, a canvas, the no-crop note, the value line, a status line, and a corner handle. The full-screen bar has a new "Meter" button (`aria-pressed`).
+- `app.js`, new region "meter picture (phone full screen)":
+  - The panel shows only when the phone view is in full screen and the user did not hide it.
+  - The picture: every 100 ms, `drawImage` copies only the crop box of the webcam `<img>` (the stream that the page shows already) into the canvas. There is no new server stream and no vision call. The canvas has the crop ratio and the device pixel ratio. It does not draw in a hidden tab (the hidden-tab pause of round 54 stays). The full frame is never drawn.
+  - Without a crop box: the canvas is hidden, and the note "Set the crop box on the webcam panel to see the meter here." shows. A crop change on the page (`applySettings`) sizes the panel again.
+  - The value line shows the newest value that the page knows, with its status and time, for example "4.98 V (confirmed) · 22:06:01". The sources are a `multimeter_read` call event (`details.reading`, also the calls in `/api/state` at load) and the `staged` list (`meter_text`, `captured_at`). An older value never replaces a newer one.
+  - Move: pointer events with pointer capture (mouse or finger; `touch-action: none`). Resize: the bottom right handle. The top left corner stays, and the larger move sets the new width. The picture keeps the crop ratio.
+  - Limits (constants): the width is 140 px to 60 % of the screen width, and the picture height is at most 60 % of the screen height. The panel always stays inside the screen, also when its text grows and after a window resize. The first place is the bottom right corner (16 px margin, 25 % of the screen width).
+  - Memory: `localStorage` key `debug-devices.meter-pip` keeps `{left, top, width}` (parts of the screen) and `visible`. Each read and write is in try/catch, so the page works without storage.
+  - Isolation: on the panel, `pointerdown`, `click`, `dblclick`, `wheel` (also `preventDefault`), and `contextmenu` stop there. So a drag or click never focuses the phone, a wheel never zooms, and a double-click never leaves full screen.
+  - The keys `Space` and `C` capture as before. In full screen, the page flash and the staged message are outside the view, so the panel flashes and its status line shows "sending…" or the error.
+- `style.css`: the panel styles (dark, over the picture, `z-index` 4), the handle, and the flash.
+- `mcp/README.md`: a "Meter picture in the full-screen phone view" item.
+
+### Test (Playwright, Chromium (local build 1194) and Firefox, headless)
+
+The setup is a fake webcam stream with green frames and a magenta box exactly at the crop box (200,40,100,50; ratio 2.0), a fake phone, a private state folder, and port 0. The monitor has no webcam lookup of other pages, so nothing asked 18766. The phone view had a fake screen frame, so a click on it can focus.
+
+| Check | Chromium | Firefox |
+|---|---|---|
+| Panel outside full screen | hidden | hidden |
+| Default place (full screen 1400×900 in Chromium, 1366×768 in headless Firefox) | x 1034, y 660, w 350 (25 %) | x 1008, y 533, w 342 (25 %) |
+| Canvas size and ratio | 332×166, 2.0 | 324×162, 2.0 |
+| Canvas pixels at 5 points | all magenta (219-220, 0-1, 218-224): only the crop box | the same |
+| Control: a click on the phone picture | 1 focus request | 1 |
+| Drag by (-600, -400), then to the far top left | moves, then clamped to (0, 0) | the same |
+| Focus requests from the drags and a double-click on the panel | 0; still in full screen | 0; still in full screen |
+| Wheel on the panel / on the phone picture | 0 / 1 zoom request | 0 / 1 |
+| Resize +120 px | 350 → 470 wide; ratio 2.0 | 342 → 462; 2.0 |
+| Resize to the screen corner | 840 (60 %), inside the screen | 820 (60 %), inside |
+| Resize to the top left | 140 (the minimum) | 140 |
+| Space, then C in full screen | "2 staged"; value "4.98 V (confirmed) · <time>"; still full screen | the same |
+| Reload, full screen again | the same x, y, and width | the same |
+| × | panel hidden; bar button `aria-pressed` false | the same |
+| Reload after × | still hidden; the bar button shows it again | the same |
+| No crop box (the page clears it) | canvas hidden, note shown | the same |
+
+- One test note: the first run had two errors in my test script, not in the page. A click was outside the phone picture, and a drag went outside the screen. I fixed the script.
+- `uv run pytest`: 1153 passed, 1 skipped (no Python change). ruff: pass. `prek run --files` on `app.js`, `index.html`, `style.css`, and `mcp/README.md`: pass.
+
+No commit.
