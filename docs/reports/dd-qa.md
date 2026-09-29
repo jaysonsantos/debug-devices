@@ -2086,3 +2086,158 @@ N74, N83, N87, N96, and the older backlog stay as written there.
 1. Commit round 55.
 2. The user checks that the frpc tunnel has its own login.
 3. The backlog when there is time (N98 is a small change in `stagedCapture`).
+
+## Round 58: check
+
+Date: 2026-09-29. A short check. Scope: dd-ui round 58 (`docs/briefs/fullscreen-meter-pip.md`; `docs/reports/dd-ui.md` "Round 58"): the new `GET /api/webcam/crop.mjpg`, the meter panel in the phone full-screen view, and the pause of the full webcam stream in full screen. The working tree on commit `68cdd8b` with the uncommitted changes; `main` is equal to `origin/main`. dd-ui had stopped editing. No Gradle run and no phone run. My probes used the test fakes (a fake ffmpeg process that I feed), ASGI requests (no open port), and tmp folders. The browser tests ran in a helper agent in a private network namespace (`unshare -rn`), with a fake ffmpeg webcam (a moving color box at the crop area), a copy of the package without `.env`, and `scripts/fake_adb.py`; inside that namespace, its own owner server used port 18766. Nothing contacted the real 18765, 18766, or the user's frpc tunnel. The repo `bench-state.json` was not used. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1158 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (333 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. My probes
+
+| Item | Result |
+|---|---|
+| Open and close cycles | 300 cycles of `crop_body` (2 frames each, then `aclose`): the viewer count is 0 after them; the thread count went from 1 to 2 once (the worker thread of `asyncio.to_thread`), not per cycle; the memory grew 11.6 KiB from cycle 50 to cycle 300; no task was left but the stream and my feeder. No leak. |
+| The Host rule on the new route (a read) | Host `127.0.0.1` and `localhost`: passes (409 here: no crop box); `evil.example` and `bench.example.org.evil.example`: 403; `bench.example.org`: 403 without `--ui-allowed-origin`, passes with it. A cross-site Origin does not matter for a read. As with every read (N95), a tunnel that rewrites the Host to `127.0.0.1` reaches this stream; it sends only the crop box. |
+| The owner's cropped frame when its crop box is cleared during the request | **The whole frame.** See N99. |
+
+### 3. The browser tests (helper agent: headless Chromium 141 and Firefox 155, private network namespace, a moving fake webcam)
+
+| Case | Result |
+|---|---|
+| The panel moves | Pass in both browsers: the panel source is `/api/webcam/crop.mjpg` (160x80, ratio 2.0); 19 element screenshots in 3 s show 6 colors; the 5 sample points show only crop colors (no green, white, or black of the whole frame). |
+| Only the crop box (from Python) | Pass: 10 parts of 160x80, then 10 of 200x100 after a crop change during the stream; after the clear, the stream ended in 93 ms with 0 parts, and no part was 640x480. Without a crop box: 409 with the text, and the webcam did not start. The 404 (no stream) cannot happen in the real server (`ui/setup.py` always builds a stream); the unit test covers it. |
+| The full `#webcam` stream pauses | Pass in both browsers: in phone full screen, `#webcam` has no `src` and its connection closes in 0.07-0.11 s (then 0 full-stream connections and 1 crop connection); in snapshot full screen, the same (0.18-0.19 s), and the fake ffmpeg stops 2.4 s later (0 viewers). After full screen, 1 new stream, and the view moves again. |
+| The crop stream stops and starts again | Pass in both browsers for ×, leaving full screen, a hidden tab, and the page's own "Clear crop": the connection closes in 0.03-0.13 s, the fake ffmpeg stops 2.2-3.9 s later (`running=false`, 0 viewers); 0 requests while hidden; after "Clear crop", the note shows and there are 0 crop requests in 10 s (no loop); the panel starts again with 1 request when it shows again. But see N100 for a clear from another page or process. |
+| The Host rule | Pass: `evil.example`, `bench.example.org` (no setting), and `bench.example.org:<port>` get 403; `localhost` 200. A Host-rewriting proxy gets the crop stream (the documented N95 case; only the crop box). |
+| A remote owner (server A on 18766 inside the namespace, server B on another port with the same webcam path) | B used A's frames (its own fake ffmpeg never ran). B's crop stream gave A's 160x80 crop, 6 colors, in both browsers. When A has no crop box: 0 parts, 1 identity request, and 0 frame requests to A. **But a clear of A's crop box during B's stream sent A's whole frame: N99.** |
+
+The helper also stopped everything: 0 processes left, 0 calls to adb, scrcpy, and v4l2-ctl, the package copy equal to the tree, and the git status unchanged.
+
+### 4. New findings
+
+- **N99 (medium; privacy risk: fix now; older than this round, and the new crop stream makes it frequent): a server that uses the webcam of another monitor can get and pass on a whole webcam frame when the owner's crop box is cleared.**
+  - Cause: `SharedWebcam._remote_capture` checks the owner's crop in the identity request, then asks for a frame in a second request (`remote_webcam.py:216-225`). The owner's `frame.jpg?cropped=true` (`ui/routes/webcam.py:114`, `:124-126`) calls `WebcamStream.capture_jpeg`, which returns the whole frame when the crop is `None` (`webcam_stream.py:210-212`). The N89 check after each frame reads the crop of the identity, so it does not see the change either.
+  - My probe (owner only, ASGI): a `cropped=true` request waits for the next frame, the crop box is cleared, the frame comes: 200 with the whole 64x48 frame (a crop is 10x6).
+  - The helper (two real servers): B's `crop.mjpg` sent one whole 640x480 frame of A in 27 of 50 trials of "clear A's crop box during B's stream" (10-140 ms after the clear). Order in each case: B's identity request (crop set), B's frame request, the clear, A's answer 200 with the whole frame. The crop stream asks at 10 frames per second, so the window is large.
+  - Effect: the whole frame (it can show people) goes to B's page (also through a tunnel), and, by the same function, into B's `multimeter_read` or staged capture, which sends it to the vision model (the rule of N51 and N89).
+  - Fix: the owner's `cropped=true` answer must never be a whole frame: when the crop is `None` at crop time, refuse (409). Also, B can refuse a frame whose size is not the owner's crop size.
+- **N100 (medium: fix now): the meter panel keeps showing its last picture, with no note, when its stream ends normally.**
+  - Cause: the page connects again only on the `error` event of the panel image (`app.js:1291-1296`). When the server ends `crop.mjpg` normally (the crop box cleared on another page or by another process, a remote owner that stops or clears its crop box), Chromium gives no event and Firefox gives `load`. The page gets no crop change through its event stream, so `state.crop` stays set.
+  - The helper's case: the panel stays on the last frame with no note; when the crop box comes back, it still does not recover (0 requests in 10 s, 1 color); only Meter off and on, or leaving full screen, starts it again. There is no request loop.
+  - Effect: in full screen, the user can take a still meter picture for the live meter during a measurement.
+  - Fix idea: push the crop box changes over the page event stream (then the page shows the note or connects again), and treat the end of the panel stream like an error (for example, a watchdog that marks the picture as stale and connects again).
+- Note (not a finding): B's page shows the panel only when B itself has a crop box, and it takes the ratio from B's crop, not from the owner's.
+
+### Summary
+
+- Tests: pytest 1158 passed, 1 skipped; prek passes and leaves the tree unchanged (333 file hashes and the git status); MCP stdio 15/15. Nothing contacted the real 18765, 18766, or the tunnel.
+- Round 58 works as briefed on one server: only the crop box leaves, also after a crop change and a clear on the same page; 409 without a crop box; the panel moves in both browsers; the full stream pauses in phone and snapshot full screen and comes back; the viewer count, the hidden tab, and the Host rules are right; no leak in 300 cycles.
+- New: N99 and N100 (both fix now).
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N99 | medium | privacy (a whole webcam frame to a page and to the vision model) | **fix now** | `webcam_stream.py:210-212`, `ui/routes/webcam.py:114`, `:124-126`, `remote_webcam.py:216-225` |
+| N100 | medium | a still meter picture that looks live | **fix now** | `ui/static/app.js:1291-1296`, the page event stream |
+
+N74, N83, N87, N96, and the older backlog stay as written there.
+
+### What to do next
+
+1. Fix N99 on the owner side (never a whole frame for `cropped=true`), and check the frame size on the requester side.
+2. Fix N100: the crop box changes over the event stream, and a reconnect or a stale note when the panel stream ends.
+3. Then a short check: my owner probe, the helper's 6b (50 trials, expect 0), and the panel case of a clear from another page.
+
+## Round 59: check
+
+Date: 2026-09-29. A short check. Scope: dd-ui round 59 (N99, N100; `docs/reports/dd-ui.md` "Round 59"). The working tree on commit `68cdd8b` with the uncommitted changes of rounds 58 and 59; `main` is equal to `origin/main`. dd-ui had stopped editing. No Gradle run and no phone run. My probes used the test fakes, ASGI requests (no open port), and tmp folders. Two helper agents ran in private network namespaces (`unshare -rn`) with fake ffmpeg webcams, fake adb, a fake vision endpoint, and copies of the package without `.env`; inside a namespace, the owner server used port 18766. Nothing contacted the real 18765, 18766, or the user's frpc tunnel. The repo `bench-state.json` was not used. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1165 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (334 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. N99: code and my probe
+
+| Item | Result |
+|---|---|
+| The owner reads the crop one time | `WebcamStream.capture_cropped_jpeg` (`webcam_stream.py`): after the next frame comes, `crop = self.crop` one time; `None` raises `CropMissingError`; that same crop cuts the frame (`crop_jpeg`). It never returns `frame.jpeg`. `frame.jpg?cropped=true` uses it and answers 409 (`ui/routes/webcam.py` `cropped_frame`). |
+| My owner probe (round 58: 200 with the whole 64x48 frame) | Now 409 "no crop box when the frame came (it was cleared): no frame is sent ...". |
+| The requester | `RemoteMonitor.capture_jpeg(crop)` refuses a 409 and a frame larger than the expected crop (`RemoteCropMissingError`). `RemoteCropMissingError` is a `WebcamError`, not a `RemoteUnavailableError`, so `SharedWebcam` does not fall back to its own webcam (only `RemoteUnavailableError` does). |
+| Open and close cycles (again) | 300 cycles: 0 viewers, one worker thread in total, 11.8 KiB. |
+
+### 3. N99 with two real servers (helper agent)
+
+A: the owner on 18766 inside the namespace, a fake ffmpeg (640x480, 10 frames per second), crop box 160x80. B: another port, the same webcam path, its own fake ffmpeg "busy" (it logs each start), no crop box of its own, a fake vision endpoint that records each image. In each trial, A's crop box is cleared at a random moment during B's operation (also inside the frame request windows).
+
+| Path of B | Trials | Whole frames | Refused | Worked (crop size) |
+|---|---|---|---|---|
+| `crop.mjpg`, A direct | 50 | 0 of 230 parts | 50 (the stream ends 45-107 ms after the clear) | - |
+| `crop.mjpg`, A behind a logging proxy | 50 | 0 of 225 parts | 25 by A's 409 on `frame.jpg` (the round 58 race: 27 of 50 whole frames), 25 by the identity check | - |
+| `multimeter_read` (2 frames) | 50 | 0 of 47 vision images | 44 | 6 confirmed |
+| `webcam_snapshot` | 50 | 0 | 15 (409) | 35 |
+| Staged capture | 50 | 0 of 14 kept frames, 0 of 45 vision images | 43 | 7 confirmed |
+| A fake owner that sends whole frames | 18 (all paths) | 0 | 18 ("sent a 640x480 frame, larger than its crop box 160x80: refused ...") | 0 |
+| Control: the crop box never cleared | 40 (10 per path) | 0 | 0 | 40 |
+
+- B never read its own webcam: its fake ffmpeg log was never created (0 starts in the whole run), and there was no "Using the local webcam again" line.
+- The fake vision got 132 images, all 160x80. 0 calls to adb, scrcpy, or v4l2-ctl.
+- Extra: A's crop box changed to a larger one during B's request (60 streams, 60 snapshots): only 160x80 or 200x100 parts, 0 whole; most snapshots were refused during the change (safe).
+
+N99 is fixed.
+
+### 4. N100
+
+| Item | Result |
+|---|---|
+| The `settings` event contents | The same `SettingsView` as `GET /api/settings`: `saved` (vision model, warmup frames, crop box, screen rotation, snapshot flips, in-sensor zoom, the selected adb serial), `effective` and `start` (model, warmup, crop, rotation), and `settings_file` (the path of the settings file in the state folder). No token, no key, and no other path. It goes to every page listener, like the route (a tunnel page too: see N95). |
+
+The browser tests (helper agent: headless Chromium 141 and Firefox 155, a moving fake webcam, a proxy that can fail, cut, end, or hold the stream; the page instrumented for blob URLs, fetches, readers, the stale note, and `settings` events):
+
+| Case | Chromium and Firefox |
+|---|---|
+| Leaks | 60 s: 600 frames, 1 live blob URL at each sample, 1 connection; then 40 reconnects (20 cuts, 10 hide and show, 10 crop clear and set): 962 blob URLs made, 961 revoked (at most 2 live), 41 fetches (all with a signal; 1 open at the end), 1 reader, 1 connection; the panel moves. Chromium heap after GC 1.42 -> 1.46 MB over the 60 s. Pass. |
+| Bounded retries | 503 for 30 s: 14 fetches, 2.00-2.02 s apart, the note "No live meter picture (the last frame is N s old: qa proxy: 503 for the meter picture). Connecting again…"; a connection closed at once for 20 s: 10 page fetches (the browsers' network layer sent more low-level attempts: Chromium 11, Firefox 90 in bursts, one burst per 2 s); the page stays usable; recovery in 3.3-3.4 s. Pass. |
+| The `settings` event | A crop clear from Python: the event in 0.00-0.01 s, the stream closes, the note "Set the crop box on the webcam panel to see the meter here.", 0 blob URLs, 0 readers, 0 requests in 5 s; a crop set: 1 request in 0.01 s, the panel moves, no note. The event data: only the fields listed above; the only path is `<state folder>/debug-devices/ui-settings.json`. Pass. |
+| Watchdog: the frames stop, the connection stays | The note after 2.2-2.3 s ("No live meter picture (the last frame is 2 s old). Connecting again…"), the picture dims (opacity 0.35), abort at 6.2-6.3 s, a new request at 8.2-8.3 s, the note goes 0.11 s after the frames come again. Pass. |
+| Watchdog: the stream ends | A new request after about 2.1 s; with that request held 3 s: the note "... (the last frame is 2 s old: the stream ended) ..." at 2.1 s, then recovery. Pass. |
+| ×, leaving full screen, a hidden tab | The note goes, no `src`, 0 live blob URLs, 0 readers, the connection closes in 0.00-0.12 s, 0 requests while hidden, 1 request when shown again, and the panel moves. Pass. |
+
+N100 is fixed.
+
+### 5. New findings
+
+- N101 (low: backlog; older than round 59): a server that uses the owner's webcam keeps a stale copy of the owner's crop box. `SharedWebcam.crop` returns the crop of the last identity check (`remote_webcam.py:199-200`), and the staged capture checks it before it asks for a frame (`ui/staged_capture.py:142-143`). Steps (helper): clear A's crop box, let B make any remote capture (refused; B now has "no crop box"), set A's crop box again, stage on B's page: 2 of 2 captures failed with "no meter reading: no crop box is set ...", with 0 frame requests to A, until another webcam use of B refreshes the identity. It fails safe; the message is wrong. Idea: refresh the identity before this check.
+- N102 (low: backlog): a stream part without a length (a broken tunnel or a future server change; the server always sends the length) leaves the fetch open. `takeMjpegParts` throws (`app.js:1265`); `readMeterPipStream` does not cancel its reader (`:1236-1249`); the retry loop makes a new `AbortController` and does not abort the old one (`:1217-1224`). Chromium: one more open connection per bad part (the webcam then does not stop when idle); Firefox: the next fetches of the same URL wait behind it, and the panel stays on the stale note. Idea: cancel the reader in a `finally`, or abort the controller on each error.
+- N103 (cosmetic: backlog): after a watchdog restart, the stale note counts from the restart, not from the last frame (`app.js:1299` sets `lastFrame`): at 8 s it says "the last frame is 2 s old". The note still says that the picture is not live.
+- Text: the 409 and "larger than its crop box" texts name the owner URL without the last "/", the identity text with it (cosmetic).
+
+### Summary
+
+- Tests: pytest 1165 passed, 1 skipped; prek passes and leaves the tree unchanged (334 file hashes and the git status); MCP stdio 15/15. Nothing contacted the real 18765, 18766, or the tunnel. A leftover `tail -f` monitor of a helper was stopped by its PIDs; no other process was left.
+- N99 is fixed: 0 whole frames in 250 race trials on four paths with two real servers, no fallback to the requester's webcam, and a whole frame from an owner is refused. N100 is fixed in both browsers: the `settings` event, the frame reader (no blob URL or reader leak), bounded retries, and the watchdog.
+- New: N101, N102, N103 (backlog). No fix-now item is open.
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N101 | low | none (fails safe, wrong message) | backlog | `remote_webcam.py:199-200`, `ui/staged_capture.py:142-143` |
+| N102 | low | none (needs a broken stream part) | backlog | `ui/static/app.js:1217-1224`, `:1236-1249`, `:1265` |
+| N103 | cosmetic | none | backlog | `ui/static/app.js:1299` |
+
+N74, N83, N87, N96, and the older backlog stay as written there.
+
+### What to do next
+
+1. Commit rounds 58 and 59.
+2. The backlog when there is time (N102 is a small change in `readMeterPipStream`).

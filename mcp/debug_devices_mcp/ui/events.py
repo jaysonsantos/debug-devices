@@ -20,6 +20,7 @@ from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox
 from debug_devices_mcp.ui.constants import defaults
+from debug_devices_mcp.ui.settings import SettingsView
 from debug_devices_mcp.ui.staged_view import StagedList
 from debug_devices_mcp.webcam_stream import StreamInfo
 
@@ -62,6 +63,8 @@ class EventKind(StrEnum):
     STAGED = "staged"
     # The webcam stream info changed (started, stopped, first frame, size, error).
     WEBCAM = "webcam"
+    # The page settings changed (for example the crop box, also from another page): the page applies them (N100).
+    SETTINGS = "settings"
 
 
 # region: wire models
@@ -129,7 +132,7 @@ class PhoneState(BaseModel):
 
 class BusMessage(BaseModel):
     kind: EventKind
-    data: ToolCallEvent | PhoneState | StagedList | StreamInfo
+    data: ToolCallEvent | PhoneState | StagedList | StreamInfo | SettingsView
 
 
 # endregion: wire models
@@ -328,6 +331,9 @@ class EventBus:
 
     def publish_webcam(self, info: StreamInfo) -> None:
         self._publish(BusMessage(kind=EventKind.WEBCAM, data=info))
+
+    def publish_settings(self, view: SettingsView) -> None:
+        self._publish(BusMessage(kind=EventKind.SETTINGS, data=view))
 
     @property
     def has_subscribers(self) -> bool:

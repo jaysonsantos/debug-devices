@@ -8,8 +8,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
-from debug_devices_mcp.ui.settings import UiSettings
-from debug_devices_mcp.ui.views import SettingsView
+from debug_devices_mcp.ui.settings import SettingsView, UiSettings
 
 if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
@@ -18,12 +17,7 @@ BAD_REQUEST = 400
 
 
 def settings_view(monitor: Monitor) -> SettingsView:
-    return SettingsView(
-        saved=monitor.saved,
-        effective=monitor.effective,
-        start=monitor.start_settings,
-        settings_file=str(monitor.settings_path),
-    )
+    return monitor.settings_view()
 
 
 async def get_settings(request: Request) -> JSONResponse:

@@ -334,8 +334,19 @@ form label { display: block; margin-bottom: 8px; }
   background: transparent;
   border-color: rgba(255, 255, 255, 0.4);
 }
-#phone-view .meter-pip canvas { display: block; width: 100%; height: auto; border-radius: 4px; background: #000; cursor: inherit; }
-#phone-view .meter-pip canvas[hidden] { display: none; }
+/* The panel gets the pointer: a drag on the picture moves the panel, not a browser image drag. */
+#meter-pip-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #000;
+  pointer-events: none;
+}
+#meter-pip-img[hidden] { display: none; }
+/* The watchdog found no new frame: the old picture stays, dimmed, under the note. */
+.meter-pip.stale #meter-pip-img { opacity: 0.35; }
 .meter-pip p { margin: 0; }
 .meter-pip-value { font-weight: 600; font-variant-numeric: tabular-nums; }
 .meter-pip-note { color: #cbd5e1; }

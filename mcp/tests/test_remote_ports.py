@@ -74,8 +74,9 @@ async def test_the_monitor_on_the_default_port_is_found() -> None:
     identity = await client.identify(DEVICE)
     assert identity is not None
     assert client.base_url.endswith(f":{defaults.PORT}")
-    # The frames come from that monitor too.
-    assert await client.capture_jpeg() == JPEG
+    # The frames come from that monitor too (with the crop box that its identity names).
+    assert identity.webcam_crop is not None
+    assert await client.capture_jpeg(identity.webcam_crop) == JPEG
     assert monitors.ports_asked[-1] == defaults.PORT
 
 

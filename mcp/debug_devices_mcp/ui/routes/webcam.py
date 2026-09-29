@@ -1,5 +1,7 @@
-"""The live webcam view: an MJPEG stream from the shared capture, and its size."""
+"""The live webcam view: an MJPEG stream from the shared capture, its size, and a stream of only the crop box (the
+meter picture of the full-screen phone view)."""
 
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -12,15 +14,17 @@ from starlette.routing import Route
 from debug_devices_mcp.ui.constants import http
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of, until_closing
 from debug_devices_mcp.webcam import WebcamError
-from debug_devices_mcp.webcam_stream import WebcamStream
+from debug_devices_mcp.webcam_stream import CropMissingError, WebcamStream, crop_jpeg
 
 if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
 
 BAD_REQUEST = 400
 NOT_FOUND = 404
+CONFLICT = 409
 SERVICE_UNAVAILABLE = 503
 NO_STREAM = "the webcam stream is off"
+NO_CROP = "no crop box: set the crop box on the page (this stream sends only the crop box, never the whole frame)"
 # The page stream waits this long per frame, then tries again (ffmpeg can restart).
 FRAME_WAIT = timedelta(seconds=5)
 
@@ -44,6 +48,39 @@ async def viewer_body(monitor: Monitor, stream: WebcamStream) -> AsyncGenerator[
             return
         async for part in mjpeg_body(stream):
             yield part
+
+
+async def crop_body(monitor: Monitor, stream: WebcamStream) -> AsyncGenerator[bytes]:
+    """Only the crop box of each frame: the full frame never leaves the server here. It follows a crop change and
+    ends when the crop box is cleared. Another owner: its frames with its own crop box, or the end (never a whole
+    frame and never the local webcam instead)."""
+    async with monitor.webcam_viewer():
+        if monitor.webcam_owner is not None and monitor.shared is not None:
+            try:
+                while True:
+                    yield mjpeg_part(await monitor.shared.remote_cropped_jpeg())
+            except WebcamError:
+                return
+        async for frame in stream.frames(FRAME_WAIT):
+            crop = monitor.crop()
+            if crop is None:
+                return
+            try:
+                jpeg = await asyncio.to_thread(crop_jpeg, frame.jpeg, crop)
+            except OSError, ValueError:
+                continue
+            yield mjpeg_part(jpeg)
+
+
+async def get_crop_stream(request: Request) -> Response:
+    """The meter picture of the full-screen phone view: only the crop box, smaller over a slow link."""
+    monitor = monitor_of(request)
+    if monitor.stream is None:
+        return error_response(NO_STREAM, NOT_FOUND)
+    if monitor.crop() is None and monitor.webcam_owner is None:
+        return error_response(NO_CROP, CONFLICT)
+    body = until_closing(crop_body(monitor, monitor.stream), monitor.closing)
+    return StreamingResponse(body, media_type=http.MJPEG_MEDIA_TYPE, headers=http.NO_CACHE)
 
 
 async def get_stream(request: Request) -> Response:
@@ -85,8 +122,12 @@ def owned_elsewhere(monitor: Monitor) -> Response | None:
 
 
 async def cropped_frame(stream: WebcamStream) -> Response:
+    """Only the crop box: a crop box cleared while the request waits for the frame gives 409, never the whole frame
+    (N99)."""
     try:
-        jpeg = await stream.capture_jpeg()
+        jpeg = await stream.capture_cropped_jpeg()
+    except CropMissingError as exc:
+        return error_response(str(exc), CONFLICT)
     except WebcamError as exc:
         return error_response(str(exc), SERVICE_UNAVAILABLE)
     return Response(jpeg, media_type=http.JPEG_MEDIA_TYPE, headers=http.NO_CACHE)
@@ -107,6 +148,7 @@ async def get_info(request: Request) -> JSONResponse:
 
 routes = [
     Route("/api/webcam/stream.mjpg", get_stream, methods=["GET"]),
+    Route("/api/webcam/crop.mjpg", get_crop_stream, methods=["GET"]),
     Route("/api/webcam/frame.jpg", get_frame, methods=["GET"]),
     Route("/api/webcam/info", get_info, methods=["GET"]),
 ]

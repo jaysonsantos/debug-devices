@@ -173,6 +173,14 @@ class StreamInfo(BaseModel):
 
 type CropProvider = Callable[[], Crop | None]
 
+NO_CROP_AT_FRAME = (
+    "no crop box when the frame came (it was cleared): no frame is sent (a whole webcam frame can show people)"
+)
+
+
+class CropMissingError(WebcamError):
+    """A cropped frame was asked for, but the crop box was cleared: never send the whole frame instead (N99)."""
+
 
 class WebcamStream:
     """Keeps ffmpeg running, restarts it after a failure, and hands out the latest frame."""
@@ -210,6 +218,19 @@ class WebcamStream:
         crop = self.crop
         if crop is None:
             return frame.jpeg
+        try:
+            return await asyncio.to_thread(crop_jpeg, frame.jpeg, crop)
+        except (OSError, ValueError) as exc:
+            raise WebcamError(f"cannot crop the frame from {self.device}: {exc}") from exc
+
+    async def capture_cropped_jpeg(self) -> bytes:
+        """The next frame, only its crop box: for another process and the meter picture of the page. Never the whole
+        frame: the crop is read one time when the frame came, and that crop cuts the frame; without one,
+        CropMissingError (N99)."""
+        frame = await self.next_frame(self._seq(), self._options.timeout)
+        crop = self.crop
+        if crop is None:
+            raise CropMissingError(NO_CROP_AT_FRAME)
         try:
             return await asyncio.to_thread(crop_jpeg, frame.jpeg, crop)
         except (OSError, ValueError) as exc:

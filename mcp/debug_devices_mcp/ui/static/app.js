@@ -8,6 +8,7 @@ const API = {
   settings: "/api/settings",
   clearCrop: "/api/settings/crop",
   webcamStream: "/api/webcam/stream.mjpg",
+  webcamCrop: "/api/webcam/crop.mjpg",
   webcamInfo: "/api/webcam/info",
   phoneConnect: "/api/phone/connect",
   phoneStatus: "/api/phone/status",
@@ -275,9 +276,20 @@ async function refreshWebcamInfo() {
   }
 }
 
-// A hidden tab has no webcam stream (see "hidden tab"): no reconnect then.
+// The full webcam stream runs only while the webcam view can show: not in a hidden tab (see "hidden tab"), and not
+// while another view is in full screen (the meter picture there has its own crop-only stream). Less load on a tunnel.
+function webcamWanted() {
+  return !document.hidden && (!document.fullscreenElement || document.fullscreenElement === $("webcam-view"));
+}
+
 function connectWebcam() {
-  if (!document.hidden) $("webcam").src = `${API.webcamStream}?t=${Date.now()}`;
+  if (webcamWanted()) $("webcam").src = `${API.webcamStream}?t=${Date.now()}`;
+}
+
+function syncWebcam() {
+  const img = $("webcam");
+  if (!webcamWanted()) img.removeAttribute("src");
+  else if (!img.getAttribute("src")) connectWebcam();
 }
 
 function startWebcam() {
@@ -285,6 +297,7 @@ function startWebcam() {
   img.addEventListener("load", drawCrop);
   img.addEventListener("error", () => setTimeout(connectWebcam, RECONNECT_MS));
   connectWebcam();
+  document.addEventListener("fullscreenchange", syncWebcam);
   setupCropEditor();
   $("multimeter-read").addEventListener("click", readMultimeter);
 }
@@ -679,6 +692,7 @@ function tabVisible() {
 
 function setupHiddenTab() {
   document.addEventListener("visibilitychange", () => {
+    connectMeterPip();
     if (document.hidden) {
       $("webcam").removeAttribute("src");
       $("phone-screen-mjpeg").removeAttribute("src");
@@ -686,7 +700,7 @@ function setupHiddenTab() {
       return;
     }
     // startScreen() waits in tabVisible() and connects again by itself.
-    connectWebcam();
+    syncWebcam();
     connectFallback();
   });
 }
@@ -707,8 +721,9 @@ function applySettings(view) {
   $("settings-file").textContent = view.settings_file;
   drawCrop();
   showViewRotation();
-  // A new or cleared crop box: the meter picture takes its ratio, or shows the note.
+  // A new or cleared crop box: the meter picture takes its ratio, or shows the note (and its stream stops).
   if (meterPipShown()) placeMeterPip();
+  connectMeterPip();
 }
 
 async function saveSettings(saved) {
@@ -1085,11 +1100,12 @@ function setupFlips() {
 
 // region: meter picture (phone full screen)
 
-// In the phone full screen view, a panel shows the live meter: only the webcam crop box, drawn from the webcam stream
-// that the page has already (no new stream), and the last meter value that the page knows (no vision call). The user
-// moves it, resizes it, and hides it; the page remembers that per browser. Nothing on it reaches the phone view.
+// In the phone full screen view, a panel shows the live meter: only the webcam crop box, from a server stream of only
+// the crop (/api/webcam/crop.mjpg: the full frame never leaves the server for it, and it is small over a tunnel), and
+// the last meter value that the page knows (no vision call). The user moves it, resizes it, and hides it; the page
+// remembers that per browser. Nothing on it reaches the phone view. A canvas copy of the page's webcam <img> does not
+// work: Firefox copies only one frame of an MJPEG image, so the picture stood still.
 const METER_PIP_STORAGE_KEY = "debug-devices.meter-pip";
-const METER_PIP_DRAW_MS = 100;
 const METER_PIP_MARGIN_PX = 16;
 // The width, as a part of the screen width: the default, the largest, and the smallest in pixels.
 const METER_PIP_DEFAULT_WIDTH = 0.25;
@@ -1098,7 +1114,27 @@ const METER_PIP_MIN_WIDTH_PX = 140;
 // The picture height at most, as a part of the screen height.
 const METER_PIP_MAX_PICTURE_HEIGHT = 0.6;
 const METER_PIP_NO_VALUE = "no meter value yet";
-const meterPip = { layout: null, visible: true, timer: null, drag: null, last: null };
+// The watchdog of the picture (N100): no new frame this long shows the note; this long connects again.
+const METER_PIP_STALE_MS = 2000;
+const METER_PIP_RESTART_MS = 6000;
+const METER_PIP_WATCH_MS = 500;
+const MS_PER_SECOND = 1000;
+// One MJPEG part of the server: headers, an empty line, then Content-Length bytes of JPEG.
+const MJPEG_HEADER_END = [13, 10, 13, 10];
+const MJPEG_LENGTH = /content-length:\s*(\d+)/i;
+const meterPip = {
+  layout: null,
+  visible: true,
+  drag: null,
+  last: null,
+  // The crop stream: running, its abort, the time of the last frame, the object URL on screen, and why it stopped.
+  running: false,
+  abort: null,
+  lastFrame: 0,
+  url: null,
+  reason: null,
+  watch: null,
+};
 
 function loadMeterPip() {
   try {
@@ -1134,7 +1170,7 @@ const clampTo = (value, low, high) => Math.min(Math.max(value, low), Math.max(lo
 // Place and size the panel from the layout (parts of the screen), inside the screen. Resize keeps the crop ratio.
 function placeMeterPip() {
   const panel = $("meter-pip");
-  const canvas = $("meter-pip-canvas");
+  const img = $("meter-pip-img");
   const view = $("phone-view").getBoundingClientRect();
   const ratio = cropRatio();
   let width = clampTo(
@@ -1144,14 +1180,9 @@ function placeMeterPip() {
   );
   if (ratio) width = Math.max(METER_PIP_MIN_WIDTH_PX, Math.min(width, METER_PIP_MAX_PICTURE_HEIGHT * view.height * ratio));
   panel.style.width = `${width}px`;
-  canvas.hidden = !ratio;
+  img.hidden = !ratio;
   $("meter-pip-none").hidden = Boolean(ratio);
-  if (ratio) {
-    canvas.style.aspectRatio = `${state.crop.width} / ${state.crop.height}`;
-    const scale = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(canvas.clientWidth * scale));
-    canvas.height = Math.max(1, Math.round((canvas.clientWidth / ratio) * scale));
-  }
+  if (ratio) img.style.aspectRatio = `${state.crop.width} / ${state.crop.height}`;
   const size = { width: panel.offsetWidth, height: panel.offsetHeight };
   const left = meterPip.layout ? meterPip.layout.left * view.width : view.width - size.width - METER_PIP_MARGIN_PX;
   const top = meterPip.layout ? meterPip.layout.top * view.height : view.height - size.height - METER_PIP_MARGIN_PX;
@@ -1160,23 +1191,121 @@ function placeMeterPip() {
   panel.style.left = `${x}px`;
   panel.style.top = `${y}px`;
   meterPip.layout = { left: x / view.width, top: y / view.height, width: width / view.width };
-  drawMeterPip();
 }
 
-// Only the crop box of the current webcam frame goes into the canvas.
-function drawMeterPip() {
-  const img = $("webcam");
-  const crop = state.crop;
-  const canvas = $("meter-pip-canvas");
-  if (!crop || canvas.hidden || document.hidden || !img.naturalWidth) return;
-  const scale = img.naturalWidth / (state.frame.width || img.naturalWidth);
-  try {
-    canvas
-      .getContext("2d")
-      .drawImage(img, crop.x * scale, crop.y * scale, crop.width * scale, crop.height * scale, 0, 0, canvas.width, canvas.height);
-  } catch {
-    // A broken frame (the stream restarts): the next one draws.
+// The crop stream runs only while the panel shows a picture in a visible tab; else the connection closes.
+function meterPipStreamWanted() {
+  return meterPipShown() && Boolean(cropRatio()) && !document.hidden;
+}
+
+// The page reads the stream itself (fetch), not with <img src>: an <img> gives no event for a new frame or for the
+// end of the stream (N100). So the page knows each frame, and the end or an error connects again.
+function connectMeterPip() {
+  if (!meterPipStreamWanted()) {
+    meterPip.abort?.abort();
+    return;
   }
+  if (!meterPip.running) runMeterPipStream();
+}
+
+async function runMeterPipStream() {
+  meterPip.running = true;
+  meterPip.lastFrame = performance.now();
+  meterPip.watch = setInterval(watchMeterPip, METER_PIP_WATCH_MS);
+  try {
+    while (meterPipStreamWanted()) {
+      meterPip.abort = new AbortController();
+      try {
+        await readMeterPipStream(meterPip.abort.signal);
+        meterPip.reason = "the stream ended";
+      } catch (error) {
+        // An abort is this page's own stop or the watchdog: no reason to show.
+        if (error.name !== "AbortError") meterPip.reason = error.message;
+      }
+      if (!meterPipStreamWanted()) break;
+      await new Promise((resolve) => setTimeout(resolve, RECONNECT_MS));
+    }
+  } finally {
+    clearInterval(meterPip.watch);
+    meterPip.running = false;
+    meterPip.abort = null;
+    clearMeterPipPicture();
+  }
+}
+
+async function readMeterPipStream(signal) {
+  const response = await fetch(API.webcamCrop, { signal });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `${response.status}`);
+  const reader = response.body.getReader();
+  let buffer = new Uint8Array(0);
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    const joined = new Uint8Array(buffer.length + value.length);
+    joined.set(buffer);
+    joined.set(value, buffer.length);
+    buffer = takeMjpegParts(joined, showMeterFrame);
+  }
+}
+
+function indexOfBytes(bytes, pattern, from) {
+  for (let index = from; index <= bytes.length - pattern.length; index++) {
+    if (pattern.every((byte, offset) => bytes[index + offset] === byte)) return index;
+  }
+  return -1;
+}
+
+// Give each complete JPEG to `onJpeg`; return the bytes of the next, incomplete part.
+function takeMjpegParts(buffer, onJpeg) {
+  let offset = 0;
+  for (;;) {
+    const headerEnd = indexOfBytes(buffer, MJPEG_HEADER_END, offset);
+    if (headerEnd < 0) break;
+    const length = Number(MJPEG_LENGTH.exec(new TextDecoder().decode(buffer.subarray(offset, headerEnd)))?.[1]);
+    if (!Number.isFinite(length)) throw new Error("a meter picture part without its length");
+    const start = headerEnd + MJPEG_HEADER_END.length;
+    if (buffer.length < start + length) break;
+    onJpeg(buffer.slice(start, start + length));
+    offset = start + length;
+  }
+  return buffer.slice(offset);
+}
+
+function showMeterFrame(jpeg) {
+  const url = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+  const old = meterPip.url;
+  meterPip.url = url;
+  $("meter-pip-img").src = url;
+  if (old) URL.revokeObjectURL(old);
+  meterPip.lastFrame = performance.now();
+  meterPip.reason = null;
+  showMeterPipStale(null);
+}
+
+function clearMeterPipPicture() {
+  $("meter-pip-img").removeAttribute("src");
+  if (meterPip.url) URL.revokeObjectURL(meterPip.url);
+  meterPip.url = null;
+  showMeterPipStale(null);
+}
+
+// No new frame for a short time: the picture is not live. Say so, and connect again after a longer time.
+function watchMeterPip() {
+  const age = performance.now() - meterPip.lastFrame;
+  if (age < METER_PIP_STALE_MS) return;
+  const seconds = Math.round(age / MS_PER_SECOND);
+  showMeterPipStale(`No live meter picture (the last frame is ${seconds} s old${meterPip.reason ? `: ${meterPip.reason}` : ""}). Connecting again…`);
+  if (age >= METER_PIP_RESTART_MS) {
+    meterPip.lastFrame = performance.now();
+    meterPip.abort?.abort();
+  }
+}
+
+function showMeterPipStale(text) {
+  const note = $("meter-pip-stale");
+  note.textContent = text ?? "";
+  note.hidden = !text;
+  $("meter-pip").classList.toggle("stale", Boolean(text));
 }
 
 function updateMeterPip() {
@@ -1185,11 +1314,8 @@ function updateMeterPip() {
   for (const button of document.querySelectorAll("[data-meter-pip]")) {
     button.setAttribute("aria-pressed", String(meterPip.visible));
   }
-  clearInterval(meterPip.timer);
-  meterPip.timer = null;
-  if (!shown) return;
-  placeMeterPip();
-  meterPip.timer = setInterval(drawMeterPip, METER_PIP_DRAW_MS);
+  if (shown) placeMeterPip();
+  connectMeterPip();
 }
 
 function setMeterPipVisible(visible) {
@@ -2547,6 +2673,8 @@ function connectEvents() {
   source.addEventListener("phone", (event) => applyPhone(JSON.parse(event.data)));
   source.addEventListener("staged", (event) => showStaged(JSON.parse(event.data)));
   source.addEventListener("webcam", (event) => applyWebcamInfo(JSON.parse(event.data)));
+  // A settings change of any page (for example the crop box): the meter picture stops or starts with it (N100).
+  source.addEventListener("settings", (event) => applySettings(JSON.parse(event.data)));
 }
 
 async function loadState() {

@@ -76,6 +76,15 @@ class EffectiveSettings(BaseModel):
         )
 
 
+class SettingsView(BaseModel):
+    """The page settings: the settings route, the state at load, and the `settings` event after each change."""
+
+    saved: UiSettings
+    effective: EffectiveSettings
+    start: EffectiveSettings
+    settings_file: str
+
+
 def state_dir(environ: Mapping[str, str] = os.environ) -> Path:
     """`$XDG_STATE_HOME/debug-devices`, or `~/.local/state/debug-devices`."""
     base = environ.get(env.XDG_STATE_HOME) or str(Path(environ.get(env.HOME) or Path.home()) / defaults.STATE_HOME)

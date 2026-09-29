@@ -2229,3 +2229,122 @@ The setup is a fake webcam stream with green frames and a magenta box exactly at
 - `uv run pytest`: 1153 passed, 1 skipped (no Python change). ruff: pass. `prek run --files` on `app.js`, `index.html`, `style.css`, and `mcp/README.md`: pass.
 
 No commit.
+
+## Round 58: the meter picture did not move in full screen (user report on round 57)
+
+### The cause (proved with a moving source)
+
+The fake webcam now changes the color of the crop box at each frame (6 colors, 10 frames per second). The test reads the colors over time in two ways: with a canvas read, and as the user sees them (element screenshots).
+
+| Before the fix (round 57 code) | Chromium | Firefox |
+|---|---|---|
+| Webcam `<img>` outside full screen, canvas read (`drawImage`) | 6 colors | **1 color** |
+| Webcam `<img>` outside full screen, as seen (screenshot) | moves | 6 colors (moves) |
+| Panel in full screen, as seen | 6 colors | **1 color (still)** |
+
+- The cause is not the full screen. **Firefox copies only one frame of an MJPEG `<img>` into a canvas**, although it shows the video on the screen. So the panel (a canvas copy of the page's webcam image) stood still in Firefox, also outside full screen. Chromium copies each frame. The user uses Firefox.
+- The round 57 test used a still source, so it could not see this.
+
+### The fix: a server stream of only the crop box
+
+- New route `GET /api/webcam/crop.mjpg` (`ui/routes/webcam.py` `crop_body`):
+  - It sends only the crop box of each webcam frame (MJPEG, about 10 per second; the crop runs in a worker thread). The full frame never leaves the server for the panel, and the stream is small over a tunnel.
+  - It follows a crop change (it reads the crop at each frame), and it ends when the crop box is cleared.
+  - It counts as a page viewer, so the lazy webcam starts and stays on while it runs.
+  - Without a stream: 404. Without a crop box: 409 "no crop box: set the crop box on the page (this stream sends only the crop box, never the whole frame)". Nothing starts then.
+  - When another monitor owns the webcam, the route gives that monitor's cropped frames (the new `SharedWebcam.remote_cropped_jpeg`, with the owner crop check of N51). When the owner has no crop box, the route gives nothing. It never sends a whole frame, and it never reads the local webcam instead.
+- Page:
+  - The panel shows the stream in its own `<img id="meter-pip-img">` (in place of the canvas). The stream runs only while the panel shows a picture in a visible tab. × (hide), leaving full screen, a hidden tab, or no crop box close the connection. The page connects again when the panel shows again, and after an error (2 s).
+  - The picture has `pointer-events: none` and `draggable="false"`, so a drag on the picture moves the panel and never starts a browser image drag.
+  - I removed the canvas copy code (`drawImage`, the 100 ms timer).
+  - The full webcam stream (`#webcam`) now stops while the phone screen or the snapshot is in full screen, because the webcam view cannot show then. It starts again after full screen. So in the phone full screen view, only the small crop stream goes over the tunnel, not the full frame. This replaces the round 57 point "the webcam stream keeps running while the panel is visible": that stream fed only the canvas copy.
+- `mcp/README.md`: the panel item and "Live updates" (the streams, the pause in full screen).
+- All round 57 behavior stays: the place, the size limits, the memory, hide and show, the isolation from the phone view, the value line, Space and C, and the no-crop note.
+
+### Tests
+
+- `mcp/tests/test_crop_stream.py` (new, 5 tests):
+  - Only 10×6 crops come from 64×48 frames. After a crop change, 20×10 crops come. When the crop box is cleared, the stream ends with no whole frame. The stream starts the webcam.
+  - The route gives 404 without a stream and 409 without a crop box (and nothing starts).
+  - Another owner gives its cropped frames: the frame requests are always `cropped=true`.
+  - An owner without a crop box gives nothing, with no frame request, and the local webcam does not start.
+  - Through the app, the route gives MJPEG.
+- Playwright with the moving source (as seen, from screenshots):
+
+| After the fix | Chromium | Firefox |
+|---|---|---|
+| Panel in full screen | 6 colors (moves) | 6 colors (moves) |
+| Panel source | `/api/webcam/crop.mjpg` | the same |
+| Full webcam `src` in phone full screen; server webcam viewers | none; 1 (only the crop stream) | the same |
+| After ×: panel `src`; viewers | none; 0 | the same |
+| After the Meter button | moves again (6 colors) | 6 |
+| Hidden tab: panel `src`; viewers | none; 0 | the same |
+| Visible again | moves (5 colors) | moves (6) |
+| After full screen: full webcam `src`; view as seen | set; moves (6 colors) | set; moves (4) |
+
+- Headless Chromium ignores the key Escape for full screen, so the Chromium test leaves full screen with `document.exitFullscreen()`.
+- Round 57 behavior test, on the new panel, in both browsers:
+  - The picture as seen at 5 points is only magenta (the crop box), with ratio 2.0, also after a resize.
+  - The default place, the drags, the clamp to the screen, and a drag that starts on the picture (it moves the panel) work.
+  - The panel gives 0 focus requests and 0 zoom requests; the control click and wheel on the phone picture give 1 each.
+  - A double-click on the panel keeps full screen.
+  - The resize limits (60 %, 140 px), a reload (the same place), hide and show with the reload memory, the no-crop note (the picture has no `src`), and Space and C (2 staged, the value 4.98 V) work.
+- `uv run pytest`: 1158 passed, 1 skipped. ruff check and format: pass. `prek run --files` on each changed file: pass. `scripts/qa_mcp_stdio.py --skip-webcam` with a private runtime folder: 15/15, and the folder stayed empty.
+
+No commit.
+
+## Round 59: N99 (no whole frame through a remote owner) and N100 (a still meter picture that looks live), from docs/reports/dd-qa.md "Round 58: check"
+
+### N99: both sides refuse a whole frame
+
+- Owner side:
+  - New `WebcamStream.capture_cropped_jpeg()` (`webcam_stream.py`): the next frame, only its crop box. When the frame comes, it reads the crop one time, and that crop cuts the frame. Without a crop box it raises the new `CropMissingError`. It never returns the whole frame.
+  - `frame.jpg?cropped=true` (`ui/routes/webcam.py` `cropped_frame`) uses it: a crop box cleared during the request gives 409 with the reason.
+  - `WebcamStream.capture_jpeg` (this process's own tools) is unchanged: the N89 check after each frame covers it.
+- Requester side (`remote_webcam.py`):
+  - `RemoteMonitor.capture_jpeg(crop)` now takes the crop box that the requester expects (from the identity check).
+  - A 409 is `RemoteCropMissingError` ("was cleared during the frame request").
+  - A frame larger than the expected crop box (an owner with old code or a bug, or a crop box that changed) is also `RemoteCropMissingError` ("sent a 64x48 frame, larger than its crop box 10x6"). A smaller frame is accepted: the owner fits the crop box into the frame.
+  - `RemoteCropMissingError` is not `RemoteUnavailableError`, so `SharedWebcam` never falls back to its own webcam (whose `capture_jpeg` would give a whole frame without a crop box).
+  - This one path feeds the meter picture stream, `multimeter_read`, `webcam_snapshot`, and staged captures of the requester.
+- `mcp/README.md` ("More than one MCP server"): both sides.
+
+### N100: the page knows each frame, and a watchdog marks a still picture
+
+- Crop changes over SSE:
+  - Each settings change of the monitor (`_apply_settings`: a save, a crop clear, also from another page or a tool) goes to every page as a new `settings` event with the settings view, and the page runs `applySettings`.
+  - With a cleared crop box, the panel shows its note and stops the stream (no requests). When the crop box comes back, the panel starts again by itself.
+  - `SettingsView` moved to `ui/settings.py` (`ui/views.py` imports it), so `ui/events.py` can use it without an import cycle. `Monitor.settings_view()` builds it for the route and the event.
+- The page reads `crop.mjpg` itself (`fetch` and a small MJPEG part reader, like the phone screen reader) and shows each JPEG as a blob URL in the panel image. An `<img src>` with an MJPEG source gives no event for a new frame or the end of the stream (Chromium: none; Firefox: `load`). Now the page knows each frame, the end, and each error. The end of the stream or an error counts like an error: the page connects again after 2 s, while the panel wants the stream.
+- Watchdog (constants `METER_PIP_STALE_MS` 2000, `METER_PIP_RESTART_MS` 6000, `METER_PIP_WATCH_MS` 500):
+  - When no new frame came for 2 s, the old picture dims, and the note "No live meter picture (the last frame is N s old: <reason>). Connecting again…" shows. The reason is the last error text or "the stream ended".
+  - After 6 s, the page aborts the stream and connects again.
+  - The next frame removes the note.
+  - When the panel hides, the stream stops, the picture and its blob URL go, and the note goes.
+- `mcp/README.md`: the panel item (the page reads the stream, the end of the stream, the `settings` event, the watchdog) and "Live updates" (the `settings` event).
+
+### Tests
+
+- `mcp/tests/test_remote_crop_race.py` (new, 6 tests). The race: the owner's crop box is cleared at a random time of 0-20 ms during the request, and the owner feeds a 64×48 frame every 10 ms. The owner is the real app in this process; a transport shows it as another process (another pid in `whoami`).
+  - The owner side, 50 trials: 0 whole frames. Some requests got 409, so the race was hit.
+  - The requester's crop stream (`crop_body`), 50 trials: only 10×6 parts, 0 whole frames.
+  - The requester's `multimeter_read` (`read_meter`), 50 trials: the vision model got only 10×6 images, 0 whole. Some reads were refused and some worked, so the race was hit.
+  - The requester's staged capture, 50 trials (popped after each one): the kept frames and the vision images were only 10×6. Some captures had no meter part, so the race was hit.
+  - An owner that sends whole frames (old code): the requester raises "larger than its crop box" 3 times and reads its own webcam only once (before the owner was known).
+  - A 409 of the owner: `RemoteCropMissingError`, and no own-webcam read.
+  - Proof: with the old behavior patched back in (a scratch pytest plugin, no change to the tree), all 6 tests fail. The owner gave 12-24 whole frames in 50 requests, and whole frames reached the crop stream, the vision model, and the staged store. With the fix, all 6 pass (3 runs).
+- `mcp/tests/test_remote_webcam.py`: the fake owner now answers with a frame of its crop size (the old 64×48 answer for a 3×4 crop is the whole-frame case that N99 refuses). `test_remote_ports.py`: the direct call passes the identity's crop. `test_crop_stream.py`: +1 test, a crop clear and a crop set each give a `settings` event with the new crop.
+- Playwright (headless Chromium 1194 and Firefox; a moving fake webcam; fakes; a private state folder; port 0):
+
+| Case | Chromium | Firefox |
+|---|---|---|
+| A: the panel moves (blob frames); frames shown in 2 s | 6 colors; 21 (10 per s) | 5 colors; 21 |
+| B: the crop box cleared on another page (server `clear_crop`) | note shown, picture hidden, 0 crop requests in 5 s, 0 viewers | the same |
+| C: the crop box set again on another page | recovers by itself: moves, 1 request, no stale note | the same |
+| D: the stream ends with no settings event (the server's crop changed with no event) | stale note in 2 s with the reason "no crop box: ..."; 3 requests in 6 s (bounded); crop back: moves, note gone | the same |
+| E: the frames stop, the connection stays | stale note "... the last frame is 2 s old ..."; frames again: moves, note gone | the same |
+
+- All round 57 and round 58 browser checks pass again on the new panel in both browsers. These are the place, drags, clamp, resize limits, a drag on the picture, the isolation (0 focus and 0 zoom requests from the panel), reload, hide and show, the no-crop note, Space and C, only crop pixels, the full-stream pause, and 0 viewers after × and in a hidden tab.
+- `uv run pytest`: 1165 passed, 1 skipped. ruff check and format: pass. `prek run --files` on each changed file: pass. `scripts/qa_mcp_stdio.py --skip-webcam` with a private runtime folder: 15/15, and the folder stayed empty.
+
+No commit.

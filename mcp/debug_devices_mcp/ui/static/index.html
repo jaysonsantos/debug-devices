@@ -50,14 +50,16 @@
               <span id="live-focus" class="live-zoom focus-text" title="Distance to the board and detail (estimate)"></span>
               <span id="live-zoom" data-zoom-ratio class="live-zoom" aria-live="polite" title="Phone camera zoom (wheel or arrow keys)"></span>
             </div>
-            <!-- Only in full screen: the webcam crop box (never the full frame), drawn from the webcam stream of the page. -->
+            <!-- Only in full screen: the webcam crop box (never the full frame), a stream of only the crop from the server
+                 that the page reads itself (each frame is a blob URL in the image). -->
             <div id="meter-pip" class="meter-pip" role="group" aria-label="Meter picture (the webcam crop box)" title="Drag to move; the corner resizes" hidden>
               <div class="meter-pip-bar">
                 <span>Meter</span>
                 <button type="button" id="meter-pip-hide" aria-label="Hide the meter picture" title="Hide (the Meter button in the bar shows it again)">×</button>
               </div>
-              <canvas id="meter-pip-canvas" width="1" height="1"></canvas>
+              <img id="meter-pip-img" alt="The meter: the webcam crop box, live" draggable="false" hidden>
               <p id="meter-pip-none" class="meter-pip-note" hidden>Set the crop box on the webcam panel to see the meter here.</p>
+              <p id="meter-pip-stale" class="meter-pip-note error" role="status" hidden></p>
               <p id="meter-pip-value" class="meter-pip-value">no meter value yet</p>
               <p id="meter-pip-status" class="meter-pip-note" role="status" hidden></p>
               <span class="meter-pip-resize" aria-hidden="true"></span>

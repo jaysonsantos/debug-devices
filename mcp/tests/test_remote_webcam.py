@@ -8,10 +8,12 @@ import pytest
 from debug_devices_mcp.remote_webcam import MonitorIdentity, RemoteMonitor, SharedWebcam, is_busy
 from debug_devices_mcp.webcam import Crop, WebcamError
 
-from .conftest import JPEG
+from .conftest import make_jpeg
 
 DEVICE = Path("/dev/video0")
 CROP = Crop(x=1, y=2, width=3, height=4)
+# The owner's cropped frame: the size of its crop box (N99: a larger frame is refused).
+CROPPED = make_jpeg(CROP.width, CROP.height)
 BUSY = WebcamError("ffmpeg could not read /dev/video0 (exit 1): Device or resource busy")
 
 
@@ -30,9 +32,10 @@ def identity(**changes: object) -> dict:
 class FakeMonitor:
     """The HTTP side of another monitor."""
 
-    def __init__(self, whoami: dict | None = None, frame_status: int = 200) -> None:
+    def __init__(self, whoami: dict | None = None, frame_status: int = 200, frame: bytes = CROPPED) -> None:
         self.whoami = whoami if whoami is not None else identity()
         self.frame_status = frame_status
+        self.frame = frame
         self.up = True
         self.frame_requests: list[str] = []
 
@@ -45,7 +48,7 @@ class FakeMonitor:
             self.frame_requests.append(str(request.url.query, "ascii"))
             if self.frame_status != 200:
                 return httpx.Response(self.frame_status, json={"error": "no frame"})
-            return httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
+            return httpx.Response(200, content=self.frame, headers={"content-type": "image/jpeg"})
         return httpx.Response(404)
 
 
@@ -113,11 +116,11 @@ async def test_busy_webcam_uses_the_other_monitor_and_its_crop() -> None:
     fake = FakeMonitor()
     local = FakeLocal(BUSY)
     shared = SharedWebcam(local, remote_for(fake))
-    assert await shared.capture_jpeg() == JPEG
+    assert await shared.capture_jpeg() == CROPPED
     assert fake.frame_requests == ["cropped=true"]
     assert shared.crop == CROP
     # The next call goes to the other monitor at once.
-    assert await shared.capture_jpeg() == JPEG
+    assert await shared.capture_jpeg() == CROPPED
     assert local.calls == 1
 
 

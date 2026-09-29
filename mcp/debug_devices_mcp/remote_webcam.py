@@ -19,11 +19,12 @@ from pydantic import BaseModel, ValidationError
 
 from debug_devices_mcp.ui.constants import APP_NAME, defaults, http, remote
 from debug_devices_mcp.webcam import JPEG_MAGIC, Crop, WebcamError
-from debug_devices_mcp.webcam_stream import FrameSource
+from debug_devices_mcp.webcam_stream import FrameSource, jpeg_size
 
 logger = logging.getLogger(__name__)
 
 OK = 200
+CONFLICT = 409
 
 
 class MonitorIdentity(BaseModel):
@@ -49,6 +50,14 @@ class RemoteCropMissingError(WebcamError):
 REMOTE_CROP_MISSING = (
     "the webcam belongs to the debug-devices monitor at {url}, and it has no crop box: set the crop box on the page "
     "that owns the webcam. No frame was sent anywhere (a whole webcam frame can show people)."
+)
+REMOTE_CROP_CLEARED = (
+    "the crop box of the debug-devices monitor at {url} was cleared during the frame request: set it again on the "
+    "page that owns the webcam. No frame was sent anywhere (a whole webcam frame can show people)."
+)
+REMOTE_NOT_THE_CROP = (
+    "the debug-devices monitor at {url} sent a {size} frame, larger than its crop box {crop}: refused, and no frame "
+    "was sent anywhere (a whole webcam frame can show people). Check the crop box on the page that owns the webcam."
 )
 
 
@@ -139,17 +148,32 @@ class RemoteMonitor:
             async for chunk in response.aiter_bytes():
                 yield chunk
 
-    async def capture_jpeg(self) -> bytes:
-        """The next frame of the other monitor, cropped with its crop."""
+    async def capture_jpeg(self, crop: Crop) -> bytes:
+        """The next frame of the other monitor, cropped with its crop, which this process expects to be `crop`.
+
+        Never a whole frame (N99): a 409 (the owner's crop box was cleared during the request) and a frame larger
+        than `crop` (an owner that sent its whole frame, or a crop box that changed) are RemoteCropMissingError. That
+        error never lets the caller read the local webcam instead. A frame can be smaller than `crop`: the owner
+        fits the crop box into the frame.
+        """
         try:
             response = await self._http.get(remote.FRAME_PATH, params={remote.CROPPED_PARAM: remote.TRUE})
         except httpx.HTTPError as exc:
             raise RemoteUnavailableError(f"the monitor at {self.base_url} does not answer: {exc!r}") from exc
+        if response.status_code == CONFLICT:
+            raise RemoteCropMissingError(REMOTE_CROP_CLEARED.format(url=self.base_url))
         if response.status_code != OK or not response.content.startswith(JPEG_MAGIC):
             raise RemoteUnavailableError(
                 f"the monitor at {self.base_url} gave no frame ({response.status_code}): "
                 f"{response.text[: remote.ERROR_PREVIEW_CHARS]}"
             )
+        try:
+            width, height = jpeg_size(response.content)
+        except OSError as exc:
+            raise RemoteUnavailableError(f"the monitor at {self.base_url} gave a broken frame: {exc}") from exc
+        if width > crop.width or height > crop.height:
+            size, expected = f"{width}x{height}", f"{crop.width}x{crop.height}"
+            raise RemoteCropMissingError(REMOTE_NOT_THE_CROP.format(url=self.base_url, size=size, crop=expected))
         return response.content
 
 
@@ -208,6 +232,11 @@ class SharedWebcam:
                 f"{self.remote.base_url}. Close the other program, or start one MCP server with the monitor."
             ) from exc
 
+    async def remote_cropped_jpeg(self) -> bytes:
+        """The next frame of the other monitor, only with its crop box (the meter picture of this page). Never the
+        local webcam and never a whole frame. Raises RemoteUnavailableError or RemoteCropMissingError."""
+        return await self._remote_capture()
+
     async def _remote_capture(self) -> bytes:
         # Ask for the identity again: the crop can change, and the port can belong to a new process now.
         identity = await self.remote.identify(self.device)
@@ -217,4 +246,4 @@ class SharedWebcam:
         if identity.webcam_crop is None:
             # Frames of another monitor only with its crop box (N51 of QA round 12): no whole frame leaves.
             raise RemoteCropMissingError(REMOTE_CROP_MISSING.format(url=identity.url))
-        return await self.remote.capture_jpeg()
+        return await self.remote.capture_jpeg(identity.webcam_crop)

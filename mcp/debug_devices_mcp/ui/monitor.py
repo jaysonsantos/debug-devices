@@ -54,7 +54,7 @@ from debug_devices_mcp.ui.forward import (
 )
 from debug_devices_mcp.ui.page_push import PagePush
 from debug_devices_mcp.ui.remote_screen import RemoteScreen, ScreenStartResult
-from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
+from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, SettingsView, UiSettings
 from debug_devices_mcp.ui.version import code_version
 from debug_devices_mcp.webcam import Crop
 from debug_devices_mcp.webcam_stream import FrameSource, StreamInfo, WebcamStream, crop_jpeg
@@ -708,7 +708,17 @@ class Monitor:
             self.stream.restart()
         for listener in self._listeners:
             listener(self.effective)
+        # Every open page applies the change (a crop box cleared on another page stops its meter picture, N100).
+        self.bus.publish_settings(self.settings_view())
         return self.effective
+
+    def settings_view(self) -> SettingsView:
+        return SettingsView(
+            saved=self.saved,
+            effective=self.effective,
+            start=self.start_settings,
+            settings_file=str(self.settings_path),
+        )
 
     async def log_crop_change(self, before: Crop | None) -> None:
         """One log entry for a saved crop change, with a small image of the area that multimeter_read sends."""

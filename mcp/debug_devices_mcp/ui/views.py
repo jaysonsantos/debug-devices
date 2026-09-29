@@ -6,15 +6,8 @@ from pydantic import BaseModel, Field, StrictBool, StrictFloat
 
 from debug_devices_mcp.phone_api import RotationDegrees, ZoomStep
 from debug_devices_mcp.ui.events import PhoneState, ToolCallEvent
-from debug_devices_mcp.ui.settings import EffectiveSettings, UiSettings
+from debug_devices_mcp.ui.settings import SettingsView
 from debug_devices_mcp.webcam_stream import StreamInfo
-
-
-class SettingsView(BaseModel):
-    saved: UiSettings
-    effective: EffectiveSettings
-    start: EffectiveSettings
-    settings_file: str
 
 
 class StateView(BaseModel):
