@@ -1610,3 +1610,287 @@ The backlog of rounds 11-14 stays as written there.
 
 1. Decide: fix N65 (rest), N75, and N79 now with the journal file (one change removes the exit dependency), or accept them as known limits in `mcp/README.md` (the kept reading can be lost at an exit through `uv run` or with SIGINT ignored).
 2. Then the backlog when there is time.
+
+## N80: check
+
+Date: 2026-09-29. A short check. Scope: `docs/briefs/n80-bench-journal.md` and `docs/reports/dd-mcp.md` "N80" (the new `bench_journal.py`; the exit save, the background retry, and the SIGTERM routing are removed). The working tree on commit `1470c41` with the uncommitted N80 changes; `main` is equal to `origin/main`. dd-mcp had stopped editing. No Gradle run and no phone run. All probes used temporary state folders only (pytest `tmp_path` and my scratch folder), not the repo `bench-state.json`. Nothing contacted 18765 or 18766. I did not change product code, and I did not commit. My probe scripts are outside the repository (session scratch folder).
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1105 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only, so the new untracked files are checked) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file (320 files) and `git status --porcelain` before and after | All 15 hooks pass; hashes and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. The N80 items
+
+| Item | Status | Evidence |
+|---|---|---|
+| The gate counts journal lines at once, in two stores | fixed | `load()` applies the journal lines (`bench_state.py:593-600`); test `test_bench_journal.py:50-64`; my probes: a second store and a second process see the unknown point, and the gate is closed. But see N82 (a merge in another server at the same time). |
+| A merge is idempotent (also a crash between the save and the cut) | fixed | `BenchState.journal_ids`, `_apply_journal`; tests `:67-100`. My probe P2 (the journal lock busy during a write, so the ids are not kept; then the capture gets the name C12.1; then one more write): only `c12.1`, the journal is empty. |
+| A cut or bad line is kept and logged | fixed | `Merge.done` (`bench_journal.py:146-155`); test `:103-118`. My probe P5: a `{}` line and a cut line both stay; the good lines merge; a later append starts on a new line; each write logs one warning per bad line. See N83. |
+| No append is lost during a merge | fixed | The merge holds the journal lock from its read to its cut. Stress: 3 processes append 150 lines each while 2 processes merge in a loop (1769 merges): 450 of 450 lines in the state, 450 merged ids, 0 append errors, the journal empty, no warning. But the same lock causes N81. |
+| A read-only folder gives a clear error | fixed | Test `:156-174`. My probe P6: an empty read-only folder: `ToolError` "it is NOT SAVED ... The gate stays closed for this server only"; the other store does not see it (as designed). A read-only folder with existing writable files: the reading goes to the journal, and every server sees it. A full disk at the journal write (simulated `ENOSPC`): `ToolError` "NOT SAVED", the journal is empty, and the next write of this server saves the reading. See N84 (text). |
+| SIGTERM, SIGINT, and the `uv run` group-signal shape lose no kept reading | fixed | `route_sigterm_to_ctrl_c` and `_as_ctrl_c` are removed (`shutdown.py`, `__main__.py`). With the real entry point, one real unsafe reading went through `note_meter_reading` into the journal (the state lock busy), then: see the table below. |
+| `.gitignore` has `bench-state.journal.jsonl` | fixed | `.gitignore:25`. The journal and the state file have mode 0600. |
+
+The signal shapes (the real entry point, a fake monitor stop, private HOME and XDG dirs, `scripts/fake_adb.py`: 0 adb calls). After each exit, a new `BenchStateStore` on the same folder saw the reading, and its gate was closed. No process of the group was left.
+
+| Shape | Runs | Result |
+|---|---|---|
+| S1 (the N65 repro): `uv run`, monitor stop 3 s, lock busy 3 s, group SIGTERM, group SIGINT 0.2 s later | 4 | Exit 143 in at most 0.06 s; the reading kept (round 15: 4 of 4 lost, no log) |
+| S2 (N75): `uv run`, monitor stop 0.5 s, lock busy 1 s, one group SIGTERM | 14 | Exit 143 in at most 0.03 s; 0 hangs (round 15: 2 of 14 hung); the reading kept |
+| S3 (N79): SIGINT ignored at start, SIGTERM | 1 | Exit -15 in 0.02 s; the reading kept |
+| S4: Ctrl-C (SIGINT), monitor stop 1 s | 1 | Exit 0; monitor stopped, phone and vision closed, `after_stop` |
+| S5: SIGTERM | 1 | Exit -15 in 0.02 s (no cleanup, as before round 14; `mcp/README.md:331` is true again) |
+| S6: stdin closed | 1 | Exit 0; clean stop |
+| S7: SIGKILL | 1 | Exit -9; the reading kept |
+| S8 (N76): three SIGINT at 0, 0.2, and 0.4 s, monitor stop 3 s | 1 | Exit -2 in 0.72 s; phone and vision closed, `after_stop`; no hang (round 15: still alive at 20 s) |
+
+N65 (rest), N75, and N79 are closed. N76, N77, and N78 are gone with the exit save and the SIGTERM routing.
+
+### 3. New findings
+
+- **N81 (medium; safety risk: fix now): after the first journal use in a state folder, the journal cannot take a reading when the state lock is held by a write of another server.**
+  - Cause: `update` holds the journal lock for its full length (`bench_state.py:478` `update`: `with self._locked(), self._journal_merge()`). The journal file stays after the first merge (an empty file), so from then on, every write takes the journal lock together with the state lock.
+  - The normal holder of the state lock is a write of another server. When it holds the state lock longer than the lock wait, it also holds the journal lock. The append then waits 2 s and fails.
+  - Result: `ToolError` "NOT SAVED ... fix the state folder" (the wrong cause). The reading is only in the memory of this server, and there is no retry and no exit save any more. Other servers do not count it, and it is lost when this server stops before its next write.
+  - Probe P1: a second process in `update` for 4 s. Without a journal file: the journal took the reading in 0.36 s, and another store and a later store saw it. With the empty journal file: `ToolError` after 2.31 s, and another store and a later store did not see it.
+  - The tests hold the state lock with `other_writer` (a raw `flock` without the journal lock), so they do not find this.
+  - Fix idea: take the journal lock only for the read and for the cut, not for the whole write. The cut keeps every line whose id is not in the saved `journal_ids`, so a line appended between the read and the cut stays. The ids already make this safe.
+- **N82 (low; safety risk: fix now): `load()` can miss a journal line while another server merges it, so the gate can show open.**
+  - Cause: `load()` reads the state file first and the journal second, without a lock (`bench_state.py:593-600`). When another server saves the merged state and cuts the lines between these two reads, the load sees the line in neither file.
+  - `bench_begin_step` decides the gate with `load()` (`bench_state.py:1292`), so an unpowered step can start.
+  - Probe P3 (the reader's state read slowed to 0.3 s): the unsafe point was missing, and `gate().unpowered_tests_allowed` was True. The gate was closed before and after.
+  - Without a slowdown: 2 processes, 500 rounds of one append and one merge, with tight `load()` calls: 371 of 500 rounds had at least one load that missed the line (the window is the state parse time).
+  - With the journal read first (patched in my script only): 0 of 500.
+  - Fix: in `load()`, read the journal lines before the state file (one line).
+- N83 (low: backlog): a bad line (a cut line, or valid JSON that is not an entry) stays forever. Each write logs it again (P5: 2 bad lines, 2 writes, 4 warnings). The `bench_state` view does not show it, and the gate does not count it. A cut line comes only from an append that did not finish (the tool did not answer "saved"). Idea: show the bad lines in the `bench_state` notice, and give the user a way to remove them.
+- N84 (cosmetic: backlog): the journal notice and the NOT SAVED text say "the bench state file was busy (...)" also for a permission error (`[Errno 13]`, P6). The NOT SAVED text says "fix the state folder" also when the journal lock was busy (N81).
+- N85 (cosmetic: backlog): when the journal lock is busy during a write, the lines are applied without their ids (`remember=merge is not None`), so the next merge applies them again. P2 showed no visible effect (the capture keeps its point), but the rule depends on the point rules, not on the ids. Idea: keep the ids also then.
+- Test gaps (backlog): no test with the state lock held by an `update` of another process (N81); no test of a merge during `load()` (N82); no test that the next write saves an in-memory reading after a failed journal write (it works: P6).
+
+### Summary
+
+- Tests: pytest 1105 passed, 1 skipped; prek passes and leaves the tree unchanged (320 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18766, and the repo `bench-state.json` was not used.
+- Fixed: the N80 items as briefed. N65 (rest), N75, and N79 are closed (S1 4/4, S2 14/14, S3); N76, N77, and N78 are gone.
+- Not fixed: the journal fails in its normal case after the first use (N81), and a gate read can miss a line during a merge (N82).
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N81 | medium | safety (a reading NOT SAVED, other servers do not count it, lost at exit) | **fix now** | `bench_state.py:478` `update`, `:503` `_journal_merge`, `bench_journal.py` `merging` and `Merge.done` |
+| N82 | low | safety (the gate can show open during a merge) | **fix now** | `bench_state.py:593-600` (`load`), used by `bench_begin_step` (`:1292`) |
+| N83 | low | none | backlog | `bench_journal.py:146-155`, the `bench_state` view |
+| N84 | cosmetic | none | backlog | `bench_state.py` `JOURNAL_NOTE`, `NOT_SAVED` |
+| N85 | cosmetic | none | backlog | `bench_state.py` `_apply_journal` (`remember`) |
+| Test gaps | low | none | backlog | `mcp/tests/test_bench_journal.py` |
+
+N74 (text) and the backlog of rounds 11-15 stay as written there.
+
+### What to do next
+
+1. Fix N81 and N82 together in `bench_state.py` and `bench_journal.py`:
+   - The journal lock only for the read and for the cut. The cut keeps every line whose id is not in the saved `journal_ids`.
+   - `load()` reads the journal first.
+   - Add two tests: the state lock held by an `update` in another process, and a merge during `load()`.
+2. Then a short check of these two items: my probes P1 and P3, the append stress, pytest, and prek.
+
+## N81 and staged part 1: check
+
+Date: 2026-09-29. Scope A (re-check): N81, N82, N84, N85 (`docs/reports/dd-mcp.md` "N81 and N82"). Scope B (first check): staged captures part 1 and rule 11 (`docs/briefs/staged-captures.md`; `docs/reports/dd-ui.md` rounds 50 and 51). The tool wiring in `server.py` (the `multimeter_read` pop) is not done yet, as planned; I do not report it as missing. The working tree on commit `1470c41` with the uncommitted changes; `main` is equal to `origin/main`. dd-mcp and dd-ui had stopped editing. No Gradle run and no phone run. Only temporary state folders; the repo `bench-state.json` was not used. Nothing contacted 18765 or 18766: the page-key test used its own test server on a free port with `scripts/fake_adb.py` and a webcam device that does not exist. I did not change product code, and I did not commit. My probe scripts are in the session scratch folder, not in the repository.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1122 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (326 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. Scope A: N81, N82, N84, N85
+
+| Id | Status | Evidence |
+|---|---|---|
+| N81 | fixed | `update` holds the journal lock only for `read_locked` and `cut` (`bench_state.py:480-510`, `bench_journal.py:115-148`). Probe P1 (a real second process in `update` for 4 s, with the empty journal file of a first use): the reading went into the journal in 0.30 s (round "N80: check": NOT SAVED after 2.31 s); another store and a later store see it. Without a journal file: the same. |
+| N82 | fixed, with a small rest (N86) | `load()` reads the journal first (`bench_state.py:599-607`). Probe P3 (the reader slowed between its two reads while another store merges): the point is there, and the gate stays closed. The earlier natural race (500 rounds) had 371 rounds with a miss; the new order gives 0 in the same shape. But see N86 (the cut rewrite). |
+| N84 | fixed | Probes P6 and P10: "could not take it (<the real error>)", "the journal write failed too (...)"; `[Errno 13]` gets "check the state folder (free space, write permission)"; a busy journal lock gets "another server holds the bench journal lock ... read the meter again". |
+| N85 | fixed | Probe P9 (the journal lock busy during a write): the id is saved (`journal_ids` 1), and the next write cuts the line; P2: no second unknown point after the capture got its name. |
+| Append stress | still fixed | 3 processes append 150 lines each while 2 processes merge (1461 merges): 450 of 450 in the state, 0 append errors, the journal empty. |
+| N65 repro | still fixed | The real entry point under `uv run` with a journal reading: group SIGTERM, then group SIGINT 0.2 s later, lock busy 3 s: 4 of 4 exit 143 in at most 0.03 s, and a new store sees the reading with the gate closed. Also one group SIGTERM (6 runs), SIGINT ignored plus SIGTERM, Ctrl-C, and SIGKILL: the reading kept, no process left, 0 adb calls. |
+
+New in Scope A:
+
+- **N86 (low; safety risk: fix now): a `load()` can miss a line that another server appended during a write, while that write's cut rewrites the journal.**
+  - Cause: `BenchJournal.cut` truncates the file to 0 and then writes back the kept lines (`bench_journal.py:143-145`); `load()` reads the journal without the lock (`bench_state.py:603`). A read in that gap sees an empty journal, and the kept line is not in the state file yet.
+  - Probe P8, deterministic (the gap widened): the reader does not see the kept line; after the cut it does.
+  - Probe P8, natural (400 writes, each with one line appended during the write, a second process loads in a tight loop): 5, 8, and 13 loads missed the line (of about 1500 each run).
+  - With `load()` reading under the journal lock (`read_locked`, as `update` does; patched in my script only): 0, 0, and 0.
+  - In real use, it needs three things at once: a long write in one server, a lock-timeout reading of a second server, and a gate check of a third server in a gap of microseconds. So it is rare, but it can show the gate open.
+  - Fix: in `load()`, read the journal with `_journal_lines()` (the short journal lock, and the unlocked read only when the lock stays busy).
+- N87 (cosmetic: backlog): when the journal lock stays busy (a stuck appender), one write holds the state lock about 4 s (2 s for `read_locked`, then 2 s for `cut`); probe P9: 4.01 s. Other servers wait at most 5 s for the state lock, so a second write at the same time can time out. Idea: skip the cut when the read was unlocked.
+- N83 (backlog) is unchanged: a bad line stays forever and is logged at every write (P5).
+
+### 3. Scope B: staged captures part 1 and rule 11
+
+My probes used the test fakes (`FakePhone`, a fake webcam, a mock vision model) and tmp folders.
+
+| Item | Status | Evidence |
+|---|---|---|
+| The store: at most 10, 30 min, the lock, mode 0600 | done | Two processes add 8 captures each at the same time: 10 stored, 6 refused with `QueueFullError` (the lock works across processes). A fake clock: a pending capture is failed after 3 min, and a capture older than 30 min is removed. A finish after a delete writes no file. The folder is 0700, the entry and image files 0600 (written to a temporary name first), the lock file sits in the 0700 folder. Tests `test_staged_store.py` (7). |
+| No vision call without a crop | done, with a gap (N89) | `_meter` returns `NO_CROP` before any frame when the crop is not set (`ui/staged_capture.py:106-109`); test `test_staged_capture.py` (0 frames, 0 vision calls). But the crop is checked only once, at the start (N89). |
+| The bench gate closes at capture time | done | The meter part is `server.read_meter`, which calls `note_meter_reading` (`server.py:932`). My probe B4: 4.98 V with the state lock busy: the reading goes into the journal, and another store's gate is closed before any pop. Test: 4.98 V closes the gate while the capture waits. |
+| Page origin on the routes | done | POST capture, DELETE one, and DELETE all use `refused` (`ui/routes/staged.py:191`, `:215`, `:225`), the same check as the device actions; the app refuses a Host that is not local (`ui/app.py:56`). The key test (below) from Python: 403 for a POST without Origin, with `Origin: http://evil.example`, with `Origin: null`, with a foreign Host (the DNS rebinding shape, also with a matching Origin), and for DELETE without Origin; a fetch from the page gets 202. A GET of the list without Origin gets 200 (reads are open to local processes, like the other page reads). A local process that forges the page Origin gets 202, the same limit as the device routes. |
+| The page keys | done | A helper agent ran Playwright in headless Chromium 141 and Firefox 155 against its own test server on a free port (fakes only, `OPENROUTER_API_KEY` empty, a webcam device that does not exist), in a private network namespace (`unshare -rn`). 10 of 10 cases pass in both browsers (91 checks): Space, `c`, Shift+C, and a CapsLock `C` give one capture each, with the flash; no capture in text, number, search, range, select, textarea, checkbox, or contenteditable fields (the text goes to the field); Ctrl, Alt, and Meta combinations give none; a held key (6 repeats) gives one; Space on a focused button (Take snapshot, Capture, Use this phone, Start all, Connect, ×, Clear all) captures and does not click it, also in Firefox on keyup; the page does not scroll; the Capture button, the counter, ×, and Clear all work. |
+| conftest's private `XDG_STATE_HOME` | done | `conftest.py:87-92` (autouse). My probe B5: `StagedStore.default()` in a test is under the pytest tmp folder, not `~/.local/state/debug-devices`. |
+| Rule 11 | done (text) | `instructions.py:98` and `bench_instructions`; test `test_the_evidence_rules_name_staged_captures`. See the note below. |
+
+New in Scope B:
+
+- **N88 (medium: fix now): a capture at the same time as an agent `phone_snapshot` can give the agent's photo the wrong camera view.**
+  - Cause: the capture saves `services.last_view`, takes its still (which sets `last_view`), and puts the saved view back in a `finally` (`ui/staged_capture.py:89-95`). The agent's `take_phone_snapshot` sets `last_view` in `phone_snapshot` (`server.py:702`) and reads it again later for its capture record (`server.py:869`). When the capture puts back the old view between these two lines, the agent's photo gets the old view.
+  - Probe B1: an agent photo at zoom 1, `phone_zoom` 2, then a capture and an agent `phone_snapshot` at the same time (the capture's still 0.3 s, the agent's transform 0.5 s): the capture log has zoom [1.0, 1.0] for the two agent photos. The control run (the same delays, no capture): [1.0, 2.0].
+  - Effect: the registration check compares these views (`evidence.py:222-224`), so a board registration of the zoom-1 photo can count as valid for the zoom-2 photo, and the pointing tools can mark the wrong place. Nothing tells the agent.
+  - Fix: a `Services.phone_snapshot` option that does not set `last_view`, for the staged still, instead of the save and restore.
+- **N89 (low; privacy risk: fix now): when the user clears the crop box during a capture, the next meter frame goes to the vision model and to the store without the crop.**
+  - Cause: the crop is checked once before the frames; the real webcam reads the crop at each frame (`webcam.py:99-101`), and the frames are 1 s apart (`METER_FRAME_INTERVAL`).
+  - Probe B2 (the crop cleared 0.1 s after the key press): the crop at each frame was [CROP, None]; 2 vision calls; 2 frames stored. With the real webcam, the second frame is the whole frame (it can show people).
+  - Fix: in the staged path, check the crop before each frame (for example a `read_meter` option that refuses a webcam frame without a crop).
+  - Older, outside this scope: the agent's `multimeter_read` has no crop check; the default `--webcam-crop` is empty, so without a crop box it sends the whole frame (N51 covered only the remote webcam).
+- N90 (low: backlog): `StagedStore.photo()` builds the file path from the id without a check (`staged.py:175`, `:184-185`): probe B3: `photo("../secret")` read `staged/../secret.photo.jpg`. The page route cannot pass a `/` (Starlette's path parameter), so there is no way in today. The coming tool wiring must not pass an unchecked id. Idea: accept only the UUID form in the store.
+- Note for the commit: rule 11 and the `bench_instructions` sentence are live now, but `multimeter_read` does not pop yet. Commit rule 11 together with the wiring; otherwise an agent that follows rule 11 gets a live reading and the staged captures stay in the queue (they still close the gate at capture time).
+- N91 (cosmetic: backlog): a refused staged request says "only the monitor page can change the phone (...)" (`NOT_THE_PAGE` through `refused`); the text is wrong for a capture, a delete, or a clear.
+- QA note (no product change asked): by design (`mcp/README.md:260`, `ui/forward.py:58-61`), every server asks the default page port 18766 for webcam sharing when its monitor starts the webcam stream, whatever its `--ui-port`. So a test page server contacts the user's monitor. The key test ran in a private network namespace for this reason; my other runs used `--no-ui` or a fake monitor. Future page tests need the same isolation.
+
+### Summary
+
+- Tests: pytest 1122 passed, 1 skipped; prek passes and leaves the tree unchanged (326 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18765 or 18766; the repo `bench-state.json` was not used.
+- Scope A: N81, N82, N84, and N85 are fixed; the append stress and the N65 `uv run` repro still pass. A small rest of N82 remains (N86).
+- Scope B: the store, the limits, the modes, the gate at capture time, the page origin, the keys (Chromium and Firefox, 10 of 10 cases), and the private test state folder work as briefed. Two new fix-now items: N88 (the camera view race) and N89 (the crop cleared during a capture).
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N86 | low | safety (a gate read can miss a line during a cut) | **fix now** | `bench_state.py:603` (`load`), `bench_journal.py:143-145` |
+| N88 | medium | wrong camera view in the evidence of an agent photo | **fix now** | `ui/staged_capture.py:89-95`, `server.py:702`, `:869` |
+| N89 | low | privacy (a frame without the crop goes to the vision model and the store) | **fix now** | `ui/staged_capture.py:106-111`, `server.py:912-918` |
+| N87 | cosmetic | none | backlog | `bench_state.py:512-520`, `:499-509` |
+| N90 | low | none today (the route blocks `/`) | backlog | `staged.py:174-175`, `:184-185` |
+| N91 | cosmetic | none | backlog | `ui/routes/devices.py` `NOT_THE_PAGE` |
+| N83 | low | none | backlog | unchanged |
+
+N74 and the backlog of rounds 11-15 stay as written there.
+
+### What to do next
+
+1. Fix N86, N88, and N89 (all small):
+   - N86: `load()` reads the journal with `_journal_lines()`.
+   - N88: a `phone_snapshot` option that leaves `last_view` alone, for the staged still.
+   - N89: the staged path checks the crop before each frame.
+2. Commit rule 11 together with the `multimeter_read` wiring (part 2), not before.
+3. Then a short check: my probes P8, B1, and B2, pytest, and prek. For page tests, run the test server in a private network namespace.
+
+## Staged part 2: check
+
+Date: 2026-09-29. A short check. Scope: N86 (`docs/reports/dd-mcp.md` "N86"); staged captures part 2 and the fixes N88-N91 (`docs/reports/dd-ui.md` round 52); the removed output schema of `multimeter_read`. The working tree on commit `1470c41` with the uncommitted changes; `main` is equal to `origin/main`. dd-mcp and dd-ui had stopped editing. No Gradle run and no phone run. My probes used the test fakes and tmp folders (pytest `tmp_path` and a private `XDG_STATE_HOME`); no page server ran, so nothing asked 18766 for the webcam, and nothing contacted 18765 or 18766. The repo `bench-state.json` was not used. I did not change product code, and I did not commit. My probe scripts are in the session scratch folder.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1133 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file (327 files) and `git status --porcelain` before and after | All 15 hooks pass; hashes and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty; the script uses a private `XDG_STATE_HOME` (`scripts/qa_mcp_stdio.py:555`), so it cannot pop the user's queue |
+
+### 2. Results
+
+| Item | Status | Evidence |
+|---|---|---|
+| N86 | fixed | `load()` reads the journal with `_journal_lines()`. Probe P8 natural (400 writes, each with one line appended during the write, a second process loads in a tight loop): 0, 0, and 0 misses (about 1400 loads each; before: 5, 8, and 13). Rest: only when the journal lock stays busy over 2 s does `load()` fall back to the unlocked read, and then it can still miss a line during a cut (my blocking probe shows this); the same class as N87 (backlog). |
+| Pop all, oldest first | done | Probe S1 (a second server pops the page server's captures): 3 captures in the order of the key presses; `include_image` gives each photo (`_meta.staged: "phone_photo"`) and its 2 meter frames (`"meter_frame"`). |
+| Waits for a pending capture | done | S1: the third capture's vision call took 1.5 s; the pop waited 1.51 s and gave it as ready. |
+| Live only when none wait | done | S1: the call after the pop read live (2 new vision calls; the result starts with `{"readable":true,"display_text":...`). |
+| `live: true` skips the queue | done | S1: with 3 captures waiting, a live `MeterResult`; the 3 captures stayed. |
+| `staged_captures` is read only | done | S1: the list in order, with the pending state; a second call still has 3. |
+| The note about the capture time | done | The batch: `note` "Each photo and meter value shows the moment of its capture (`captured_at`, `age_s`), not now: say so. They are removed from the queue now."; each entry has `age_s`. |
+| Rule 11 matches | done | `instructions.py:98-101` ("staged captures come first (oldest first); it reads live only when none wait ... evidence of their capture time only") matches S1; `mcp/README.md` (the tool table and "Staged captures") too. |
+| A staged batch is not a live reading | done | The batch's top level has only `count`, `note`, and `staged` (no `value`, `status`, or `display_text`); its text starts with `{"staged":[`; the meter results are inside each entry with `captured_at` and `age_s`. An unsafe capture (7.00 V) closed the gate before the pop (S3). |
+| No output schema: the live result for MCP clients | same as before | The HEAD code and the new code, the same live read through an MCP client (fakes), ids and times replaced: the content blocks (one text; with `include_image` also two images with the same `_meta`), the text, and the structured content are identical, and the text equals the structured content in both. Only differences: `tools/list` has no `outputSchema` now (before: `MeterResult`, 29 properties), and the new input `live`. The `multimeter_read` error without a key has the same text as before (`qa_mcp_stdio`). |
+| N88 | fixed | `Services.phone_snapshot(record_view=False)` for the staged still. Probe B1: the zoom of the two agent photos [1.0, 2.0] (before: [1.0, 1.0]); the control run is the same. |
+| N89 | fixed | `read_meter(..., require_crop=True)`. Probe B2 (the crop cleared 0.1 s after the key press): only the cropped frame was read, 1 vision call, no frame and no meter result stored. |
+| N90 | fixed | `photo()` and `delete()` accept only the UUID form: `..`, `.lock`, `../secret`, and `%2e%2e` give `None` without a file access. |
+| N91 | fixed | The staged routes refuse with "only the monitor page can capture, delete, or clear staged captures (a same-origin request)" (`ui/routes/staged.py:22`). |
+| Store checks again | still done | 2 processes x 8 adds: 10 stored, 6 refused; TTL and pending timeout; a late finish after a delete (UUID id) writes nothing; modes 0700 and 0600. |
+
+### 3. New findings
+
+- **N92 (medium: fix now): a popped staged reading can be recorded (`bench_record_measurement`) only in the page server that took it, and only with `meter.capture_id`.**
+  - Probe S2 (a safe 0.01 V capture, then `multimeter_read`, then `bench_record_measurement(capture_id, label="C12.1")`):
+    - in the page server: the staged `capture_id` (the first id of each entry) fails ("no multimeter_read result with capture id ... in this server"); `meter.capture_id` works;
+    - in another server on the same state folder (the brief's example: the bench session): both ids fail.
+  - Cause: only `read_meter` in the capturing server adds the result to `services.captures.meter_results` (`server.py:976`); the pop adds nothing (`server.py:1365-1368`). A restart of the page server (for example a dev reload) loses them too.
+  - Effect: in that server, the agent cannot record a staged value, and the unknown point of an unsafe staged reading cannot get its point name, which its `bench_notice` asks for ("Record the capture with its point name"). Only the user can clear it then. The gate stays on the safe side.
+  - Fix: when `multimeter_read` pops, add each staged meter result to `services.captures.meter_results` under its meter capture id, its frame ids, and the staged `capture_id`; and say in the docstring which id to record.
+- N93 (low: backlog): with a staged batch, the parameters `expected_mode`, `expected_value`, `source`, and `frames` are not applied, and the result does not say so (only the docstring does). A staged DC V reading is then not "disputed" when the agent expected another mode. Idea: a note in the batch when such parameters were given.
+
+### Summary
+
+- Tests: pytest 1133 passed, 1 skipped; prek passes and leaves the tree unchanged (327 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18765 or 18766.
+- Fixed: N86 (a rest only with a journal lock stuck over 2 s), N88, N89, N90, N91. Staged part 2 works as briefed, rule 11 matches, a batch cannot pass for a live reading, and the live result is unchanged for MCP clients (only the output schema is gone).
+- New: N92 (fix now), N93 (backlog).
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N92 | medium | none for the gate (it stays closed); the bench steps break in another server | **fix now** | `server.py:1365-1368` (the pop), `:976` |
+| N93 | low | none | backlog | `server.py:1365-1368`, `staged.py` `StagedReadResult` |
+| N87 (with the N86 rest) | cosmetic | none | backlog | `bench_state.py` `_journal_lines`, `_commit` |
+
+N83, N74, and the backlog of rounds 11-15 stay as written there.
+
+### What to do next
+
+1. Fix N92: the pop adds the staged meter results to `meter_results` (all three ids), and the docstring names the id to record.
+2. Then a short check: my probe S2 in the page server and in a second server, pytest, and prek.
+3. Commit the staged parts together (rule 11 and the wiring are in the same tree now).
+
+## N92: check
+
+Date: 2026-09-29. A short check. Scope: N92 and N93 (`docs/reports/dd-ui.md` round 53). The working tree on commit `1470c41` with the uncommitted changes; `main` is equal to `origin/main`. dd-ui had stopped editing. No Gradle run and no phone run. My probes used the test fakes, tmp folders, and a private `XDG_STATE_HOME`; no page server ran, and nothing contacted 18765 or 18766. The repo `bench-state.json` was not used. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1136 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (327 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. Results
+
+In each case, the page server takes the captures and stops; another `Services` on the same state folder and the same bench file (the bench session) pops them with `multimeter_read`.
+
+| Item | Status | Evidence |
+|---|---|---|
+| N92: record by each id in another server | fixed | `staged_result` adds each staged meter result to `meter_results` under the staged `capture_id`, `meter.capture_id`, and each frame id (`server.py:1421-1428`). Probe T1: three captures recorded by the staged id, the meter id, and a frame id: all three accepted. |
+| One reading, one point, across the three ids | done | T2: the same capture by a frame id with another label (C99.1) is refused ("capture ... is already recorded for ..."); by the meter id with the same label: no second measurement (3 measurements for 3 captures). The record uses `meter.capture_id` for all three ids. |
+| After a page server restart | fixed | T3: new `Services` of the page server pop and record by the staged id. |
+| An unsafe staged reading gets its point name | fixed | T4: a 7.00 V capture closed the gate at an unknown point at capture time; after the pop, recording by the staged id moves it to `c12.1` (not safe), and the gate names 'C12.1'. |
+| An old staged safe reading and the gate | safe | T6: a safe 0.01 V capture taken before the isolation confirmation, recorded after it: accepted as a measurement, but the gate stays closed ("no safe residual-voltage measurement ... after" the confirmation), because the reading keeps its capture time. |
+| N93: `not_applied` | fixed | T5: `expected_mode`, `expected_value` (also 0.0), `source: phone`, and `frames: 3` are all named, with the note ("... given, but not applied to the staged captures ... Call multimeter_read with live: true ..."); no parameters, the explicit defaults (`source: webcam`, `frames: 2`), and `include_image` alone give an empty list and no note. A staged DC V reading with `expected_mode: resistance` stays "confirmed", and the note says why. |
+| Docs | done | The `multimeter_read` docstring and the batch note name the id to record; `mcp/README.md` has both points. |
+
+No new finding.
+
+### Summary
+
+- Tests: pytest 1136 passed, 1 skipped; prek passes and leaves the tree unchanged; MCP stdio 15/15. Nothing contacted 18765 or 18766.
+- N92 and N93 are fixed. The three ids do not break the one-reading-one-point rule, and an old staged safe reading cannot open the gate.
+- No fix-now item is open from this check. The backlog stays as written (N74, N83, N87 with the N86 rest).
+
+### What to do next
+
+1. Commit the N80-N93 work and the staged captures together.
+2. The backlog when there is time.

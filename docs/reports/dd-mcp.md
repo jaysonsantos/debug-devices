@@ -1250,3 +1250,103 @@ I edited only `bench_state.py`, `bench_points.py`, three small parts of `server.
 ### Checks
 
 - `uv run pytest`: 1107 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## N80: journal for kept unsafe readings (`docs/briefs/n80-bench-journal.md`)
+
+### What I did
+
+- New module `mcp/debug_devices_mcp/bench_journal.py`:
+  - `BenchJournal.append` writes one JSON line (`JournalEntry`: an id (UUID v7), the time, the full `MeterResult`) to `bench-state.journal.jsonl` next to the state file. It uses `O_APPEND`, `fsync`, and, for a new file, also `fsync` of the folder.
+  - When the file does not end with a newline (a line that a crash cut), the append writes a newline first, so the new line stays whole.
+  - The append does not wait for the state lock. It takes only a short lock on the journal file itself (`flock`, at most 2 s; in practice milliseconds).
+  - The merge (`BenchJournal.merging`, `Merge.done`) holds the same lock from its read to its cut. So an append from another process cannot fall between the read and the cut and get lost. This is the one change from the brief's "no shared lock": the busy state lock is never shared, but the journal has its own short lock.
+- `bench_state.py`:
+  - `BenchStateStore.journal` is the journal of the state file.
+  - `update` (under the state lock) merges the journal lines into the state, applies the change, saves, and then cuts the merged lines (`_commit`).
+  - The state keeps the merged ids (`BenchState.journal_ids`, the last 1000), so a merge is idempotent. After a crash between the save and the cut, the next merge applies nothing twice. It also does not bring back an unknown point that got its point name meanwhile.
+  - When the journal lock is busy, `update` reads the lines without it (the gate still counts them), logs it, and a later write merges them.
+  - `load` (with no lock) applies the journal lines that are not merged yet. So the gate counts them at once, in every server process.
+  - A bad line is logged at warning level at each merge and stays in the file.
+- `note_meter_reading`: when `update` fails (the lock timeout, or an `OSError`), `BenchStateStore.keep_in_journal` writes the reading to the journal at once. The notice says "the reading went into the journal bench-state.journal.jsonl: the gate counts it now in every server, and the next bench-state write merges it".
+  - When the journal write fails too (a full disk, a read-only folder), it raises a `ToolError`: "... it is NOT SAVED: ... The gate stays closed for this server only; fix the state folder, then read the meter again".
+- Removed, because the journal makes them unnecessary:
+  - the exit save (`save_unsaved_at_exit`, `EXIT_SAVE_TIMEOUT`, the calls in the lifespan and in `Services.aclose`);
+  - the background retry (`flush_later`, `FLUSH_DELAY`, `FLUSH_ATTEMPTS`);
+  - the SIGTERM routing (`route_sigterm_to_ctrl_c`, `_as_ctrl_c`, the call in `__main__.py`). SIGTERM stops the process as before round 14, and the README reload text ("The server has no SIGTERM handler") is true again.
+- Kept, with the reasons:
+  - The in-memory copy (`keep_unsaved`) stays only for the case where the journal write fails too. Then it keeps this server's gate closed, and the next write tries the state file again.
+  - The background merge is gone: every load in every server counts the journal lines at once, so an earlier merge adds nothing for the gate.
+  - The lifespan order (the monitor stop in its own `try`, so `services.aclose()` runs also when it raises, N66), the shielded client close (N57), and `after_stop` in a `finally` stay, because they are about the clients and the exit watchdog, not about the readings.
+- Docs: the "Bench state" bullet in `mcp/README.md` (the journal, the three files, "NOT saved").
+
+### Tests
+
+- `mcp/tests/test_bench_journal.py` (new):
+  - Lock busy: the reading goes to the journal. The gate is closed in the same store and in a second `BenchStateStore` on the same folder. The state file is not written.
+  - The next write merges once: two writes give one point and one merged id, and the journal is empty.
+  - A crash after the save and before the cut (`Merge.done` skipped), then the capture gets the name C12.1: the next write adds no unknown point again.
+  - A cut last line between two good lines: both good lines are merged, and the cut line stays and is logged.
+  - SIGKILL: a child process writes the reading to the journal (the lock is busy) and kills itself with SIGKILL (exit -9). The next process sees the point, and its write merges it.
+  - A read-only folder: a `ToolError` with "it is NOT SAVED" and "the gate stays closed for this server only"; the gate of this server counts the reading; the notice says "NOT saved".
+  - `multimeter_read` with the lock busy: `bench_notice` names the journal, and another store sees the point.
+- `mcp/tests/test_exit.py` (new; it replaces `test_exit_save.py`): Ctrl-C (a cancelled scope) and a monitor stop that raises: both clients close, and `after_stop` runs.
+- Removed: the exit-save, SIGTERM, and background-retry tests (the code is gone).
+
+### Status of N65, N75, and N79
+
+- N65 (a second interrupt cuts the exit save), N75 (a hang with a nested `_as_ctrl_c` under `uv run`), and N79 (SIGINT ignored: SIGTERM stops the process with no save) are closed by design. No reading waits for the exit any more: a reading that the state file cannot take is in the journal (written and `fsync`ed) before the tool answers, and the SIGTERM routing is gone. The exit path can be cut by any signal without losing a reading.
+
+### Checks
+
+- `uv run pytest`: 1105 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## N81 and N82 (from the "N80: check" in `docs/reports/dd-qa.md`)
+
+### What I did
+
+- N81 (`bench_state.py`, `bench_journal.py`): a write of the state no longer holds the journal lock for its whole length.
+  - `update` takes the journal lock only to read the lines (`BenchJournal.read_locked`; when that lock is busy, it reads without it and logs it). It then applies the lines, changes, and saves, and takes the lock again only for the cut (`BenchJournal.cut`).
+  - The cut re-reads the file under the lock and removes only the lines whose ids are in the saved `journal_ids`. A line that another server appended during this write, and every bad line, stays.
+  - A busy lock at the cut leaves the lines for a later cut: their ids are already in the saved state, so no merge repeats them.
+  - The `Merge` class is gone.
+  - So an append of another server waits at most for a read or a cut (milliseconds), never for a long state write.
+- N85 (it was needed for the cut): lines that `update` reads without the journal lock now also record their ids.
+- NOT SAVED and the journal notice name the real cause (N84):
+  - "the bench state file could not take it (<the reason: the lock timeout, or the OS error>)", and "the journal write failed too (<the error>)".
+  - A busy journal lock now has its own error (`JournalLockedError`, "another server holds the bench journal lock") and its own advice ("another server holds the journal lock: read the meter again").
+  - A file error gets "check the state folder (free space, write permission), then read the meter again". Before, the text always said "the bench state file was busy" and "fix the state folder".
+- N82 (`BenchStateStore.load`): the journal is read before the state file. When another server merges and cuts between the two reads, the line is then in the state file, never in neither. `bench_begin_step` decides the gate with `load()`.
+
+### Tests (`mcp/tests/test_bench_journal.py`)
+
+- N81: a real second `BenchStateStore` holds the state lock in a long `update` (not a raw `flock`), with the empty journal file of a first use present.
+  - A `note_meter_reading` of another store gets "went into the journal" (no NOT SAVED).
+  - The long write's cut keeps the new line.
+  - Another store counts the point, and the next write merges it and empties the journal.
+- NOT SAVED text: the state lock and the journal lock both busy: the text names the state lock, "another server holds the bench journal lock", and ends with the journal-lock advice. The read-only folder test also checks the folder advice.
+- N82: another store merges and cuts between the state read of a `load()` and its end: the point is in the result, and the gate is closed.
+- The crash test (a crash between the save and the cut) now skips `BenchJournal.cut`.
+
+### Checks
+
+- `uv run pytest`: 1122 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.
+
+## N86 (from "N81 and staged part 1: check" in `docs/reports/dd-qa.md`)
+
+### What I did
+
+- `BenchStateStore.load` (`bench_state.py`) reads the journal lines with `_journal_lines()`: under the short journal lock, as `update` does, and without it only when the lock stays busy (logged).
+  - Before this fix, `load()` read the journal with no lock. `BenchJournal.cut` truncates the file and then writes the kept lines back, so a gate read in that gap saw no line. The kept line was not in the state file yet either.
+  - Now a load waits for the cut (milliseconds) and sees the kept line.
+  - The order of N82 stays: the journal first, then the state file.
+- I edited only `bench_state.py` and `mcp/tests/test_bench_journal.py`. `server.py` is dd-ui's in this round, and the README text ("every load in any server counts the journal lines for the gate at once") is still true.
+- N87 (a stuck appender can hold a write for about 4 s) stays in the backlog, as the orchestrator decided.
+
+### Test (`mcp/tests/test_bench_journal.py`)
+
+- `test_a_load_during_a_cut_sees_the_kept_line`: a cut removes one merged line and keeps one line. The write-back after the truncate is slowed by 0.3 s. A `load()` in that gap has the kept point, and the gate is closed.
+- I checked the test against the old code: with the unlocked read, it fails; with the fix, it passes.
+
+### Checks
+
+- `uv run pytest`: 1123 passed, 1 skipped. ruff and prek on my files: pass. Nothing committed.

@@ -14,9 +14,18 @@
     <button id="bench-start" type="button" title="Page, webcam, and phone (bench_start)">Start all</button>
     <button id="bench-stop" type="button" title="Webcam, phone screen, adb forward, and this page (bench_stop)">Stop all</button>
     <span id="bench-status" class="hint"></span>
+    <button id="staged-capture" type="button" title="Capture the phone photo and the meter reading of this moment (Space or C). The agent gets them at its next multimeter_read.">Capture <kbd>Space</kbd></button>
+    <span id="staged-count" class="badge" title="Staged captures that wait for the agent">0 staged</span>
   </header>
+  <div id="staged-flash" class="staged-flash" hidden></div>
 
   <main>
+    <section id="staged-panel" class="panel" hidden>
+      <h2>Staged captures <small class="hint">the agent gets them at its next multimeter_read; each shows the moment of its capture</small></h2>
+      <p id="staged-message" class="hint" role="status"></p>
+      <ol id="staged-list"></ol>
+      <button id="staged-clear" type="button" title="Remove all staged captures">Clear all</button>
+    </section>
     <section id="phone-panel" class="panel">
       <h2>Phone</h2>
       <p id="restart-note" class="restart-note" role="status" hidden></p>

@@ -22,5 +22,6 @@ instructions.md
 # Local bench record of the MCP server (bench_state): power state, measurements, steps. Never tracked.
 bench-state.json
 bench-state.json.lock
+bench-state.journal.jsonl
 # Orchestrator briefs for the agents (working notes)
 docs/briefs/

@@ -40,6 +40,9 @@ const API = {
   boardSearch: "/api/board/search",
   boardRegister: "/api/board/register",
   callImage: (id, index) => `/api/calls/${id}/images/${index}`,
+  staged: "/api/staged",
+  stagedOne: (id) => `/api/staged/${id}`,
+  stagedPhoto: (id) => `/api/staged/${id}/photo.jpg`,
 };
 const MAX_LOG_ROWS = 200;
 const MIN_CROP_PIXELS = 8;
@@ -832,6 +835,7 @@ function setupFullscreen() {
   setupMarkings();
   setupBoard();
   setupDevices();
+  setupStaged();
   const controls = document.querySelector("#phone-view .fs-controls");
   for (const button of controls.querySelectorAll("[data-zoom]")) {
     button.addEventListener("click", () => phoneAction(API.phoneZoom, { step: button.dataset.zoom }));
@@ -1832,6 +1836,157 @@ function setupBoard() {
 }
 
 // endregion: board panel
+
+// region: staged captures
+
+// Space (also a USB foot pedal that sends Space) and C capture; never in a text field or with a modifier.
+const STAGED_KEYS = new Set([" ", "c", "C"]);
+const STAGED_POLL_MS = 2000;
+const STAGED_FLASH_MS = 250;
+const STAGED_BEEP = { frequency: 880, seconds: 0.08, gain: 0.15 };
+const staged = { audio: null, flashTimer: null, rendered: new Map() };
+
+function stagedKey(event) {
+  if (!STAGED_KEYS.has(event.key) || event.ctrlKey || event.metaKey || event.altKey) return false;
+  return !event.target.closest?.(FORM_FIELDS) && !event.target.isContentEditable;
+}
+
+function stagedBeep() {
+  try {
+    staged.audio ??= new AudioContext();
+    const oscillator = staged.audio.createOscillator();
+    const gain = staged.audio.createGain();
+    oscillator.frequency.value = STAGED_BEEP.frequency;
+    gain.gain.value = STAGED_BEEP.gain;
+    oscillator.connect(gain).connect(staged.audio.destination);
+    oscillator.start();
+    oscillator.stop(staged.audio.currentTime + STAGED_BEEP.seconds);
+  } catch {
+    // No sound (no audio device, or not allowed yet): the flash still shows.
+  }
+}
+
+function stagedFlash() {
+  const flash = $("staged-flash");
+  flash.hidden = false;
+  flash.classList.remove("on");
+  void flash.offsetWidth; // restart the animation
+  flash.classList.add("on");
+  clearTimeout(staged.flashTimer);
+  staged.flashTimer = setTimeout(() => {
+    flash.hidden = true;
+  }, STAGED_FLASH_MS);
+}
+
+async function stagedCapture() {
+  stagedFlash();
+  stagedBeep();
+  try {
+    await api("POST", API.staged);
+    $("staged-message").textContent = "";
+  } catch (error) {
+    $("staged-message").textContent = error.message;
+    $("staged-panel").hidden = false;
+  }
+  await loadStaged();
+}
+
+function stagedItem(capture) {
+  const item = document.createElement("li");
+  item.dataset.captureId = capture.capture_id;
+  item.classList.toggle("failed", capture.state === "failed");
+  if (capture.has_photo) {
+    const photo = document.createElement("img");
+    photo.src = API.stagedPhoto(capture.capture_id);
+    photo.alt = "The phone photo of this capture";
+    item.append(photo);
+  }
+  const text = document.createElement("div");
+  const time = document.createElement("div");
+  time.textContent = new Date(capture.captured_at).toLocaleTimeString();
+  const value = document.createElement("div");
+  value.className = "staged-value";
+  value.textContent = capture.state === "pending"
+    ? "reading…"
+    : capture.meter_text ? `${capture.meter_text} (${capture.meter_status})` : "no meter value";
+  text.append(time, value);
+  if (capture.bench_notice) {
+    const bench = document.createElement("div");
+    bench.className = "staged-bench";
+    bench.textContent = capture.bench_notice;
+    bench.title = capture.bench_notice;
+    text.append(bench);
+  }
+  if (capture.notes.length) {
+    const notes = document.createElement("div");
+    notes.className = "staged-notes";
+    notes.textContent = capture.notes.join(" · ");
+    text.append(notes);
+  }
+  item.append(text, deviceButton("×", () => deleteStaged(capture.capture_id), false, "Remove this capture"));
+  return item;
+}
+
+function showStaged(list) {
+  const captures = list.captures ?? [];
+  $("staged-count").textContent = `${captures.length} staged`;
+  $("staged-count").classList.toggle("mcp", captures.length > 0);
+  $("staged-panel").hidden = captures.length === 0 && !$("staged-message").textContent;
+  // Keep the items that did not change, so their photos do not load again.
+  const items = captures.map((capture) => {
+    const key = `${capture.state}|${capture.meter_text}|${capture.notes.length}`;
+    const known = staged.rendered.get(capture.capture_id);
+    if (known?.key === key) return known.item;
+    const item = stagedItem(capture);
+    staged.rendered.set(capture.capture_id, { key, item });
+    return item;
+  });
+  const ids = new Set(captures.map((capture) => capture.capture_id));
+  for (const id of staged.rendered.keys()) if (!ids.has(id)) staged.rendered.delete(id);
+  $("staged-list").replaceChildren(...items);
+}
+
+async function loadStaged() {
+  try {
+    showStaged(await api("GET", API.staged));
+  } catch (error) {
+    $("staged-message").textContent = error.message;
+  }
+}
+
+async function deleteStaged(id) {
+  try {
+    await api("DELETE", API.stagedOne(id));
+  } catch (error) {
+    $("staged-message").textContent = error.message;
+  }
+  await loadStaged();
+}
+
+function setupStaged() {
+  $("staged-capture").addEventListener("click", stagedCapture);
+  $("staged-clear").addEventListener("click", async () => {
+    try {
+      await api("DELETE", API.staged);
+    } catch (error) {
+      $("staged-message").textContent = error.message;
+    }
+    await loadStaged();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (!stagedKey(event)) return;
+    // Also for a focused button: Space captures, it does not click the button or scroll the page.
+    event.preventDefault();
+    if (!event.repeat) stagedCapture();
+  });
+  document.addEventListener("keyup", (event) => {
+    if (stagedKey(event)) event.preventDefault();
+  });
+  loadStaged();
+  setInterval(loadStaged, STAGED_POLL_MS);
+}
+
+// endregion: staged captures
 
 // region: devices
 

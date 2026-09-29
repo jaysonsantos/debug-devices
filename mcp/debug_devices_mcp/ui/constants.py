@@ -222,6 +222,7 @@ class tools:
     ADB_CONNECT = "adb_connect"
     # Not an MCP tool: the Markings toggle of the page.
     MARKINGS = "markings"
+    STAGED_CAPTURE = "staged_capture"
     BENCH_INSTRUCTIONS = "bench_instructions"
     # Their results hold the user's instructions text: other monitors get only the tool name and the status.
     REDACTED = frozenset({BENCH_INSTRUCTIONS})

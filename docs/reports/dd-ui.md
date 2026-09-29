@@ -1912,3 +1912,121 @@ Base: `fe66f61`.
 
 - `scripts/record_demo.py` without arguments: exit 2 with the message above (checked with `uv run --with playwright`); `--help` shows the new `--url` text.
 - `uv run pytest`: 1103 passed, 1 skipped. ruff and `prek run --files` on my files (`scripts/record_demo.py`, `mcp/tests/test_ui_app.py`, `README.md`): pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 50: staged captures, part 1 (the page, the capture, the store; docs/briefs/staged-captures.md)
+
+The `server.py` part (the `multimeter_read` pop, the `live` parameter, the `staged_captures` tool) waits for the orchestrator's go. I did not edit `server.py`, `bench_state.py`, or `bench_journal.py`.
+
+### What I did
+
+- **The store** (`staged.py`, `StagedStore`): a folder in the state folder (`~/.local/state/debug-devices/staged/`, mode 0700; files 0600, written to a temporary name first), with a file lock, so every MCP server of the user can list and pop the captures.
+  - One capture: a JSON entry (`StagedCapture`: id, time, state pending/ready/failed, origin, the photo facts, the `MeterResult` with its bench notice, notes), the photo, and the meter frames (the crop images that the vision model saw).
+  - At most 10 captures: a full queue refuses a new one (`QueueFullError`, a page message). Time to live 30 min.
+  - A capture that is still pending after 3 min (its server stopped) becomes failed.
+  - `pop_all()` waits (at most 90 s) while a capture is pending (the vision call runs), then gives all, oldest first, and removes them. `pop_ready()`, `list()`, `delete()`, `clear()`, and `photo()` are also there.
+  - All methods run the lock wait and the file work in a worker thread.
+- **The lock**: `file_lock.locked()` is the shared lock helper; the settings store uses it now too.
+- **The capture** (`ui/staged_capture.py`, `StagedCapturer`): a key press stages a pending capture at once, then fills it in the background. The photo and the meter part run at the same time (like `bench_measure`).
+  - **Photo**: the still of `Services.phone_snapshot()` (the same turn and flips), scaled like the default `phone_snapshot` result. It does not replace the agent's last snapshot: the pixel tools keep referring to the photo that the agent saw, and `last_view` is restored.
+  - **Meter**: `server.read_meter` (unchanged): the vision call, the frame checks, the bench limits, and `note_meter_reading`. So an unsafe voltage closes the bench gate at capture time, before any pop.
+  - **No crop box**: no meter part, no frame, and no vision call; a note says why. The photo still comes.
+  - **No phone**: a note. With neither part, the capture is failed with both reasons.
+- **The page routes** (`ui/routes/staged.py`):
+  - `POST /api/staged` (capture; 202, or 409 for a full queue), `GET /api/staged` (the list), `GET /api/staged/<id>/photo.jpg`, `DELETE /api/staged/<id>`, and `DELETE /api/staged`.
+  - A capture, a delete, and a clear accept only a same-origin request from the page (like the device actions).
+  - Each capture is one log row (`staged_capture`).
+- **The page**:
+  - A "Capture Space" button and a counter in the header. Space and C capture (a USB foot pedal that sends Space works too), never in a text field or with a modifier. A held key gives one capture. Space on a focused button captures and does not click the button or scroll.
+  - A short flash and a beep (WebAudio; without sound, the flash still shows).
+  - The "Staged captures" list above the phone panel: the time, the small photo, the value with its status ("reading…" while pending), the bench notice (two lines, the full text in the tooltip), the notes, × to remove one, and "Clear all". The page reads the list every 2 s, because another server can pop it.
+- **Tests' state folder**: `conftest.py` gives every test a private `$XDG_STATE_HOME` (like the runtime dir), so no test reads or pops the user's real queue.
+
+### Tests
+
+- New `mcp/tests/test_staged_store.py` (7):
+  - pop gives all, oldest first, and removes every file;
+  - a full queue;
+  - an expired capture;
+  - a pending capture: `pop_ready` leaves it, `pop_all` waits and gives it as failed, and after 3 min it is failed;
+  - delete, clear, and a late finish of a deleted capture;
+  - the file and folder modes;
+  - **a second server process pops the captures** (a real subprocess on the same folder).
+- New `mcp/tests/test_staged_capture.py` (6):
+  - a key press stages the photo and the meter result (4.98 V confirmed, 2 frames, 2 vision calls), and a second press a second capture; the agent's last snapshot stays;
+  - no crop box: no webcam frame and no vision call, the note, and the photo;
+  - no phone and no crop box: failed with both reasons;
+  - **4.98 V closes the bench gate at capture time**, while the capture still waits in the queue;
+  - the page routes (403 without the page origin, 202, the list, the photo, delete, clear, the log rows), and a full queue gives 409 with the message.
+- Playwright (fakes, a private state folder; scratchpad `stagedcheck.py`): Space and C capture (with the flash); Space and C in a text field are text (no capture); Space on the focused "Take snapshot" button captures and does not take a snapshot; a held Space gives one capture; 4 photos and values in the list; × and "Clear all" work, and the panel hides when empty.
+- `uv run pytest`: 1118 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+### Next (after the go for `server.py`)
+
+- `Services.staged` (the same store). `multimeter_read` pops all staged captures (oldest first; it waits while one is pending) and returns them, each with `capture_id`, `captured_at`, `age_s`, the meter result, and the photo. When the queue is empty it reads live. `live: true` skips the queue.
+- A new read-only `staged_captures` tool.
+- The texts: the tool docstrings, `EVIDENCE_RULES`, and `bench_instructions` (a staged photo is evidence of its capture time only). This needs an OK for `instructions.py`, which is dd-mcp's area.
+- `mcp/README.md` (keys, store, tools).
+- Tests: the pop order, the next call reads live, `live: true`, and a pop from a second server.
+
+## Round 51: staged captures, the instruction text
+
+With the orchestrator's OK for `instructions.py`:
+
+- `EVIDENCE_RULES` rule 11: "Staged captures: the user can capture the phone photo and the meter reading on the monitor page (Space, C, or Capture). When the user says that they captured, or asks you to read the meter, call multimeter_read: staged captures come first (oldest first); it reads live only when none wait. A staged photo and value are evidence of their capture time only (captured_at), not of now."
+- `bench_instructions` returns the evidence rules, so it has rule 11 too. Its description also has one sentence: the next `multimeter_read` returns staged captures first (rule 11).
+- A test pins the two key phrases (`test_staged_capture.py::test_the_evidence_rules_name_staged_captures`).
+- `uv run pytest`: 1119 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+The rule describes the `multimeter_read` behavior of the next part: it becomes true with the `server.py` step (I still wait for the go).
+
+## Round 52: staged captures, part 2 (the tools) and N88-N91
+
+With the orchestrator's go for `server.py`. I did not edit `bench_state.py` or `bench_journal.py`.
+
+### What I did
+
+1. **The wiring (brief item 5)**:
+   - `Services.staged` holds the store (the state folder; `connect_services` gives the same store to the page capture).
+   - `multimeter_read` pops all staged captures, oldest first, and returns them: `staged` (each with `capture_id`, `captured_at`, `age_s`, `state`, `origin`, the checked `meter` result with its bench notice, the `photo` facts, `notes`), `count`, and the note "Each photo and meter value shows the moment of its capture (`captured_at`, `age_s`), not now: say so". The photo of each capture follows as an image with its capture id (`_meta.staged: "phone_photo"`); with `include_image`, also its meter frames (`"meter_frame"`). The pop waits while a capture is pending (the vision call runs, at most 90 s). Only when no capture waits does it read live. `live: true` skips the queue (the captures stay). The other parameters apply only to a live read.
+   - New read-only tool `staged_captures`: the waiting captures, oldest first, without images; they stay.
+   - `multimeter_read` declares no output schema any more: the MCP client checks the structured result against the declared schema, and a staged batch is another shape. A live read returns the same `MeterResult` structure as before.
+   - The page log: a `multimeter_read` with staged captures says "N staged captures (the moments of their capture)" and does not show it as one reading; its images are labeled as result images, not as model input.
+   - The docstrings, and `mcp/README.md` ("Staged captures", the `multimeter_read` row, and the new `staged_captures` row).
+2. **N88, the camera view**: `Services.phone_snapshot(record_view=False)` does not set `last_view`. The staged still uses it; the save and restore is gone. So an agent `phone_snapshot` at the same time keeps its own camera view in its capture record.
+3. **N89, the crop during a capture**: `read_meter(..., require_crop=True)` checks the webcam crop before and after each frame. The staged capture uses it. Without the crop, the read stops ("the crop box was removed during the capture: no meter reading ..."), the tasks of the earlier (cropped) frames are cancelled, and the store gets no frame and no meter result. The agent's own `multimeter_read` is unchanged (the older item in the check).
+4. **N90**: `StagedStore.photo()` and `delete()` accept only a capture id in the standard UUID form (`is_capture_id`); anything else gives None or False without a file access.
+5. **N91**: the staged routes refuse with "only the monitor page can capture, delete, or clear staged captures (a same-origin request)". `refused()` takes the message.
+
+### Tests
+
+- New `mcp/tests/test_staged_tools.py` (10 tests):
+  - `multimeter_read` pops two captures oldest first, with a photo and two meter frames each (`include_image`), and then the next call reads live (2 new vision calls); `staged_captures` lists them without removing them;
+  - `live: true` skips the queue, and the capture stays;
+  - **another server** (other `Services` on the same state folder) pops the page server's captures;
+  - **N88**, the dd-qa probe B1: an agent photo at zoom 1, zoom 2, then a capture (its still 0.3 s) and an agent `phone_snapshot` (0.5 s) together: the agent photo's capture view has zoom 2.0. A scratch run with the old save and restore gives 1.0, so the test finds the bug;
+  - **N89**: the crop cleared after the first frame, and while the second frame is read: every frame that the webcam read had the crop, at most one vision call, no frame and no meter result in the store, and the note;
+  - N90: `photo("../secret")` and `delete("../secret")` touch no file;
+  - N91: the refusal text;
+  - the page log of a staged batch;
+  - the store is in the test's private state folder.
+- Playwright (`stagedcheck.py`): the page still works with `services.staged` (keys, text field, focused button, held key, 4 photos and values, delete, clear).
+- `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15. Its sessions use a private `XDG_STATE_HOME`, so the run never pops the user's queue; I checked this before the run.
+- `uv run pytest`: 1133 passed, 1 skipped. ruff and `prek run --files` on my files: pass.
+
+## Round 53: staged readings can be recorded in any server (N92), and the parameters that were not applied (N93)
+
+### What I did
+
+- **N92**: when `multimeter_read` pops the queue, `staged_result` adds each staged meter result to `services.captures.meter_results` of the popping server under three kinds of id: the staged `capture_id`, the `meter.capture_id`, and each frame's `capture_id`. So `bench_record_measurement` works with any of them in the server that popped: also the bench session, a secondary, and a page server after a restart. An unsafe staged reading (the gate closed at an unknown point at capture time) gets its point name that way. The bench record keeps one entry per result, so the three ids do not make three entries.
+- The `multimeter_read` docstring and the batch note say which id to record: the staged `capture_id` (or `meter.capture_id`).
+- **N93**: a staged batch has `not_applied` (the given parameters that apply only to a live read: `expected_mode`, `expected_value`, `source` other than webcam, `frames` other than the default) and `not_applied_note`: "expected_mode, frames: given, but not applied to the staged captures (they were read at capture time, without them; for example a staged reading is not checked against expected_mode). Call multimeter_read with live: true to read the meter now with them." Without such parameters, the list is empty and the note is null.
+- `mcp/README.md`: both points.
+
+### Tests
+
+- `mcp/tests/test_staged_tools.py`, 3 new tests:
+  - a second server (the bench session, with the page server's state folder and bench file, and the open identity board fixture) pops three safe captures and records them by the staged id, the meter id, and a frame id: three safe residual points;
+  - an unsafe staged capture closes the gate at an unknown point at capture time; the second server pops it and records it by its staged id as "L501.2": the point is `l501.2` (not safe), and the gate no longer names an unknown point;
+  - `expected_mode` and `frames` given: `not_applied` names them, with the note; without them: empty.
+- `test_staged_capture.py`: `capture_setup` takes a `reading` (the vision answer).
+- `uv run pytest`: 1136 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.

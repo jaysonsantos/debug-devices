@@ -388,6 +388,42 @@ form label { display: block; margin-bottom: 8px; }
   color: #fff;
   background: rgba(0, 0, 0, 0.75);
 }
+/* Staged captures: the flash of a key press, and the list. */
+.staged-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  background: #fff;
+  opacity: 0;
+}
+.staged-flash.on { animation: staged-flash 250ms ease-out; }
+@keyframes staged-flash { from { opacity: 0.7; } to { opacity: 0; } }
+header kbd { font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; }
+#staged-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; padding: 0; list-style: none; }
+#staged-list li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 360px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+#staged-list li img { width: 96px; height: auto; border-radius: 4px; }
+#staged-list li .staged-value { font-weight: 600; font-size: 14px; }
+#staged-list li.failed .staged-value, #staged-list li .staged-bench { color: var(--error); }
+/* The bench notice is long: two lines here, the full text in the tooltip. */
+#staged-list li .staged-bench {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+#staged-list li .staged-notes { color: var(--muted); }
+#staged-list li > div { flex: 1; min-width: 0; }
+#staged-list li button { flex: none; margin-left: auto; }
 .restart-note {
   margin: 0 0 8px;
   padding: 6px 10px;

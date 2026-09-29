@@ -84,6 +84,13 @@ def private_runtime_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: p
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("runtime")))
 
 
+@pytest.fixture(autouse=True)
+def private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settings file and the staged captures live in $XDG_STATE_HOME: a test never reads or pops the user's
+    real queue (`~/.local/state/debug-devices/staged/`)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
+
+
 def free_port() -> int:
     """A local port that no program uses now: tests never use the user's page port 18766."""
     with socket.socket() as probe:

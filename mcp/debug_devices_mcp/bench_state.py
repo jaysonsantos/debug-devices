@@ -28,11 +28,11 @@ from enum import StrEnum
 from functools import partial
 from pathlib import Path
 
-import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
+from debug_devices_mcp.bench_journal import BenchJournal, JournalEntry, JournalLockedError, journal_path
 from debug_devices_mcp.bench_points import PointName, PointNameError, is_ground, point_name, text_key
 from debug_devices_mcp.board.model import Board
 from debug_devices_mcp.constants import defaults
@@ -60,11 +60,20 @@ MAX_PHOTO_IDS = 1000
 LOCK_SUFFIX = ".lock"
 LOCK_TIMEOUT = timedelta(seconds=5)
 LOCK_RETRY = timedelta(milliseconds=10)
-# The background retry of an unsafe reading that could not be saved (then the next write saves it).
-FLUSH_DELAY = timedelta(seconds=5)
-FLUSH_ATTEMPTS = 12
-# The last save of kept unsafe readings at exit: the lock wait, and a little more.
-EXIT_SAVE_TIMEOUT = LOCK_TIMEOUT + timedelta(seconds=1)
+# The merged journal ids that the state keeps (a merge is idempotent for them).
+MAX_JOURNAL_IDS = 1000
+JOURNAL_NOTE = (
+    "{reading} is above the safe residual limit of 0.5 V. The bench state file could not take it ({reason}), so the "
+    "reading went into the journal {name}: the gate counts it now in every server, and the next bench-state write "
+    "merges it (an unknown point until you record the capture with its point name)"
+)
+NOT_SAVED = (
+    "{reading} is above the safe residual limit of 0.5 V, but it is NOT SAVED: the bench state file could not take "
+    "it ({reason}), and the journal write failed too ({error}). The gate stays closed for this server only; {advice}"
+)
+# The advice of NOT_SAVED for the two causes of a failed journal write.
+JOURNAL_BUSY_ADVICE = "another server holds the journal lock: read the meter again"
+JOURNAL_FILE_ADVICE = "check the state folder (free space, write permission), then read the meter again"
 # A mode that the user confirmed on the dial is context for multimeter_read for this long.
 USER_MODE_MAX_AGE = timedelta(minutes=10)
 USER_SOURCE = "user"
@@ -233,6 +242,8 @@ class BenchState(BaseModel):
     residual_points: list[ResidualPoint] = Field(default_factory=list)
     # The last unsafe residual reading: the gate needs an isolation confirmation that is newer.
     last_unsafe_at: AwareDatetime | None = None
+    # The ids of the merged journal lines (bench_journal.py): a line is merged only once.
+    journal_ids: list[str] = Field(default_factory=list)
     residual_clearances: list[ResidualClearance] = Field(default_factory=list)
 
     @property
@@ -450,36 +461,88 @@ class BenchStateStore:
     Every writer changes the record through `update` (or `update_async`): one lock from load to save, so two writers
     (two tools, a tool and multimeter_read, or two MCP servers) never lose each other's change.
 
-    An unsafe reading that cannot be saved (the lock wait timed out) is not lost: the store keeps it, every `load` of
-    this server applies it (the gate stays closed here), a background retry saves it, and so does the next write.
+    An unsafe reading that cannot go into the file (the lock wait timed out) goes into the journal next to it
+    (bench_journal.py, N80): every `load` in any server counts the journal lines, and the next `update` merges them.
+    Only when the journal write fails too, this server keeps the reading in memory (its gate stays closed), and the
+    tool says that the reading is NOT saved.
     """
 
     def __init__(self, path: Path | None = None, max_diode_volts: float = defaults.MAX_DIODE_VOLTAGE) -> None:
         self.path = path
         # The diode test voltage of the meter (--max-diode-voltage): a diode reading above it counts as a voltage.
         self.max_diode_volts = max_diode_volts
+        self.journal = BenchJournal(journal_path(path)) if path is not None else None
         self._memory = BenchState()
         self._thread_lock = threading.Lock()
         self._unsaved: list[MeterResult] = []
         self._unsaved_lock = threading.Lock()
-        self._flush_task: asyncio.Task[None] | None = None
 
     def update[T](self, change: Callable[[BenchState], T]) -> tuple[BenchState, T]:
         """Load, change, and save under the lock. A ResidualKeptError from `change` saves the record, then goes up
         (the reading changed the safety gate); any other error saves nothing. `change` must only change the record.
-        The unsaved unsafe readings go into the file with this save."""
+        The journal lines are merged first and cut after the save; the journal lock is held only for that read and
+        that cut, so an append of another server never waits for this whole write (N81). The unsaved readings go in
+        with the save."""
         with self._locked():
+            lines = self._journal_lines()
             state = self._read()
+            self._apply_journal(state, lines, remember=True)
             flushed = self._apply_unsaved(state)
             try:
                 value = change(state)
             except ResidualKeptError:
-                self.save(state)
-                self._forget_unsaved(flushed)
+                self._commit(state, flushed)
                 raise
-            self.save(state)
-            self._forget_unsaved(flushed)
+            self._commit(state, flushed)
         return state, value
+
+    def _commit(self, state: BenchState, flushed: list[MeterResult]) -> None:
+        self.save(state)
+        self._forget_unsaved(flushed)
+        if self.journal is None:
+            return
+        try:
+            self.journal.cut(set(state.journal_ids))
+        except OSError as exc:
+            # The lines stay; their ids are in the saved state, so a later cut removes them and no merge repeats them.
+            logger.warning("the merged lines stay in the bench journal for a later cut: %s", exc)
+
+    # region: the journal (N80)
+
+    def _journal_lines(self) -> list[JournalEntry]:
+        """The journal lines, read under the short journal lock, or without it when the lock is busy (then at most a
+        last line that an append is writing is left for the next write): the gate must count them either way."""
+        if self.journal is None:
+            return []
+        try:
+            return self.journal.read_locked().entries
+        except OSError as exc:
+            logger.warning("the bench journal is read without its lock: %s", exc)
+            return self.journal.read().entries
+
+    def _apply_journal(self, state: BenchState, entries: list[JournalEntry], remember: bool) -> None:
+        # The ids make a merge idempotent: a crash between the state save and the cut of the lines merges nothing twice.
+        for entry in entries:
+            if entry.id in state.journal_ids:
+                continue
+            gate_event(state, entry.result, None, None, self.max_diode_volts)
+            if remember:
+                state.journal_ids = [*state.journal_ids, entry.id][-MAX_JOURNAL_IDS:]
+
+    async def keep_in_journal(self, result: MeterResult, reading: str, reason: Exception) -> str:
+        """An unsafe reading that the state file could not take: into the journal at once. The notice. When the
+        journal write fails too: kept in memory (this server's gate stays closed), and a ToolError says NOT saved."""
+        try:
+            if self.journal is None:
+                raise OSError("no bench state file")
+            await asyncio.to_thread(self.journal.append, result)
+        except OSError as exc:
+            self.keep_unsaved(result)
+            advice = JOURNAL_BUSY_ADVICE if isinstance(exc, JournalLockedError) else JOURNAL_FILE_ADVICE
+            raise ToolError(NOT_SAVED.format(reading=reading, reason=reason, error=exc, advice=advice)) from exc
+        return JOURNAL_NOTE.format(reading=reading, reason=reason, name=self.journal.path.name)
+
+    # endregion: the journal (N80)
 
     # region: unsaved unsafe readings
 
@@ -503,50 +566,6 @@ class BenchStateStore:
     def _forget_unsaved(self, saved: list[MeterResult]) -> None:
         with self._unsaved_lock:
             self._unsaved = [result for result in self._unsaved if all(result is not item for item in saved)]
-
-    def flush_later(self) -> None:
-        """Start one background retry that saves the unsaved readings (a few tries, then the next write does it)."""
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.get_running_loop().create_task(self._flush())
-
-    async def save_unsaved_at_exit(self) -> None:
-        """One more try at exit (a stop, Ctrl-C, SIGTERM, or a reload): a kept unsafe reading is in memory only.
-
-        The MCP shutdown cancels the lifespan, so the save runs shielded, with a limit. A busy lock or a file error (a
-        full disk, a read-only folder) goes to the log. A shield does not stop a second interrupt (a native cancel,
-        or the runner's KeyboardInterrupt): then the log says that the save was cut, and the interrupt goes on (N65).
-        """
-        if self._flush_task is not None:
-            self._flush_task.cancel()
-        if not self.unsaved:
-            return
-        with anyio.move_on_after(EXIT_SAVE_TIMEOUT.total_seconds(), shield=True) as scope:
-            try:
-                await self.update_async(lambda _state: None)
-            except (ToolError, OSError) as exc:
-                logger.warning("%s unsafe readings are not in the bench state file at exit: %s", self.unsaved, exc)
-            except BaseException as exc:
-                logger.warning(
-                    "%s unsafe readings may not be in the bench state file: a second interrupt cut the exit save (%s)",
-                    self.unsaved,
-                    type(exc).__name__,
-                )
-                raise
-        if scope.cancelled_caught:
-            logger.warning(
-                "%s unsafe readings are not in the bench state file at exit: the save did not end in %g s",
-                self.unsaved,
-                EXIT_SAVE_TIMEOUT.total_seconds(),
-            )
-
-    async def _flush(self) -> None:
-        for _ in range(FLUSH_ATTEMPTS):
-            await asyncio.sleep(FLUSH_DELAY.total_seconds())
-            if not self.unsaved:
-                return
-            with contextlib.suppress(ToolError):
-                await self.update_async(lambda _state: None)
-                return
 
     # endregion: unsaved unsafe readings
 
@@ -578,8 +597,13 @@ class BenchStateStore:
                     fcntl.flock(handle, fcntl.LOCK_UN)
 
     def load(self) -> BenchState:
-        """The record, with the unsafe readings that this server could not save yet."""
+        """The record, with the journal lines that are not merged yet and the unsafe readings that this server could
+        not save. The journal is read first, under its short lock (never inside a cut that rewrites the file, N86),
+        and before the state file: a merge of another server in between then shows the line in the state file,
+        never in neither (N82)."""
+        lines = self._journal_lines()
         state = self._read()
+        self._apply_journal(state, lines, remember=False)
         self._apply_unsaved(state)
         return state
 
@@ -614,8 +638,8 @@ class BenchStateStore:
         state = state if state is not None else self.load()
         if unsaved := self.unsaved:
             note = (
-                "unsafe readings that are not saved in the bench state file yet (it was locked): "
-                f"{unsaved}; they count in this server, and the next bench-state write saves them"
+                "unsafe readings that are NOT saved (the state file and the journal write failed): "
+                f"{unsaved}; they count in this server only, and the next bench-state write tries again"
             )
             notice = f"{notice}; {note}" if notice else note
         return BenchStateView(
@@ -895,14 +919,8 @@ async def note_meter_reading(store: BenchStateStore, result: MeterResult) -> str
         _, event = await store.update_async(
             partial(gate_event, result=result, label=None, board=None, max_diode_volts=store.max_diode_volts)
         )
-    except ToolError as exc:
-        store.keep_unsaved(result)
-        store.flush_later()
-        return (
-            f"{voltage.text} is above the safe residual limit of {SAFE_RESIDUAL_VOLTS} V, but the bench state is NOT "
-            f"SAVED YET ({exc}): this server keeps the reading, the gate stays closed here, and a retry or the next "
-            "bench-state write saves it"
-        )
+    except (ToolError, OSError) as exc:
+        return await store.keep_in_journal(result, voltage.text, exc)
     return "; ".join(event.notes) or None
 
 

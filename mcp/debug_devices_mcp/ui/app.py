@@ -21,6 +21,7 @@ from debug_devices_mcp.ui.routes import (
     phone,
     screen,
     settings,
+    staged,
     state,
     webcam,
 )
@@ -72,6 +73,7 @@ def create_app(monitor: Monitor) -> Starlette:
             *phone.routes,
             *board.routes,
             *devices.routes,
+            *staged.routes,
             *multimeter.routes,
             *bench.routes,
             *ingest.routes,

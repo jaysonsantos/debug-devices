@@ -24,8 +24,8 @@ def from_the_page(request: Request) -> bool:
     return origin is not None and urlsplit(origin).netloc == request.headers.get(http.HOST_HEADER)
 
 
-def refused(request: Request) -> JSONResponse | None:
-    return None if from_the_page(request) else error_response(NOT_THE_PAGE, HTTPStatus.FORBIDDEN)
+def refused(request: Request, message: str = NOT_THE_PAGE) -> JSONResponse | None:
+    return None if from_the_page(request) else error_response(message, HTTPStatus.FORBIDDEN)
 
 
 async def get_devices(request: Request) -> JSONResponse:

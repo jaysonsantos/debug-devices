@@ -16,6 +16,7 @@ from debug_devices_mcp.ui.forward import CallForwarder, other_monitor_ports, tok
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions, MonitorParts
 from debug_devices_mcp.ui.remote_screen import RemoteScreen
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, state_dir
+from debug_devices_mcp.ui.staged_capture import StagedCapturer
 from debug_devices_mcp.webcam_stream import StreamOptions, WebcamStream
 
 
@@ -26,6 +27,8 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     services.pointing.add_listener(monitor.tracking_changed)
     services.add_restart_listener(monitor.app_restarted)
     services.add_status_listener(monitor.status_seen)
+    # Space, C, or the Capture button on the page stage the phone photo and the meter reading (staged.py).
+    monitor.staged = StagedCapturer(services, services.staged, monitor.origin)
     monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
     monitor.device_panel = DevicePanel(services, monitor)
     monitor.phone_selection = services.selection

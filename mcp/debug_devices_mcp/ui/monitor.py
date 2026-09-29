@@ -36,6 +36,7 @@ from debug_devices_mcp.remote_webcam import MonitorIdentity, RemoteMonitor, Shar
 from debug_devices_mcp.scene import SceneWatcher
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
 from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
+from debug_devices_mcp.staged import Capturer
 from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.board import BoardPanel, RemoteBoard
 from debug_devices_mcp.ui.constants import APP_NAME, UiStart, defaults, details, http, labels, tools
@@ -78,6 +79,8 @@ TURN_FIELD = "turn_degrees"
 FLIP_FIELDS = ("flip_horizontal", "flip_vertical")
 # bench_measure: the SnapshotInfo of its photo is under this key.
 PHOTO_FIELD = "photo"
+# The structured result of multimeter_read with staged captures (staged.StagedReadResult) has this key.
+STAGED_BATCH_KEY = "staged"
 # The tools whose first image is a phone photo for the page (B-E9 of QA round 4: also bench_measure).
 SNAPSHOT_TOOLS = frozenset({tools.PHONE_SNAPSHOT, tools.BENCH_MEASURE})
 # The cache key part of the scaled snapshot flipped again (no raw still).
@@ -256,6 +259,8 @@ class Monitor:
     markings_setter: Callable[[bool], Awaitable[Any]] | None = None
     # The MCP client name from initialize (for example "codex").
     client_name: str | None = None
+    # The staged captures of the page (Space, C, or the Capture button); setup sets it.
+    staged: Capturer | None = None
     # Finds the primary (the page on this server's own --ui-port) and nothing else; setup sets it. The webcam lookup
     # (`shared.remote`) also asks other page ports, so it must not decide primary or secondary (N50 of QA round 12).
     primary_lookup: RemoteMonitor | None = None
@@ -469,11 +474,16 @@ class Monitor:
         result_images = [image for block in result.content if (image := _image_bytes(block)) is not None]
         if not call.images:
             # The image in a multimeter_read result is the image that went to the model.
-            label = labels.MODEL_INPUT if call.tool == tools.MULTIMETER_READ else labels.RESULT_IMAGE
+            staged = call.tool == tools.MULTIMETER_READ and STAGED_BATCH_KEY in (result.structured_content or {})
+            model_input = call.tool == tools.MULTIMETER_READ and not staged
+            label = labels.MODEL_INPUT if model_input else labels.RESULT_IMAGE
             for image in result_images:
                 call.attach_image(image, label)
         structured = result.structured_content
-        if call.tool == tools.MULTIMETER_READ and structured is not None:
+        if call.tool == tools.MULTIMETER_READ and structured is not None and STAGED_BATCH_KEY in structured:
+            # Staged captures (staged.StagedReadResult): the log row names them; it is not one reading.
+            call.summary = f"{structured.get('count', 0)} staged captures (the moments of their capture)"
+        elif call.tool == tools.MULTIMETER_READ and structured is not None:
             call.set_detail(details.READING, structured)
         elif call.tool == tools.PHONE_CONNECT and structured is not None:
             await self._phone_connected(call, structured)

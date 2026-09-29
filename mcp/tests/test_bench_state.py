@@ -1159,7 +1159,7 @@ async def test_the_refusal_asks_for_a_step_that_fits(bench: Bench) -> None:
 # endregion
 
 
-# region: QA round 11 (N32: a user-confirmed diode mode, N33: an unsafe reading after a lock timeout)
+# region: QA round 11 (N32: a user-confirmed diode mode; the N33 tests are the journal tests of N80)
 
 
 @pytest.mark.parametrize(
@@ -1204,7 +1204,6 @@ async def test_the_gate_notice_explains_the_diode_rule(settings: Settings) -> No
 @pytest.fixture
 def short_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bench_state, "LOCK_TIMEOUT", timedelta(milliseconds=50))
-    monkeypatch.setattr(bench_state, "FLUSH_DELAY", timedelta(milliseconds=10))
 
 
 @contextlib.contextmanager
@@ -1218,54 +1217,10 @@ def other_writer(path: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-@pytest.mark.usefixtures("short_lock")
-async def test_an_unsafe_reading_is_kept_and_saved_after_a_lock_timeout(tmp_path: Path) -> None:
-    path = tmp_path / "bench-state.json"
-    store = BenchStateStore(path)
-    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
-    with other_writer(path):
-        notice = await note_meter_reading(store, unsafe)
-        kept = store.view()
-        file_only = BenchStateStore(path).load()
-    assert notice is not None
-    assert "NOT SAVED YET" in notice
-    # This server counts it: the gate stays closed here, and the answer says that it is not saved yet.
-    assert [point.point for point in kept.state.residual_points] == [f"unknown point {unsafe.capture_id}"]
-    assert kept.notice is not None
-    assert "not saved in the bench state file yet (it was locked): 1" in kept.notice
-    assert file_only.residual_points == []
-    # The background retry saves it after the lock is free.
-    assert store._flush_task is not None
-    await store._flush_task
-    assert [point.point for point in BenchStateStore(path).load().residual_points] == [
-        f"unknown point {unsafe.capture_id}"
-    ]
-    assert store.unsaved == 0
-    assert store.view().notice is None
-
-
-@pytest.mark.usefixtures("short_lock")
-async def test_the_next_write_saves_an_unsaved_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bench_state, "FLUSH_ATTEMPTS", 0)
-    path = tmp_path / "bench-state.json"
-    store = BenchStateStore(path)
-    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
-    with other_writer(path):
-        await note_meter_reading(store, unsafe)
-    assert store._flush_task is not None
-    await store._flush_task
-    assert store.unsaved == 1
-    add_photo(store, "photo-1")
-    saved = BenchStateStore(path).load()
-    assert saved.photo_ids == ["photo-1"]
-    assert [point.point for point in saved.residual_points] == [f"unknown point {unsafe.capture_id}"]
-    assert store.unsaved == 0
-
-
 # endregion
 
 
-# region: QA round 13 (N32 gaps, the N33 save at exit)
+# region: QA round 13 (N32 gaps)
 
 
 async def read_with_user_diode(settings: Settings, *answers_: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1295,36 +1250,6 @@ async def test_an_unreadable_unit_with_a_user_diode_mode_counts(settings: Settin
     assert (read["status"], read["mode"]) == ("uncertain", "diode")
     assert "5.10 (unit not readable, counted as V) is above the safe residual limit" in read["bench_notice"]
     assert state["gate"]["unpowered_tests_allowed"] is False
-
-
-@pytest.mark.usefixtures("short_lock")
-async def test_a_kept_unsafe_reading_is_saved_at_exit(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # N33 limit: the background retry did not run; the server stops.
-    monkeypatch.setattr(bench_state, "FLUSH_ATTEMPTS", 0)
-    services = make_services(settings, FakePhone(), no_vision())
-    path = tmp_path / "bench-state.json"
-    services.bench = BenchStateStore(path)
-    unsafe = meter("dc_voltage", "V", 7.0, "7.00")
-    with other_writer(path):
-        await note_meter_reading(services.bench, unsafe)
-    assert BenchStateStore(path).load().residual_points == []
-    await services.aclose()
-    assert [point.point for point in BenchStateStore(path).load().residual_points] == [
-        f"unknown point {unsafe.capture_id}"
-    ]
-
-
-@pytest.mark.usefixtures("short_lock")
-async def test_a_busy_lock_at_exit_logs_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    path = tmp_path / "bench-state.json"
-    store = BenchStateStore(path)
-    with other_writer(path):
-        await note_meter_reading(store, meter("dc_voltage", "V", 7.0, "7.00"))
-        await store.save_unsaved_at_exit()
-    assert "1 unsafe readings are not in the bench state file at exit" in caplog.text
-    assert BenchStateStore(path).load().residual_points == []
 
 
 def test_an_unreadable_unit_in_diode_mode_counts_above_the_diode_limit() -> None:

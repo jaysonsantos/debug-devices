@@ -15,7 +15,7 @@ from typing import Annotated, Any
 import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import CallToolResult, ContentBlock, TextContent
+from mcp.types import CallToolResult, ContentBlock, ImageContent, TextContent
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
 
 from debug_devices_mcp.adb import (
@@ -63,6 +63,8 @@ from debug_devices_mcp.constants import defaults as core_defaults
 from debug_devices_mcp.devices import SELECTED_GONE, DeviceList, PhoneSelection, Transport, list_devices, transport_of
 from debug_devices_mcp.discovery import PhoneDiscovery
 from debug_devices_mcp.evidence import (
+    META_CAPTURE_ID,
+    META_CAPTURED_AT,
     CameraView,
     Capture,
     CaptureKind,
@@ -135,6 +137,15 @@ from debug_devices_mcp.schematic import SchematicFinder, SchematicOptions, regis
 from debug_devices_mcp.sevenseg.compare import compare_local
 from debug_devices_mcp.sevenseg.constants import LocalDecoderMode
 from debug_devices_mcp.snapshot_crop import CropInfo, CropOutsideError, SnapshotCrop, crop_snapshot, precheck_crop
+from debug_devices_mcp.staged import (
+    StagedCapture,
+    StagedCapturesResult,
+    StagedItem,
+    StagedReading,
+    StagedReadResult,
+    StagedStore,
+    utc_now,
+)
 from debug_devices_mcp.ui.constants import tools as tool_names
 from debug_devices_mcp.ui.forward import other_monitor_ports
 from debug_devices_mcp.ui.monitor import Monitor
@@ -166,7 +177,7 @@ SNAPSHOT_RETRY_HINT = (
     "the server retried the snapshot for {seconds:g} s (the camera was not ready): bring the app to the front, or "
     "call phone_connect"
 )
-# Services.aclose at exit: the save of kept unsafe readings and the client close (shielded).
+# Services.aclose at exit: the client close (shielded).
 CLOSE_TIMEOUT = timedelta(seconds=10)
 
 
@@ -182,6 +193,19 @@ SNAPSHOT_NO_ANSWER = (
 )
 NO_SNAPSHOT_YET = "take a phone_snapshot first: {what} are pixels in the last phone_snapshot image"
 NO_OWN_FORWARD = "stopped (no adb forward of this server)"
+NOT_APPLIED_NOTE = (
+    "{names}: given, but not applied to the staged captures (they were read at capture time, without them; for "
+    "example a staged reading is not checked against expected_mode). Call multimeter_read with live: true to read "
+    "the meter now with them."
+)
+# The `_meta` of a staged image: the phone photo, or a meter frame that the vision model saw.
+META_STAGED = "staged"
+STAGED_PHOTO = "phone_photo"
+STAGED_METER_FRAME = "meter_frame"
+CROP_REMOVED = (
+    "the crop box was removed during the capture: no meter reading (no frame without the crop box goes to the vision "
+    "model or to the queue)"
+)
 OVERLAY_EXPIRED_NOTE = "the boxes and arrows were older than 10 minutes: the phone app removed them"
 FORWARD_RELEASED = {
     ForwardRemoval.REMOVED: "stopped (removed the forward tcp:{port} of {serial})",
@@ -277,6 +301,8 @@ class Services:
     selection: PhoneSelection = field(default_factory=PhoneSelection)
     # The device of the camera API forward that this server made (phone_connect); stop and switch remove only it.
     forwarded_serial: str | None = None
+    # The staged captures of the monitor page (staged.py): shared by every MCP server of the user.
+    staged: StagedStore = field(default_factory=StagedStore.default)
     # Finds wireless-debugging phones on the network (no sources here: from_settings gives zeroconf and avahi).
     discovery: PhoneDiscovery = field(default_factory=lambda: PhoneDiscovery([]))
     # Show or hide the markings (the page's drawings and the phone's boxes and arrows), and its sync.
@@ -680,8 +706,11 @@ class Services:
         """One still, with its own snapshot deadline (when_camera_ready)."""
         return await self.when_camera_ready(self.phone.snapshot, self.snapshot_deadline())
 
-    async def phone_snapshot(self) -> tuple[bytes, ImageTransform]:
+    async def phone_snapshot(self, *, record_view: bool = True) -> tuple[bytes, ImageTransform]:
         """One phone still, shown like the monitor preview: turned by the remaining turn, then the user's flips.
+
+        `record_view` False (a staged capture of the page): `last_view` stays, so the capture record of an agent's
+        phone_snapshot at the same time keeps its own camera view (N88).
 
         The still's `X-Rotation-Degrees` header gives its rotation; an older app without it: the status read just
         before (orientation.py has the geometry). The status read and the still share one deadline, and both retry a
@@ -699,7 +728,8 @@ class Services:
         if still.rotation_degrees is not None and still.rotation_degrees != status.rotation_degrees:
             status = status.model_copy(update={"rotation_degrees": still.rotation_degrees})
         transform = self.orientation.transform(status.rotation_degrees)
-        self.last_view = CameraView.of(status, transform)
+        if record_view:
+            self.last_view = CameraView.of(status, transform)
         jpeg = still.jpeg
         try:
             shown = await asyncio.to_thread(
@@ -765,17 +795,14 @@ class Services:
         )
 
     async def aclose(self) -> None:
-        """At exit. The MCP shutdown (Ctrl-C, SIGTERM) cancels the lifespan, so this runs shielded, with a limit (as
-        Monitor.stop), and the clients always close (N57)."""
+        """At exit. The MCP shutdown (Ctrl-C) cancels the lifespan, so this runs shielded, with a limit (as
+        Monitor.stop), and both clients always close (N57). Unsafe readings need no exit save: the bench journal
+        (bench_journal.py, N80) already has every reading that the state file could not take."""
         with anyio.move_on_after(CLOSE_TIMEOUT.total_seconds(), shield=True):
             try:
-                # An unsafe reading that this server could not save yet (the lock was busy) gets one more try (N33).
-                await self.bench.save_unsaved_at_exit()
+                await self.phone.aclose()
             finally:
-                try:
-                    await self.phone.aclose()
-                finally:
-                    await self.vision.aclose()
+                await self.vision.aclose()
 
 
 @contextmanager
@@ -887,16 +914,25 @@ async def take_phone_snapshot(
     # endregion: capture id
 
 
+def check_crop(services: Services, source: MeterSource, require_crop: bool) -> None:
+    if require_crop and source is MeterSource.WEBCAM and services.webcam.crop is None:
+        raise ToolError(CROP_REMOVED)
+
+
 async def read_meter(
     services: Services,
     source: MeterSource,
     expected_mode: MeterMode | None,
     frames: int,
     expected_value: float | None = None,
+    *,
+    require_crop: bool = False,
 ) -> tuple[MeterResult, list[tuple[bytes, Capture]]]:
     """Capture `frames` meter images (the interval apart), read them in parallel, and combine the checked results.
 
     Every image gets its own capture id; the result has the id of the first one, and every id finds the result.
+    `require_crop` (a staged capture): the webcam crop is checked before and after each frame; without it, the read
+    stops before that frame goes to the vision model (N89: the user can clear the crop box during the capture).
     """
     settings = services.settings
     limits = MeterLimits(
@@ -915,7 +951,10 @@ async def read_meter(
             for index in range(frames):
                 if index:
                     await asyncio.sleep(settings.meter_frame_interval.total_seconds())
+                check_crop(services, source, require_crop)
                 jpeg = await capture_meter_frame(services, source)
+                # The crop can go away while the frame is read: then the frame can be whole, and it goes nowhere.
+                check_crop(services, source, require_crop)
                 # The id of this exact image: the result and the returned image name it.
                 captured.append((jpeg, services.captures.record(CaptureKind.METER_IMAGE, source.value)))
                 reads.append(asyncio.create_task(services.vision.read_multimeter(jpeg)))
@@ -1285,8 +1324,18 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         expected_mode: MeterMode | None = None,
         frames: Annotated[int, Field(ge=MIN_FRAMES, le=MAX_FRAMES)] = DEFAULT_FRAMES,
         expected_value: float | None = None,
-    ) -> Annotated[CallToolResult, MeterResult]:
+        live: bool = False,
+    ) -> CallToolResult:
         """Read the multimeter, then check the reading. This is the only tool for meter values.
+
+        Staged captures first: when the user captured on the monitor page (Space, C, or Capture), this returns ALL
+        waiting captures, oldest first, and removes them (`staged`: each with `capture_id`, `captured_at`, `age_s`,
+        the checked `meter` result with its bench notice, and the phone `photo`; the images follow with the
+        `capture_id`). A staged photo and value show the moment of the capture, not now: say so. The other
+        parameters apply only to a live read; `not_applied` names the ones that you gave. To record a staged reading
+        (bench_record_measurement), pass its staged `capture_id` (or `meter.capture_id`): it works in this server.
+        Only when no capture waits does it read live, as below; `live: true` skips the queue (the captures stay).
+        staged_captures lists the queue without removing it.
 
         Never read a meter value yourself from an image. It reads `frames` frames (default 2, about 1 s apart); each
         frame is checked, then they are combined. The result has the model's reading as evidence (`display_text` is
@@ -1320,6 +1369,18 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
         phone_connect first). The image goes to the vision model, so use "phone" only when the phone points at the
         meter, never when it points at the board. `include_image` also returns the exact images that the model saw.
         """
+        if not live:
+            waiting = await services.staged.pop_all()
+            if waiting:
+                # The given parameters apply only to a live read: the batch says which were not applied (N93).
+                given = {
+                    "expected_mode": expected_mode is not None,
+                    "expected_value": expected_value is not None,
+                    "source": source is not MeterSource.WEBCAM,
+                    "frames": frames != DEFAULT_FRAMES,
+                }
+                not_applied = [name for name, was_given in given.items() if was_given]
+                return staged_result(services, waiting, include_image, not_applied)
         result, captured = await read_meter(services, source, expected_mode, frames, expected_value)
         content: list[ContentBlock] = [TextContent(type="text", text=result.model_dump_json())]
         if include_image:
@@ -1328,6 +1389,57 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
                 for jpeg, capture in captured
             ]
         return CallToolResult(content=content, structured_content=result.model_dump(mode="json"))
+
+    @server.tool()
+    async def staged_captures() -> StagedCapturesResult:
+        """List the staged captures that wait (the user pressed Space, C, or Capture on the monitor page), oldest
+        first, without removing them: each with `capture_id`, `captured_at`, `age_s`, `state` (pending while the
+        vision call runs), the meter result, and the photo facts. multimeter_read returns them with their images and
+        removes them. A staged photo and value show the moment of the capture, not now."""
+        now = utc_now()
+        waiting = [StagedReading.of(capture, now) for capture in await services.staged.list()]
+        return StagedCapturesResult(captures=waiting, count=len(waiting))
+
+
+def staged_image(jpeg: bytes, capture: StagedCapture, kind: str) -> ImageContent:
+    """An image of a staged capture, with its capture id and time (like tag_image), and what it is."""
+    image = Image(data=jpeg, format=JPEG_FORMAT).to_image_content()
+    meta = {META_CAPTURE_ID: capture.capture_id, META_CAPTURED_AT: capture.captured_at.isoformat(), META_STAGED: kind}
+    return image.model_copy(update={"meta": meta})
+
+
+def staged_result(
+    services: Services, items: list[StagedItem], include_image: bool, not_applied: list[str]
+) -> CallToolResult:
+    """multimeter_read with staged captures: the readings (oldest first), each photo, and with `include_image`
+    the meter frames that the vision model saw.
+
+    Each staged meter result enters this server's meter results under the staged capture id, its meter capture id,
+    and its frame ids, so bench_record_measurement works here with any of them: also in a server that did not take
+    the capture (the bench session, a secondary) and after a restart of the page server (N92).
+    """
+    for item in items:
+        meter = item.capture.meter
+        if meter is None:
+            continue
+        ids = [item.capture.capture_id, meter.capture_id, *(frame.capture_id for frame in meter.frames)]
+        for capture_id in ids:
+            if capture_id is not None:
+                services.captures.meter_results[capture_id] = meter
+    now = utc_now()
+    result = StagedReadResult(
+        staged=[StagedReading.of(item.capture, now) for item in items],
+        count=len(items),
+        not_applied=not_applied,
+        not_applied_note=NOT_APPLIED_NOTE.format(names=", ".join(not_applied)) if not_applied else None,
+    )
+    content: list[ContentBlock] = [TextContent(type="text", text=result.model_dump_json())]
+    for item in items:
+        if item.photo is not None:
+            content.append(staged_image(item.photo, item.capture, STAGED_PHOTO))
+        if include_image:
+            content += [staged_image(frame, item.capture, STAGED_METER_FRAME) for frame in item.frames]
+    return CallToolResult(content=content, structured_content=result.model_dump(mode="json"))
 
 
 # endregion: webcam tools
@@ -1472,15 +1584,11 @@ def build_server(
             try:
                 expiry.cancel()
                 try:
-                    # The kept unsafe readings first: a slow or failed monitor stop cannot skip their save (N65).
-                    await services.bench.save_unsaved_at_exit()
+                    if monitor is not None:
+                        await monitor.stop()
                 finally:
-                    try:
-                        if monitor is not None:
-                            await monitor.stop()
-                    finally:
-                        # Also when the monitor stop raises (N66).
-                        await services.aclose()
+                    # Also when the monitor stop raises (N66).
+                    await services.aclose()
             finally:
                 # The exit watchdog (shutdown.py) runs also when the cleanup fails (N57).
                 if after_stop is not None:

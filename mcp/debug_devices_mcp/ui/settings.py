@@ -1,11 +1,8 @@
 """Settings that the user changes in the monitor window. They persist in a JSON file in the XDG state directory."""
 
 import asyncio
-import errno
-import fcntl
 import logging
 import os
-import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import timedelta
@@ -15,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from debug_devices_mcp.file_lock import locked
 from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.ui.constants import SETTINGS_FILE_NAME, STATE_DIR_NAME, defaults, env
 from debug_devices_mcp.webcam import Crop
@@ -26,7 +24,6 @@ TEMP_SUFFIX = ".tmp"
 LOCK_SUFFIX = ".lock"
 # A writer holds the lock only for one read and one write. After this time, the save fails (an OSError).
 LOCK_TIMEOUT = timedelta(seconds=2)
-LOCK_RETRY = timedelta(milliseconds=10)
 
 
 class ScreenRotation(StrEnum):
@@ -140,21 +137,8 @@ class SettingsStore:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        lock_path = self.path.with_name(f"{self.path.name}{LOCK_SUFFIX}")
-        with lock_path.open("a") as handle:
-            deadline = time.monotonic() + LOCK_TIMEOUT.total_seconds()
-            while True:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise OSError(errno.EWOULDBLOCK, f"the settings file is locked: {lock_path}") from None
-                    time.sleep(LOCK_RETRY.total_seconds())
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+        with locked(self.path.with_name(f"{self.path.name}{LOCK_SUFFIX}"), "the settings file", LOCK_TIMEOUT):
+            yield
 
     def save(self, settings: UiSettings) -> None:
         """Write a temporary file, then rename it, so a crash never leaves half a file. A change of one value goes

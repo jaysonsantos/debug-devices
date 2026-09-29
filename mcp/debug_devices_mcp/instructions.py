@@ -95,6 +95,10 @@ EVIDENCE_RULES = "\n".join(
         "reason (one point, or all points with the user's own words: quote them, never invent them). After a probe "
         "short, call "
         "bench_probe_short and go back to the power check.",
+        "11. Staged captures: the user can capture the phone photo and the meter reading on the monitor page (Space, "
+        "C, or Capture). When the user says that they captured, or asks you to read the meter, call multimeter_read: "
+        "staged captures come first (oldest first); it reads live only when none wait. A staged photo and value are "
+        "evidence of their capture time only (captured_at), not of now.",
     )
 )
 
@@ -195,6 +199,7 @@ def register_instructions_tool(
         each call, so edits apply without a restart. When the file is missing, `how_to_create` says what to do.
         `current_step` (after the user's text) is the next uncompleted step of the local bench record (bench_state).
         `schematic` names the schematic PDF when one is set (schematic_find).
+        The user can stage captures on the monitor page (Space): the next multimeter_read returns them first (rule 11).
         """
         result = read_instructions(path)
         if current_step is not None:
