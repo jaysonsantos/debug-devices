@@ -1893,6 +1893,10 @@ const STAGED_ERROR_BEEP = { frequency: 220, seconds: 0.4, gain: 0.2, type: "squa
 // The server answers a capture at once (the photo and the reading follow): no answer in this time is an error.
 const STAGED_POST_TIMEOUT_MS = 10000;
 const STAGED_SENDING = "sending…";
+// A network error can hide a capture that the server took (a connection that closed before the answer): the page
+// sends the same request once more after this pause (N98). A refusal or no answer in the time limit shows at once.
+const STAGED_RETRY_DELAY_MS = 300;
+const STAGED_SENDING_AGAIN = "sending again…";
 // A UUID (version 4) for each key press, from crypto.getRandomValues (crypto.randomUUID needs https or localhost).
 const UUID_BYTES = 16;
 const UUID_VERSION = { index: 6, mask: 0x0f, bits: 0x40 };
@@ -1957,13 +1961,28 @@ async function stagedCapture() {
   stagedFlash();
   stagedMessage(STAGED_SENDING);
   try {
-    await api("POST", API.staged, { request_id: newRequestId() }, STAGED_POST_TIMEOUT_MS);
+    await stagedPost({ request_id: newRequestId() });
     stagedBeep(STAGED_BEEP);
-    if ($("staged-message").textContent === STAGED_SENDING) stagedMessage("");
+    if ([STAGED_SENDING, STAGED_SENDING_AGAIN].includes($("staged-message").textContent)) stagedMessage("");
   } catch (error) {
     stagedBeep(STAGED_ERROR_BEEP);
     const reason = error.name === "TimeoutError" ? `no answer in ${STAGED_POST_TIMEOUT_MS / 1000} s` : error.message;
-    stagedMessage(`Capture failed: ${reason}`, true);
+    // No answer to both sends: the server can still have taken it, and then the list shows it.
+    const again = error instanceof TypeError ? " (sent 2 times; if the server took it, the list shows it)" : "";
+    stagedMessage(`Capture failed: ${reason}${again}`, true);
+  }
+}
+
+// fetch rejects with a TypeError on a network error (no HTTP answer). The server gives the first answer to the same
+// request id, so a second send never makes a second capture (N97).
+async function stagedPost(body) {
+  try {
+    return await api("POST", API.staged, body, STAGED_POST_TIMEOUT_MS);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    stagedMessage(STAGED_SENDING_AGAIN);
+    await new Promise((resolve) => setTimeout(resolve, STAGED_RETRY_DELAY_MS));
+    return await api("POST", API.staged, body, STAGED_POST_TIMEOUT_MS);
   }
 }
 

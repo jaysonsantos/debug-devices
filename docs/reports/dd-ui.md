@@ -2150,3 +2150,36 @@ No commit.
 - `uv run pytest`: 1153 passed, 1 skipped. ruff check and format: pass. `prek run --files` on each changed file: pass. `XDG_RUNTIME_DIR=<private dir> scripts/qa_mcp_stdio.py --skip-webcam`: 15/15, and the private runtime folder stayed empty.
 
 N96 stays in the backlog. No commit.
+
+## Round 56: one more send of a capture after a network error (N98, docs/reports/dd-qa.md "Round 55: check")
+
+### What I did
+
+- `app.js` `stagedPost`: when the capture POST ends in a network error (fetch rejects with a `TypeError`: no HTTP answer), the page shows "sending again…". Then, after 300 ms, it sends the same body (the same `request_id`) once more. The server gives the first answer to that id (N97), so a second send never makes a second capture.
+- No second send in these cases:
+  - A refusal (an HTTP error with its text, for example 403 or 409) shows its text at once.
+  - No answer in 10 s also shows at once, so the longest wait stays 10 s.
+- When both sends end in a network error, the text is "Capture failed: <error> (sent 2 times; if the server took it, the list shows it)". The server can have taken the capture, and the list (SSE) shows the truth.
+- `mcp/README.md` (the staged captures part): the one more send.
+
+### Test: a proxy like the bad tunnel
+
+The proxy works on TCP:
+- It writes the Host `127.0.0.1:<page port>` and `Connection: close` on each request, so each POST uses a new connection.
+- For a capture POST, it passes the request to the server and drops the answer. 1 s later, it closes the browser connection.
+- Setup: headless Chromium (the local Playwright build 1194) and Firefox, fakes, a private state folder, port 0. Nothing asked 18766.
+
+| Browser, case | POSTs at the proxy | Page texts | Captures, log rows |
+|---|---|---|---|
+| Chromium, first answer dropped, the page of a1d752d (before) | 1 | "sending…", "Capture failed: Failed to fetch" (N98) | 1, 1 |
+| Chromium, first answer dropped (now) | 2 | "sending…", "sending again…", "" | 1, 1 |
+| Chromium, all answers dropped | 2 | ..., "Capture failed: Failed to fetch (sent 2 times; if the server took it, the list shows it)" | 1, 1 |
+| Chromium, refused (no `--ui-allowed-origin`) | 1 | "sending…", "Capture failed: forbidden: a change from the origin ..." at once | 0, 0 |
+| Firefox, first answer dropped | 2 (Firefox sends it again by itself) | "sending…", "" | 1, 1 |
+| Firefox, all answers dropped | 20 (Firefox's own sends, 2 times from the page) | ..., "Capture failed: NetworkError when attempting to fetch resource. (sent 2 times; ...)" | 1, 1 |
+| Firefox, refused | 1 | the refusal text at once | 0, 0 |
+
+- In each case the page count agrees with the store ("1 staged" or "0 staged").
+- `uv run pytest`: 1153 passed, 1 skipped (no Python change). ruff: pass. `prek run --files` on `app.js` and `mcp/README.md`: pass.
+
+No commit.
