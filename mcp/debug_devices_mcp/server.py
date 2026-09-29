@@ -201,6 +201,8 @@ NOT_APPLIED_NOTE = (
 # The `_meta` of a staged image: the phone photo, or a meter frame that the vision model saw.
 META_STAGED = "staged"
 STAGED_PHOTO = "phone_photo"
+# The meter crop image of the frame that gave the staged reading (always in the result).
+STAGED_METER_CROP = "meter_crop"
 STAGED_METER_FRAME = "meter_frame"
 CROP_REMOVED = (
     "the crop box was removed during the capture: no meter reading (no frame without the crop box goes to the vision "
@@ -1330,9 +1332,12 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
 
         Staged captures first: when the user captured on the monitor page (Space, C, or Capture), this returns ALL
         waiting captures, oldest first, and removes them (`staged`: each with `capture_id`, `captured_at`, `age_s`,
-        the checked `meter` result with its bench notice, and the phone `photo`; the images follow with the
-        `capture_id`). A staged photo and value show the moment of the capture, not now: say so. The other
-        parameters apply only to a live read; `not_applied` names the ones that you gave. To record a staged reading
+        the checked `meter` result with its bench notice, and the phone `photo`). For each capture, the phone photo
+        and the meter crop image of its reading follow as images (`_meta` has the `capture_id` and `staged`:
+        "phone_photo" or "meter_crop"); `include_image` also adds the other meter frames ("meter_frame"). The photo
+        shows where the probes touch; the value is only the checked `meter` result, never your reading of the meter
+        image. A staged photo and value show the moment of the capture, not now: say so. The other parameters apply
+        only to a live read; `not_applied` names the ones that you gave. To record a staged reading
         (bench_record_measurement), pass its staged `capture_id` (or `meter.capture_id`): it works in this server.
         Only when no capture waits does it read live, as below; `live: true` skips the queue (the captures stay).
         staged_captures lists the queue without removing it.
@@ -1411,8 +1416,8 @@ def staged_image(jpeg: bytes, capture: StagedCapture, kind: str) -> ImageContent
 def staged_result(
     services: Services, items: list[StagedItem], include_image: bool, not_applied: list[str]
 ) -> CallToolResult:
-    """multimeter_read with staged captures: the readings (oldest first), each photo, and with `include_image`
-    the meter frames that the vision model saw.
+    """multimeter_read with staged captures: the readings (oldest first), and for each capture the phone photo and
+    the meter crop image of its reading. With `include_image`, also the other meter frames that the vision model saw.
 
     Each staged meter result enters this server's meter results under the staged capture id, its meter capture id,
     and its frame ids, so bench_record_measurement works here with any of them: also in a server that did not take
@@ -1437,8 +1442,10 @@ def staged_result(
     for item in items:
         if item.photo is not None:
             content.append(staged_image(item.photo, item.capture, STAGED_PHOTO))
+        if (meter_image := item.meter_image) is not None:
+            content.append(staged_image(meter_image, item.capture, STAGED_METER_CROP))
         if include_image:
-            content += [staged_image(frame, item.capture, STAGED_METER_FRAME) for frame in item.frames]
+            content += [staged_image(frame, item.capture, STAGED_METER_FRAME) for frame in item.other_frames]
     return CallToolResult(content=content, structured_content=result.model_dump(mode="json"))
 
 

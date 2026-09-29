@@ -1,4 +1,5 @@
-"""Event bus for the monitor window: tool calls and phone state, fanned out to Server-Sent Events clients."""
+"""Event bus for the monitor window: tool calls, the phone state, the staged captures, and the webcam info, fanned out
+to Server-Sent Events clients (one stream per page: the page does not poll them)."""
 
 import asyncio
 import uuid
@@ -19,6 +20,8 @@ from debug_devices_mcp.focus import FocusReport, focus_report
 from debug_devices_mcp.images import SnapshotOrientation
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox
 from debug_devices_mcp.ui.constants import defaults
+from debug_devices_mcp.ui.staged_view import StagedList
+from debug_devices_mcp.webcam_stream import StreamInfo
 
 MILLISECONDS_PER_SECOND = 1000
 
@@ -55,6 +58,10 @@ class EventKind(StrEnum):
 
     CALL = "call"
     PHONE = "phone"
+    # The staged captures list changed (added, ready, failed, removed; also a pop by another MCP server).
+    STAGED = "staged"
+    # The webcam stream info changed (started, stopped, first frame, size, error).
+    WEBCAM = "webcam"
 
 
 # region: wire models
@@ -122,7 +129,7 @@ class PhoneState(BaseModel):
 
 class BusMessage(BaseModel):
     kind: EventKind
-    data: ToolCallEvent | PhoneState
+    data: ToolCallEvent | PhoneState | StagedList | StreamInfo
 
 
 # endregion: wire models
@@ -315,6 +322,17 @@ class EventBus:
             changes["focus"] = focus_report(status)
         self.phone = self.phone.model_copy(update=changes)
         self._publish(BusMessage(kind=EventKind.PHONE, data=self.phone))
+
+    def publish_staged(self, view: StagedList) -> None:
+        self._publish(BusMessage(kind=EventKind.STAGED, data=view))
+
+    def publish_webcam(self, info: StreamInfo) -> None:
+        self._publish(BusMessage(kind=EventKind.WEBCAM, data=info))
+
+    @property
+    def has_subscribers(self) -> bool:
+        """A page listens (an open SSE stream)."""
+        return bool(self._subscribers)
 
     def _publish(self, message: BusMessage) -> None:
         for queue in self._subscribers:

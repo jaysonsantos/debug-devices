@@ -2030,3 +2030,66 @@ With the orchestrator's go for `server.py`. I did not edit `bench_state.py` or `
   - `expected_mode` and `frames` given: `not_applied` names them, with the note; without them: empty.
 - `test_staged_capture.py`: `capture_setup` takes a `reading` (the vision answer).
 - `uv run pytest`: 1136 passed, 1 skipped. ruff and `prek run --files` on my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+## Round 54: staged captures with the meter image, SSE instead of polls, and use through a tunnel (docs/briefs/staged-remote-sse.md)
+
+### 1. The meter image in each staged capture
+
+- `staged.py`: `StagedCapture.meter_image_index()` gives the kept frame that gave the reading (the frame with the `capture_id` of the result; `meter_frames.combine` takes the first frame). `StagedItem.meter_image`, `StagedItem.other_frames`, and `StagedStore.meter_image(capture_id)` (only a UUID names a file, N90). The kept frames are crops only: the capture refuses a frame without the crop box (N89).
+- `multimeter_read` (`staged_result`): for each capture, always the reading, the phone photo (`_meta.staged` `phone_photo`), and the meter image (`meter_crop`). `include_image` adds the other meter frames (`meter_frame`), so no image comes two times. The docstring says: the photo shows where the probes touch; the value is only the checked `meter` result, never the agent's reading of the image.
+- Page: `GET /api/staged/{id}/meter.jpg`, `has_meter_image` in the list view, and a second thumbnail next to the phone photo.
+
+### 2. SSE instead of polls
+
+- Two new event kinds on the existing `/api/events` stream: `staged` (the list view) and `webcam` (the stream info). The page has one event stream for all live data.
+- `ui/page_push.py` (`PagePush`): it starts with the page (`_serve`) and stops with it (`stop_page`). It does work only while a page listens.
+  - Staged captures: the store listeners push the changes of this process at once (a capture, its result, a delete, a clear, a pop by this server's `multimeter_read`). The changes of other MCP server processes show through the folder version (the folder time and its file names), checked each 1 s. A queue that is not empty is listed again each 10 s (expiry, a pending time-out). A push goes out only when the page view changes (not for the age).
+  - Webcam info: checked each 1 s; a push only when the page view changes (start, stop, the first frame, the size, an error), not at each frame.
+- `Monitor.webcam_info()` (moved from the route; it also gives the info of another monitor that owns the webcam).
+- The event stream has `X-Accel-Buffering: no`, so a proxy passes each event at once.
+- Page: I removed `setInterval(loadStaged, 2000)` and `setInterval(refreshWebcamInfo, 3000)`. When the event stream opens (at start and after each reconnect), the page loads the staged list and the webcam info one time. After a capture, a delete, or a clear, the page does not load the list: the push brings it.
+
+| Live data | Before | Now | Why |
+|---|---|---|---|
+| Staged list | poll each 2 s | `staged` event | moved |
+| Webcam info | poll each 3 s | `webcam` event | moved |
+| Phone state (status, focus, boxes) | `phone` event | no change | the server polls the phone each 1 s and pushes |
+| Tool calls | `call` event | no change | |
+| Webcam MJPEG, phone screen (H.264 or MJPEG) | 1 connection each | no change; paused in a hidden tab | image data, not events |
+| MJPEG fallback draw each 100 ms | local timer | no change (skips a hidden tab) | local canvas drawing, not a request |
+| Devices list | on open and Refresh | no change | it runs adb; only on the user's action |
+| Reconnect timers | after an error | no change | |
+
+### 3. Use through a tunnel
+
+- New setting `--ui-allowed-origin` (env `DEBUG_DEVICES_UI_ALLOWED_ORIGINS`, a comma list; the flag can also come again), default empty. Each value must be an origin (`scheme://host[:port]`); the server keeps it in the form that a browser sends (lower case, no default port). A bad value stops the start with a clear error.
+- `ui/origins.py` (`PageOrigins`): without the setting, the checks are as before. With it:
+  - Host: also the host of an allowed origin (a tunnel that keeps the browser's Host). A tunnel that writes `127.0.0.1` (the frpc `hostHeaderRewrite`) also works.
+  - A change (POST, DELETE): also an exact allowed origin. Another scheme, port, or host is refused.
+  - `from_the_page` (the device and staged routes): the same-origin check, or an exact allowed origin (the tunnel can change the Host, so the origin decides).
+- `LocalOnly` refuses with a JSON error text (before: the plain text "forbidden"), so the page shows the reason: "forbidden: a change from the origin ... (only 127.0.0.1, localhost, or --ui-allowed-origin)".
+- Page feedback: a capture shows "sending…" at once (with the flash). The capture sound plays only after 202. A refused or failed POST shows "Capture failed: <error text>" in red and plays a low sound. The POST has a 10 s limit ("no answer in 10 s").
+- Hidden tab: the webcam MJPEG and the phone screen stream (H.264 or MJPEG) stop, and they start again when the tab is visible. The event stream stays open.
+- `.env.example`, `mcp/README.md` ("Live updates", "Use through a tunnel", the config table, the staged captures part): the tunnel must have its own login, because the page has none, it shows the full webcam frame, and it controls the phone and the camera.
+
+### Tests
+
+- `mcp/tests/test_staged_tools.py`: a staged pop without `include_image` has the reading, the phone photo, and the meter image; the meter image is the first frame (a webcam fake with another width for each frame). The pop test with `include_image` now expects photo, meter image, and the other frame.
+- `mcp/tests/test_staged_capture.py`: the page route `meter.jpg` (and 404 for a bad id), `has_meter_image`.
+- `mcp/tests/test_ui_origins.py` (new, 6 tests): the setting (default empty, flags, env comma list, bad values); `build_monitor` passes it on; `PageOrigins`; without the setting: the tunnel Host and a capture from the tunnel origin are refused (JSON error text); with `https://bench.example.org`: GET and POST with that Host and Origin pass, also with Host 127.0.0.1; another origin, scheme, port, or host is refused; no Origin is refused; the local page still works.
+- `mcp/tests/test_page_push.py` (new, 4 tests): a capture, its result, and a pop by another store on the same folder (another process, no listener) reach the page as `staged` events; a change of this process pushes at once (with a 30 s folder check); the webcam info pushes only when the page view changes; without a page, the push reads nothing.
+- Playwright (Firefox headless, fakes, a private state folder, port 0):
+  - In 7 s idle: 1 `GET /api/staged` and 1 `GET /api/webcam/info` (the loads at the stream open). After a capture and a pop by another store: still 1.
+  - Space: the list shows "4.98 V (confirmed)" through SSE; two thumbnails load (phone photo 640×480, meter image 64×48).
+  - The pop by another store empties the list through SSE.
+  - Hidden tab: the webcam image has no `src`; visible again: a new stream URL.
+  - Through a local proxy that acts like frpc (Host rewritten to 127.0.0.1:<page port>), page opened as `http://bench.example.org:<proxy port>/` (Firefox maps the name to 127.0.0.1): the event stream is live. Without the setting: the POST gets 403, the page shows "sending…", then "Capture failed: forbidden: a change from the origin http://bench.example.org:<port> (only 127.0.0.1, localhost, or --ui-allowed-origin)" in red, count 0. With the setting: 202, "sending…" then empty, "1 staged".
+  - Note: Playwright in Firefox does not change the Origin header with `route.continue_`, so I used the local proxy for the tunnel check.
+- `uv run pytest`: 1147 passed, 1 skipped. ruff check and format: pass. `prek run --files` on each of my files: pass. `scripts/qa_mcp_stdio.py --skip-webcam`: 15/15.
+
+### Is more needed for a slow tunnel
+
+- Before: 3 long connections (events, webcam MJPEG, phone screen) plus a poll each 2 s and each 3 s. Now: the same 3 long connections, and requests only on the user's actions. A browser has 6 HTTP/1.1 connections for each host, so 3 stay free.
+- The webcam MJPEG (10 frames per second, the full frame) is the largest load. The server sends only the newest frame to a slow reader, but the tunnel buffers (the 4 MB send queue) can still add seconds of delay. The hidden-tab pause helps. A possible next step: a lower frame rate and size for a page that is not local (for example `stream.mjpg?fps=2&max_side=640`). I did not do it in this round. Tell me if you want it.
+
+No commit.

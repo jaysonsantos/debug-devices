@@ -59,7 +59,7 @@ async def get_events(request: Request) -> StreamingResponse:
                 yield sse_message(message)
 
     stream = until_closing(body(), monitor.closing)
-    return StreamingResponse(stream, media_type=http.SSE_MEDIA_TYPE, headers=http.NO_CACHE)
+    return StreamingResponse(stream, media_type=http.SSE_MEDIA_TYPE, headers=http.NO_BUFFER)
 
 
 async def get_whoami(request: Request) -> JSONResponse:

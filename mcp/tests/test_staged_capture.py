@@ -151,15 +151,15 @@ async def test_the_page_routes(settings: Settings, tmp_path: Path) -> None:
         await capturer.wait()
         listed = (await client.get("/api/staged")).json()
         [view] = listed["captures"]
-        assert (view["state"], view["meter_text"], view["meter_status"], view["has_photo"]) == (
-            "ready",
-            "4.98 V",
-            "confirmed",
-            True,
-        )
+        shown = [view[key] for key in ("state", "meter_text", "meter_status", "has_photo", "has_meter_image")]
+        assert shown == ["ready", "4.98 V", "confirmed", True, True]
         assert listed["limit"] == MAX_STAGED
         photo = await client.get(f"/api/staged/{capture_id}/photo.jpg")
         assert photo.headers["content-type"] == "image/jpeg"
+        # The meter image of the reading (the crop box only).
+        meter = await client.get(f"/api/staged/{capture_id}/meter.jpg")
+        assert (meter.status_code, meter.headers["content-type"], meter.content) == (200, "image/jpeg", JPEG)
+        assert (await client.get("/api/staged/not-an-id/meter.jpg")).status_code == 404
         assert (await client.delete(f"/api/staged/{capture_id}")).status_code == 403
         assert (await client.delete(f"/api/staged/{capture_id}", headers=PAGE)).json() == {"changed": 1}
         await client.post("/api/staged", headers=PAGE)

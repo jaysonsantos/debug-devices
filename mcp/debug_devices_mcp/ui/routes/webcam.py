@@ -1,6 +1,5 @@
 """The live webcam view: an MJPEG stream from the shared capture, and its size."""
 
-import contextlib
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -10,11 +9,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from debug_devices_mcp.remote_webcam import RemoteUnavailableError
 from debug_devices_mcp.ui.constants import http
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of, until_closing
 from debug_devices_mcp.webcam import WebcamError
-from debug_devices_mcp.webcam_stream import StreamInfo, WebcamStream
+from debug_devices_mcp.webcam_stream import WebcamStream
 
 if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
@@ -101,17 +99,9 @@ def latest_frame(stream: WebcamStream) -> Response:
 
 
 async def get_info(request: Request) -> JSONResponse:
-    monitor = monitor_of(request)
-    if monitor.stream is None:
+    info = await monitor_of(request).webcam_info()
+    if info is None:
         return error_response(NO_STREAM, NOT_FOUND)
-    info = monitor.stream.info()
-    if monitor.webcam_owner is not None and monitor.shared is not None:
-        with contextlib.suppress(RemoteUnavailableError, ValidationError):
-            return json_response(StreamInfo.model_validate_json(await monitor.shared.remote.info()))
-    if monitor.webcam_owner is not None:
-        info = info.model_copy(
-            update={"error": f"The monitor at {monitor.webcam_owner} owns the webcam. This process uses its frames."}
-        )
     return json_response(info)
 
 

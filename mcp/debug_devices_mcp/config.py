@@ -16,6 +16,7 @@ from debug_devices_mcp.sevenseg.constants import LocalDecoderMode
 from debug_devices_mcp.ui.constants import UiStart
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.constants import screen as ui_screen
+from debug_devices_mcp.ui.origins import normalize_origin
 from debug_devices_mcp.webcam import Crop
 from debug_devices_mcp.webcam_controls import DEFAULT_V4L2_CTL
 
@@ -55,6 +56,16 @@ def _default_bench_state_if_empty(value: object) -> object:
 
 
 type CropSetting = Annotated[Crop | None, NoDecode, BeforeValidator(_parse_crop)]
+
+
+def _parse_origins(value: object) -> object:
+    """Read a comma list of exact origins (a variable, or one or more flags: the CLI joins them with commas). Each
+    must be an origin; it is kept in the form that a browser sends."""
+    if isinstance(value, str):
+        value = value.split(",")
+    if isinstance(value, list):
+        return [normalize_origin(part) for part in value if isinstance(part, str) and part.strip()]
+    return value
 
 
 def _none_if_empty(value: object) -> object:
@@ -164,6 +175,14 @@ class Settings(BaseSettings):
         default=ui_defaults.PORT, ge=0, le=defaults.MAX_PORT, description="Port on 127.0.0.1. Busy: a free port."
     )
     ui_open_browser: bool = Field(default=True, description="Open the monitor page in a new Firefox window at start.")
+    # Not a `type` alias: the CLI must see the list to join a repeated flag.
+    ui_allowed_origins: Annotated[list[str], NoDecode, BeforeValidator(_parse_origins)] = Field(
+        default=[],
+        validation_alias=AliasChoices("ui_allowed_origin", env.UI_ALLOWED_ORIGINS.lower()),
+        description="Exact origins (comma list, or the flag again) that may also use the page, for example an https "
+        "tunnel: https://bench.example.org. Empty: only 127.0.0.1 and localhost. The tunnel must have its own login: "
+        "the page has none, and it controls the phone and the camera.",
+    )
     phone_screen: bool = Field(
         default=True, description="Show the phone screen in the monitor page after phone_connect (scrcpy server)."
     )

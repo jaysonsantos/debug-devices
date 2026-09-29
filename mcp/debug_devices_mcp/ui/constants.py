@@ -66,6 +66,11 @@ class defaults:
     UNKNOWN_CLIENT = "mcp"
     SUMMARY_CHARS = 300
     SSE_KEEPALIVE = timedelta(seconds=15)
+    # While a page listens: how often the server checks the staged captures folder (a pop or a capture of another
+    # MCP server) and the webcam info, and how often it lists a waiting queue again (expiry, a pending time-out).
+    STAGED_PUSH_CHECK = timedelta(seconds=1)
+    STAGED_PUSH_SWEEP = timedelta(seconds=10)
+    WEBCAM_PUSH_CHECK = timedelta(seconds=1)
 
 
 class browser:
@@ -102,6 +107,8 @@ class http:
     CONTENT_TYPE_HEADER = "content-type"
     SSE_MEDIA_TYPE = "text/event-stream"
     NO_CACHE: ClassVar[dict[str, str]] = {"Cache-Control": "no-store"}
+    # A proxy in front of the page (a tunnel, nginx) must pass each event at once, not collect them.
+    NO_BUFFER: ClassVar[dict[str, str]] = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
     ALLOWED_HOSTS = ("127.0.0.1", "localhost")
     SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
     HOST_HEADER = "host"

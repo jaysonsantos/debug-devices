@@ -29,6 +29,8 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     services.add_status_listener(monitor.status_seen)
     # Space, C, or the Capture button on the page stage the phone photo and the meter reading (staged.py).
     monitor.staged = StagedCapturer(services, services.staged, monitor.origin)
+    # A capture, its result, a delete, or a pop by this server: the page gets the new list at once (SSE).
+    services.staged.listeners.append(monitor.staged_changed)
     monitor.board_panel = BoardPanel(services, monitor.call_from_ui)
     monitor.device_panel = DevicePanel(services, monitor)
     monitor.phone_selection = services.selection
@@ -84,6 +86,7 @@ def build_monitor(settings: Settings, services: Services) -> Monitor:
             open_browser=settings.ui_open_browser,
             start=settings.ui_start,
             webcam_idle_timeout=settings.webcam_idle_timeout,
+            allowed_origins=tuple(settings.ui_allowed_origins),
         ),
         MonitorParts(
             stream=stream,

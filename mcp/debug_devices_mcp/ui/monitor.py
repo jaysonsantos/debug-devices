@@ -32,7 +32,7 @@ from debug_devices_mcp.images import SnapshotOrientation, downscale_jpeg, transf
 from debug_devices_mcp.orientation import OrientationState
 from debug_devices_mcp.phone_api import CameraStatus, OverlayArrow, OverlayBox, PhoneError, Still
 from debug_devices_mcp.phone_screen import PhoneScreen, ScreenState, ScreenStatus
-from debug_devices_mcp.remote_webcam import MonitorIdentity, RemoteMonitor, SharedWebcam
+from debug_devices_mcp.remote_webcam import MonitorIdentity, RemoteMonitor, RemoteUnavailableError, SharedWebcam
 from debug_devices_mcp.scene import SceneWatcher
 from debug_devices_mcp.scrcpy import ScrcpyError, ScrcpyLauncher
 from debug_devices_mcp.screen_mjpeg import ScreenTranscoder
@@ -52,11 +52,12 @@ from debug_devices_mcp.ui.forward import (
     token_dir,
     write_token,
 )
+from debug_devices_mcp.ui.page_push import PagePush
 from debug_devices_mcp.ui.remote_screen import RemoteScreen, ScreenStartResult
 from debug_devices_mcp.ui.settings import EffectiveSettings, SettingsStore, UiSettings
 from debug_devices_mcp.ui.version import code_version
 from debug_devices_mcp.webcam import Crop
-from debug_devices_mcp.webcam_stream import FrameSource, WebcamStream, crop_jpeg
+from debug_devices_mcp.webcam_stream import FrameSource, StreamInfo, WebcamStream, crop_jpeg
 
 PHONE_STOPPED = "stopped"
 OLD_PHONE_GONE = "the old phone was already gone: its adb forward and screen stream are cleared"
@@ -79,6 +80,7 @@ TURN_FIELD = "turn_degrees"
 FLIP_FIELDS = ("flip_horizontal", "flip_vertical")
 # bench_measure: the SnapshotInfo of its photo is under this key.
 PHOTO_FIELD = "photo"
+WEBCAM_OF_OTHER = "The monitor at {owner} owns the webcam. This process uses its frames."
 # The structured result of multimeter_read with staged captures (staged.StagedReadResult) has this key.
 STAGED_BATCH_KEY = "staged"
 # The tools whose first image is a phone photo for the page (B-E9 of QA round 4: also bench_measure).
@@ -163,6 +165,8 @@ class MonitorOptions(BaseModel):
     start: UiStart = UiStart.EAGER
     # Lazy mode only. Zero keeps the stream on.
     webcam_idle_timeout: timedelta = defaults.WEBCAM_IDLE_TIMEOUT
+    # Exact origins (a tunnel, for example https://bench.example.org) that the Host and Origin checks also accept.
+    allowed_origins: tuple[str, ...] = ()
 
 
 @dataclass
@@ -269,6 +273,8 @@ class Monitor:
     selected_serial: Callable[[], str] | None = None
     # The flips that `last_snapshot` has (the flips when it was taken); a new snapshot sets it.
     last_snapshot_flips: SnapshotOrientation = SnapshotOrientation()
+    # Pushes the staged captures and the webcam info to the page (SSE); it runs with the page.
+    page_push: PagePush | None = None
 
     def __init__(
         self,
@@ -825,6 +831,8 @@ class Monitor:
                     self._server, self.url = None, None
                     raise RuntimeError("the monitor web server stopped at start")
                 await asyncio.sleep(STARTUP_POLL_SECONDS)
+        self.page_push = PagePush(self.bus, lambda: self.staged, self.webcam_info)
+        self.page_push.start()
         logger.warning("monitor window: %s", self.url)
 
     async def stop_page(self) -> None:
@@ -832,6 +840,9 @@ class Monitor:
         self.closing.set()
         server, task = self._server, self._serve_task
         self._server, self._serve_task, self.url = None, None, None
+        push, self.page_push = self.page_push, None
+        if push is not None:
+            await push.stop()
         if self.ingest_token is not None and self._token_port is not None:
             remove_token(self.token_dir, self._token_port, self.ingest_token)
             self.ingest_token = None
@@ -865,6 +876,23 @@ class Monitor:
                 self.webcam_owner = self.shared.remote_identity.url
                 return
             self.start_stream()
+
+    async def webcam_info(self) -> StreamInfo | None:
+        """The webcam stream as the page shows it (the info route and the `webcam` event), or None without one."""
+        if self.stream is None:
+            return None
+        if self.webcam_owner is not None and self.shared is not None:
+            with contextlib.suppress(RemoteUnavailableError, ValidationError):
+                return StreamInfo.model_validate_json(await self.shared.remote.info())
+        info = self.stream.info()
+        if self.webcam_owner is not None:
+            info = info.model_copy(update={"error": WEBCAM_OF_OTHER.format(owner=self.webcam_owner)})
+        return info
+
+    def staged_changed(self) -> None:
+        """A staged capture changed in this process (the store listener): the page gets the new list now."""
+        if self.page_push is not None:
+            self.page_push.poke()
 
     @contextlib.asynccontextmanager
     async def webcam_user(self) -> AsyncIterator[None]:

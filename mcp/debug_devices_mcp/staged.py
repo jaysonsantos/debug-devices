@@ -96,6 +96,15 @@ class StagedCapture(BaseModel):
     def age_seconds(self, now: datetime) -> float:
         return round((now - self.captured_at).total_seconds(), 1)
 
+    def meter_image_index(self) -> int | None:
+        """The kept frame that gave the meter result (its `capture_id`: meter_frames.combine takes the first frame),
+        or None without a meter result or frames. The frames are crops only: never the full webcam frame."""
+        if self.meter is None or self.meter_frames == 0:
+            return None
+        frame_ids = [frame.capture_id for frame in self.meter.frames]
+        index = frame_ids.index(self.meter.capture_id) if self.meter.capture_id in frame_ids else 0
+        return index if index < self.meter_frames else None
+
 
 @dataclass
 class StagedItem:
@@ -103,7 +112,20 @@ class StagedItem:
 
     capture: StagedCapture
     photo: bytes | None = None
-    frames: list[bytes] = field(default_factory=list)
+    # All kept meter frames, in capture order (None for a frame file that is gone).
+    frames: list[bytes | None] = field(default_factory=list)
+
+    @property
+    def meter_image(self) -> bytes | None:
+        """The meter crop image of the frame that gave the reading."""
+        index = self.capture.meter_image_index()
+        return self.frames[index] if index is not None and index < len(self.frames) else None
+
+    @property
+    def other_frames(self) -> list[bytes]:
+        """The kept meter frames without the meter crop image (include_image adds them)."""
+        used = self.capture.meter_image_index()
+        return [frame for index, frame in enumerate(self.frames) if index != used and frame is not None]
 
 
 class StagedReading(BaseModel):
@@ -191,6 +213,9 @@ class StagedStore:
     def __init__(self, directory: Path, clock: Clock = utc_now) -> None:
         self.directory = directory
         self._clock = clock
+        # Called after a change by this process, so the page gets the new list at once. The changes of other MCP
+        # server processes show in `version`.
+        self.listeners: list[Callable[[], None]] = []
 
     @classmethod
     def default(cls) -> StagedStore:
@@ -202,10 +227,11 @@ class StagedStore:
     async def add(self, capture: StagedCapture) -> None:
         """Add a new (pending) capture. Raises QueueFullError when MAX_STAGED wait already."""
         await asyncio.to_thread(self._add, capture)
+        self._tell()
 
     async def finish(self, capture: StagedCapture, photo: bytes | None, frames: list[bytes]) -> bool:
         """Store the result of a capture. False: it is gone (deleted, popped, or expired meanwhile)."""
-        return await asyncio.to_thread(self._finish, capture, photo, frames)
+        return self._changed(await asyncio.to_thread(self._finish, capture, photo, frames))
 
     async def list(self) -> list[StagedCapture]:
         """The waiting captures, oldest first (also the pending ones)."""
@@ -213,7 +239,7 @@ class StagedStore:
 
     async def pop_ready(self) -> list[StagedItem]:
         """Remove and return the finished captures (ready or failed), oldest first. Pending ones stay."""
-        return await asyncio.to_thread(self._pop_ready)
+        return self._changed(await asyncio.to_thread(self._pop_ready))
 
     async def pop_all(self, wait: timedelta = PENDING_WAIT) -> list[StagedItem]:
         """Wait (at most `wait`) until no capture is pending, then remove and return all, oldest first. A capture
@@ -223,21 +249,42 @@ class StagedStore:
             if asyncio.get_running_loop().time() >= deadline:
                 break
             await asyncio.sleep(PENDING_POLL.total_seconds())
-        return await asyncio.to_thread(self._pop_all)
+        return self._changed(await asyncio.to_thread(self._pop_all))
 
     async def delete(self, capture_id: str) -> bool:
         if not is_capture_id(capture_id):
             return False
-        return await asyncio.to_thread(self._delete, capture_id)
+        return self._changed(await asyncio.to_thread(self._delete, capture_id))
 
     async def clear(self) -> int:
-        return await asyncio.to_thread(self._clear)
+        return self._changed(await asyncio.to_thread(self._clear))
+
+    async def version(self) -> tuple[int, frozenset[str]] | None:
+        """Changes when any MCP server process adds, finishes, pops, or deletes a capture: the folder time and its
+        file names (a change inside one clock tick of the file system still changes the names). None: no folder."""
+        return await asyncio.to_thread(self._version)
 
     async def photo(self, capture_id: str) -> bytes | None:
         """The photo of a capture. Only a capture id (a UUID) names a file: never a path (N90)."""
         if not is_capture_id(capture_id):
             return None
         return await asyncio.to_thread(self._read, self._photo_path(capture_id))
+
+    async def meter_image(self, capture_id: str) -> bytes | None:
+        """The meter crop image of a capture (the frame of its reading). Only a capture id names a file (N90)."""
+        if not is_capture_id(capture_id):
+            return None
+        return await asyncio.to_thread(self._meter_image, capture_id)
+
+    def _changed[T](self, result: T) -> T:
+        """Tell the listeners when the change did something (a result that is not empty, zero, or False)."""
+        if result:
+            self._tell()
+        return result
+
+    def _tell(self) -> None:
+        for listener in self.listeners:
+            listener()
 
     # endregion: async API
 
@@ -271,6 +318,12 @@ class StagedStore:
     def _read(path: Path) -> bytes | None:
         try:
             return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def _version(self) -> tuple[int, frozenset[str]] | None:
+        try:
+            return self.directory.stat().st_mtime_ns, frozenset(os.listdir(self.directory))
         except FileNotFoundError:
             return None
 
@@ -308,12 +361,22 @@ class StagedStore:
         return kept
 
     def _item(self, capture: StagedCapture) -> StagedItem:
-        frames = [self._read(self._frame_path(capture.capture_id, index)) for index in range(capture.meter_frames)]
         return StagedItem(
             capture=capture,
             photo=self._read(self._photo_path(capture.capture_id)),
-            frames=[frame for frame in frames if frame is not None],
+            frames=[self._read(self._frame_path(capture.capture_id, index)) for index in range(capture.meter_frames)],
         )
+
+    def _meter_image(self, capture_id: str) -> bytes | None:
+        """Without the lock: each file is replaced whole (`_write`), so a reader never sees half a file."""
+        entry = self._read(self._entry_path(capture_id))
+        if entry is None:
+            return None
+        try:
+            index = StagedCapture.model_validate_json(entry).meter_image_index()
+        except ValidationError:
+            return None
+        return None if index is None else self._read(self._frame_path(capture_id, index))
 
     # endregion: files
 

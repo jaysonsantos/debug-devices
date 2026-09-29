@@ -43,10 +43,10 @@ const API = {
   staged: "/api/staged",
   stagedOne: (id) => `/api/staged/${id}`,
   stagedPhoto: (id) => `/api/staged/${id}/photo.jpg`,
+  stagedMeter: (id) => `/api/staged/${id}/meter.jpg`,
 };
 const MAX_LOG_ROWS = 200;
 const MIN_CROP_PIXELS = 8;
-const INFO_INTERVAL_MS = 3000;
 const ARGS_PREVIEW_CHARS = 120;
 const RECONNECT_MS = 2000;
 const MULTIMETER_TOOL = "multimeter_read";
@@ -126,12 +126,13 @@ const state = {
   orientationKey: "", // the flips of the snapshot that the page shows
 };
 
-async function api(method, url, body) {
+async function api(method, url, body, timeoutMs) {
   const options = { method, headers: {} };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
+  if (timeoutMs) options.signal = AbortSignal.timeout(timeoutMs);
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -254,15 +255,19 @@ function setupCropEditor() {
   });
 }
 
+// The webcam info comes as a `webcam` event when it changes; the page loads it when its event stream opens.
+function applyWebcamInfo(info) {
+  if (info.width && info.height) state.frame = { width: info.width, height: info.height };
+  $("webcam-info").textContent =
+    `${info.device} ${info.width ?? "?"}×${info.height ?? "?"}` + (info.error ? ` – ${info.error}` : "");
+  $("webcam-off").hidden = info.frames > 0;
+  $("webcam-off").textContent = info.error || "Waiting for the first frame…";
+  drawCrop();
+}
+
 async function refreshWebcamInfo() {
   try {
-    const info = await api("GET", API.webcamInfo);
-    if (info.width && info.height) state.frame = { width: info.width, height: info.height };
-    $("webcam-info").textContent =
-      `${info.device} ${info.width ?? "?"}×${info.height ?? "?"}` + (info.error ? ` – ${info.error}` : "");
-    $("webcam-off").hidden = info.frames > 0;
-    $("webcam-off").textContent = info.error || "Waiting for the first frame…";
-    drawCrop();
+    applyWebcamInfo(await api("GET", API.webcamInfo));
   } catch (error) {
     $("webcam-info").textContent = error.message;
     $("webcam-off").hidden = false;
@@ -270,15 +275,18 @@ async function refreshWebcamInfo() {
   }
 }
 
+// A hidden tab has no webcam stream (see "hidden tab"): no reconnect then.
+function connectWebcam() {
+  if (!document.hidden) $("webcam").src = `${API.webcamStream}?t=${Date.now()}`;
+}
+
 function startWebcam() {
   const img = $("webcam");
   img.addEventListener("load", drawCrop);
-  img.addEventListener("error", () => setTimeout(() => (img.src = `${API.webcamStream}?t=${Date.now()}`), RECONNECT_MS));
-  img.src = API.webcamStream;
+  img.addEventListener("error", () => setTimeout(connectWebcam, RECONNECT_MS));
+  connectWebcam();
   setupCropEditor();
   $("multimeter-read").addEventListener("click", readMultimeter);
-  refreshWebcamInfo();
-  setInterval(refreshWebcamInfo, INFO_INTERVAL_MS);
 }
 
 async function readMultimeter(event) {
@@ -609,6 +617,7 @@ async function startScreen() {
     return;
   }
   while (!screenState.fallback) {
+    await tabVisible();
     try {
       // A new connection gets the config and the frames since the last key frame.
       screenState.codec = null;
@@ -618,7 +627,8 @@ async function startScreen() {
         startFallback(error.message);
         return;
       }
-      if (!screenState.fallback) $("phone-screen-note").textContent = `Phone screen: ${error.message}`;
+      // A hidden tab stops the stream on purpose: that is no error.
+      if (!screenState.fallback && !document.hidden) $("phone-screen-note").textContent = `Phone screen: ${error.message}`;
     }
     await new Promise((resolve) => setTimeout(resolve, SCREEN_RECONNECT_MS));
   }
@@ -635,18 +645,53 @@ function startFallback(reason) {
   $("phone-screen-mode").hidden = false;
   $("phone-screen-mode").title = reason;
   const img = $("phone-screen-mjpeg");
-  img.addEventListener("error", () =>
-    setTimeout(() => (img.src = `${API.phoneScreenMjpeg}?t=${Date.now()}`), FALLBACK_RECONNECT_MS),
-  );
-  img.src = API.phoneScreenMjpeg;
+  img.addEventListener("error", () => setTimeout(connectFallback, FALLBACK_RECONNECT_MS));
+  connectFallback();
+  // Local drawing of the loaded image into the canvas: no request.
   setInterval(() => {
-    if (img.complete && img.naturalWidth) drawScreenSource(img, img.naturalWidth, img.naturalHeight);
+    if (!document.hidden && img.complete && img.naturalWidth) drawScreenSource(img, img.naturalWidth, img.naturalHeight);
   }, FALLBACK_DRAW_MS);
+}
+
+function connectFallback() {
+  if (screenState.fallback && !document.hidden) $("phone-screen-mjpeg").src = `${API.phoneScreenMjpeg}?t=${Date.now()}`;
 }
 
 // endregion: phone screen
 
 // endregion: phone
+
+// region: hidden tab
+
+// A hidden tab stops the webcam and the phone screen streams, so a slow tunnel carries only what the user sees. The
+// event stream stays open: the log, the staged list, and the phone state stay current.
+function tabVisible() {
+  if (!document.hidden) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", check);
+      resolve();
+    };
+    document.addEventListener("visibilitychange", check);
+  });
+}
+
+function setupHiddenTab() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      $("webcam").removeAttribute("src");
+      $("phone-screen-mjpeg").removeAttribute("src");
+      screenState.abort?.abort();
+      return;
+    }
+    // startScreen() waits in tabVisible() and connects again by itself.
+    connectWebcam();
+    connectFallback();
+  });
+}
+
+// endregion: hidden tab
 
 // region: settings
 
@@ -1841,9 +1886,13 @@ function setupBoard() {
 
 // Space (also a USB foot pedal that sends Space) and C capture; never in a text field or with a modifier.
 const STAGED_KEYS = new Set([" ", "c", "C"]);
-const STAGED_POLL_MS = 2000;
 const STAGED_FLASH_MS = 250;
-const STAGED_BEEP = { frequency: 880, seconds: 0.08, gain: 0.15 };
+// The capture sound plays only after the server took the capture (202); a refused or failed capture has another one.
+const STAGED_BEEP = { frequency: 880, seconds: 0.08, gain: 0.15, type: "sine" };
+const STAGED_ERROR_BEEP = { frequency: 220, seconds: 0.4, gain: 0.2, type: "square" };
+// The server answers a capture at once (the photo and the reading follow): no answer in this time is an error.
+const STAGED_POST_TIMEOUT_MS = 10000;
+const STAGED_SENDING = "sending…";
 const staged = { audio: null, flashTimer: null, rendered: new Map() };
 
 function stagedKey(event) {
@@ -1851,16 +1900,17 @@ function stagedKey(event) {
   return !event.target.closest?.(FORM_FIELDS) && !event.target.isContentEditable;
 }
 
-function stagedBeep() {
+function stagedBeep(tone) {
   try {
     staged.audio ??= new AudioContext();
     const oscillator = staged.audio.createOscillator();
     const gain = staged.audio.createGain();
-    oscillator.frequency.value = STAGED_BEEP.frequency;
-    gain.gain.value = STAGED_BEEP.gain;
+    oscillator.type = tone.type;
+    oscillator.frequency.value = tone.frequency;
+    gain.gain.value = tone.gain;
     oscillator.connect(gain).connect(staged.audio.destination);
     oscillator.start();
-    oscillator.stop(staged.audio.currentTime + STAGED_BEEP.seconds);
+    oscillator.stop(staged.audio.currentTime + tone.seconds);
   } catch {
     // No sound (no audio device, or not allowed yet): the flash still shows.
   }
@@ -1878,17 +1928,26 @@ function stagedFlash() {
   }, STAGED_FLASH_MS);
 }
 
+function stagedMessage(text, isError = false) {
+  const message = $("staged-message");
+  message.textContent = text;
+  message.classList.toggle("error", isError);
+  if (text) $("staged-panel").hidden = false;
+}
+
+// The list itself comes as a `staged` event (the server pushes each change).
 async function stagedCapture() {
   stagedFlash();
-  stagedBeep();
+  stagedMessage(STAGED_SENDING);
   try {
-    await api("POST", API.staged);
-    $("staged-message").textContent = "";
+    await api("POST", API.staged, undefined, STAGED_POST_TIMEOUT_MS);
+    stagedBeep(STAGED_BEEP);
+    if ($("staged-message").textContent === STAGED_SENDING) stagedMessage("");
   } catch (error) {
-    $("staged-message").textContent = error.message;
-    $("staged-panel").hidden = false;
+    stagedBeep(STAGED_ERROR_BEEP);
+    const reason = error.name === "TimeoutError" ? `no answer in ${STAGED_POST_TIMEOUT_MS / 1000} s` : error.message;
+    stagedMessage(`Capture failed: ${reason}`, true);
   }
-  await loadStaged();
 }
 
 function stagedItem(capture) {
@@ -1900,6 +1959,13 @@ function stagedItem(capture) {
     photo.src = API.stagedPhoto(capture.capture_id);
     photo.alt = "The phone photo of this capture";
     item.append(photo);
+  }
+  if (capture.has_meter_image) {
+    const meter = document.createElement("img");
+    meter.className = "staged-meter";
+    meter.src = API.stagedMeter(capture.capture_id);
+    meter.alt = "The meter image of this reading (the crop box)";
+    item.append(meter);
   }
   const text = document.createElement("div");
   const time = document.createElement("div");
@@ -1934,7 +2000,7 @@ function showStaged(list) {
   $("staged-panel").hidden = captures.length === 0 && !$("staged-message").textContent;
   // Keep the items that did not change, so their photos do not load again.
   const items = captures.map((capture) => {
-    const key = `${capture.state}|${capture.meter_text}|${capture.notes.length}`;
+    const key = [capture.state, capture.has_photo, capture.has_meter_image, capture.meter_text, ...capture.notes].join("|");
     const known = staged.rendered.get(capture.capture_id);
     if (known?.key === key) return known.item;
     const item = stagedItem(capture);
@@ -1946,11 +2012,12 @@ function showStaged(list) {
   $("staged-list").replaceChildren(...items);
 }
 
+// At start and after each reconnect of the event stream; between them, `staged` events carry the changes.
 async function loadStaged() {
   try {
     showStaged(await api("GET", API.staged));
   } catch (error) {
-    $("staged-message").textContent = error.message;
+    stagedMessage(error.message, true);
   }
 }
 
@@ -1958,9 +2025,8 @@ async function deleteStaged(id) {
   try {
     await api("DELETE", API.stagedOne(id));
   } catch (error) {
-    $("staged-message").textContent = error.message;
+    stagedMessage(error.message, true);
   }
-  await loadStaged();
 }
 
 function setupStaged() {
@@ -1969,9 +2035,8 @@ function setupStaged() {
     try {
       await api("DELETE", API.staged);
     } catch (error) {
-      $("staged-message").textContent = error.message;
+      stagedMessage(error.message, true);
     }
-    await loadStaged();
   });
   document.addEventListener("keydown", (event) => {
     if (!stagedKey(event)) return;
@@ -1982,8 +2047,6 @@ function setupStaged() {
   document.addEventListener("keyup", (event) => {
     if (stagedKey(event)) event.preventDefault();
   });
-  loadStaged();
-  setInterval(loadStaged, STAGED_POLL_MS);
 }
 
 // endregion: staged captures
@@ -2199,9 +2262,12 @@ function setupBench() {
 function connectEvents() {
   const link = $("link");
   const source = new EventSource(API.events);
+  // One event stream for all live data. At start and after a reconnect, the page loads what it can have missed.
   source.addEventListener("open", () => {
     link.textContent = "live";
     link.className = "badge ok";
+    loadStaged();
+    refreshWebcamInfo();
   });
   source.addEventListener("error", () => {
     link.textContent = "disconnected";
@@ -2220,6 +2286,8 @@ function connectEvents() {
     else if (version !== state.version) window.location.reload();
   });
   source.addEventListener("phone", (event) => applyPhone(JSON.parse(event.data)));
+  source.addEventListener("staged", (event) => showStaged(JSON.parse(event.data)));
+  source.addEventListener("webcam", (event) => applyWebcamInfo(JSON.parse(event.data)));
 }
 
 async function loadState() {
@@ -2241,6 +2309,7 @@ async function main() {
   setupSettings();
   setupBench();
   setupFullscreen();
+  setupHiddenTab();
   try {
     await loadState();
   } catch (error) {

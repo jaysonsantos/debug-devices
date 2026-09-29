@@ -1894,3 +1894,102 @@ No new finding.
 
 1. Commit the N80-N93 work and the staged captures together.
 2. The backlog when there is time.
+
+## Round 54 (SSE, tunnel origin): check
+
+Date: 2026-09-29. Scope: dd-ui round 54 (`docs/briefs/staged-remote-sse.md`; `docs/reports/dd-ui.md` "Round 54"): the meter crop image in every staged pop, the `staged` and `webcam` SSE events instead of polls, and `--ui-allowed-origin`. The working tree on commit `6ec4c9c` with the uncommitted changes; `main` is equal to `origin/main`. dd-ui had stopped editing. No Gradle run and no phone run. My probes used the test fakes, ASGI requests (no open port), and tmp folders. The page tests ran in a helper agent, with its own test server and headless browsers in a private network namespace (`unshare -rn`), a copy of the package without `.env`, `scripts/fake_adb.py`, and a webcam device that does not exist. Nothing contacted 18765, 18766, or the user's frpc tunnel. The repo `bench-state.json` was not used. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1147 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (332 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. The meter crop image
+
+| Item | Status | Evidence |
+|---|---|---|
+| A pop always has the reading, the phone photo, and the meter crop image | done | Probe (a fake webcam with another width for each frame, crop set): without `include_image`, the images are `phone_photo` (640 px) and `meter_crop` (frame 0, 101 px); with it, also `meter_frame` (frame 1, 102 px). No image comes two times. `meter.capture_id` is frame 0, and the crop image is that frame (`staged.py` `meter_image_index`). |
+| Crop only, never a full frame | done | The stored `meter-0.jpg` and `meter-1.jpg` are byte for byte the frames that the webcam returned with the crop set; the frames come only from `read_meter(..., require_crop=True)`, which checks the crop before and after each frame (`server.py:956`, `:959`). With a shared webcam, `crop` is the owner's crop (`remote_webcam.py:175-176`), so an owner without a crop box is refused too. |
+| `/api/staged/{id}/meter.jpg` | done | 200 with frame 0; a bad id (`..%2F..%2Fsecret`) gives 404; the list view has `has_meter_image: true`. |
+
+### 3. SSE instead of polls
+
+| Item | Status | Evidence |
+|---|---|---|
+| Server side | done | `ui/page_push.py`: the staged loop pushes on a change of this process at once (store listeners), and on a change of another process through the folder version (checked each 1 s); a push only when the page view changes (not the age); nothing is read while no page listens. The webcam loop pushes only when the page view changes. `webcam_info()` catches the remote errors (`ui/monitor.py:885`), so the loop does not stop on a remote error. |
+| The page | done | See section 5 (the helper's browser tests). |
+
+### 4. `--ui-allowed-origin`
+
+A matrix of ASGI requests against the real app (fakes), without and with `--ui-allowed-origin https://bench.example.org`:
+
+| Case (method, Host, Origin) | Without the setting | With the setting |
+|---|---|---|
+| The page itself (`POST /api/staged`, local Host, `http://127.0.0.1:18766`) | 202 | 202 |
+| No Origin (curl, an agent) on a staged route | 403 (route) | 403 (route) |
+| Cross-site CSRF (`https://evil.example`), also on a device route and on `DELETE /api/settings/crop` | 403 | 403 |
+| `Origin: null` | 403 | 403 |
+| DNS rebinding (Host `evil.example:18766`, POST and GET) | 403 | 403 |
+| Tunnel, Host kept (`bench.example.org`) with the tunnel origin | 403 | 202 |
+| Tunnel, Host rewritten to `127.0.0.1:18766`, with the tunnel origin | 403 | 202 |
+| Tunnel GET (Host `bench.example.org`, no Origin) | 403 | 200 |
+| Suffix (`https://bench.example.org.evil.example`), prefix (`https://evilbench.example.org`), `http://` scheme, port 8443, userinfo (`https://bench.example.org@evil.example`) | 403 | 403 |
+| Host suffix (`bench.example.org.evil.example`) | 403 | 403 |
+| `https://bench.example.org:443`, `https://BENCH.example.org` (the same origin in another form) | 403 | 202 |
+| A device route from the tunnel origin | 403 | passes the origin checks (503 here: no device panel in the test app) |
+| Error text | JSON: "forbidden: a change from the origin ... (only 127.0.0.1, localhost, or --ui-allowed-origin)" or "forbidden: this host name is not the monitor page ..." | same |
+
+Default empty is the old behavior, the match is exact, and the DNS rebinding and cross-site cases are still refused. The bad setting values (no scheme, a path, `ftp:`) stop the start (`test_ui_origins.py`).
+
+### 5. The page (helper agent: headless Chromium 141 and Firefox 155, private network namespace)
+
+All cases pass in both browsers (32 checks). Each request went through a logging proxy of the helper.
+
+| Case | Result |
+|---|---|
+| SSE replaces the polls | In 12 s idle after the stream opened: 1 `GET /api/events` (still open, 1 connection, 1 EventSource), 1 `GET /api/staged` and 1 `GET /api/webcam/info` (4-17 ms after the stream `open` event), then 0 requests. The only `setInterval` left (`app.js:651`) draws the MJPEG fallback into the canvas (local, no request, skips a hidden tab). |
+| Reconnect | The proxy cut the connections and refused new ones for 4 s while another process added a capture: the stream opened again (Chromium 6.0 s, Firefox 5.0 s), then 1 GET of the list and 1 of the webcam info; the list was right. A server restart on the same port reloads the page (the code version changes), and the new page loads each once. |
+| Push | Space: the item shows through the `staged` event in about 45 ms, with 0 `GET /api/staged`. A pop, an add, and a clear by another process show in 0.34-0.57 s. |
+| Hidden tab | (`document.hidden` overridden, then `visibilitychange`.) The webcam MJPEG and the phone screen stream close within 4-8 ms; the event stream stays open, and a change from another process still arrives; visible again: both streams start again (6-9 ms). |
+| Tunnel origin (a proxy like frpc, page at `http://bench.example.org:<port>/`) | Without the setting: "sending…" at once, then in red "Capture failed: forbidden: a change from the origin http://bench.example.org:<port> (only 127.0.0.1, localhost, or --ui-allowed-origin)", POST 403, 0 staged, the low sound (220 Hz; the capture sound is 880 Hz). With the exact origin: 202, "1 staged". With `https://bench.example.org` (another scheme and port): refused. With the Host kept: works with the setting; without it, `GET /` gets 403 "this host name is not the monitor page". A dropped POST shows "Capture failed: Failed to fetch" (Chromium) or "... NetworkError ..." (Firefox); a held POST shows "Capture failed: no answer in 10 s" after 10.0 s. |
+| Thumbnails | The page asks `photo.jpg` and `meter.jpg` only when `has_photo` and `has_meter_image` are true; a capture with both shows two thumbnails (the photo, and the meter crop with class `staged-meter`). |
+
+### 6. New findings
+
+- **N94 (low; privacy risk: fix now; older than this round): a web page on another local port can clear the crop box and use the other page actions.**
+  - Cause: `LocalOnly` accepts a write whose Origin host name is `127.0.0.1` or `localhost`, on any port and scheme (`ui/origins.py:64-66`; the old `allowed_host(origin_host)` did the same). Only the device and staged routes check the exact page origin (`from_the_page`).
+  - Probe (ASGI): `DELETE /api/settings/crop` with `Origin: http://localhost:8080` or `https://127.0.0.1:5173` gives 200 and clears the crop, with and without the setting. The same origin on `POST /api/staged` gives 403 (the route check).
+  - Effect: any page that the user opens on another local port (another dev server, a local tool) can clear the crop box, so the agent's next webcam `multimeter_read` sends the whole frame to the vision model. It can also use the other page-only write routes (the phone, the bench, and the board actions).
+  - Fix: in `LocalOnly`, accept a write only from the exact page origin (the Origin names this Host) or an allowed origin, as `from_the_page` does; a request without Origin (a local process, the other MCP servers) stays as it is.
+- **N95 (low; privacy risk: fix now, a text change): a tunnel that writes the Host `127.0.0.1` reaches every read of the page also without `--ui-allowed-origin`.**
+  - The Host check cannot see a tunnel that rewrites the Host (the frpc `hostHeaderRewrite`). Without the setting, the page, the full webcam stream, the phone screen, and the photos load through such a tunnel; only the writes with a browser Origin are refused (the helper's case E1: the page and its streams loaded, the capture got 403). The user's tunnel carried the webcam stream before this round, so it probably works this way.
+  - `mcp/README.md:191` says that without the setting the page "accepts only the host names 127.0.0.1 and localhost", which reads as closed to a tunnel.
+  - Fix: say in `mcp/README.md` and `.env.example` that a tunnel always needs its own login, with or without the setting, because a tunnel that rewrites the Host reaches every read. And ask the user to check that the frpc tunnel has a login now.
+- N96 (low: backlog): with a missing or busy webcam, the page gets a `webcam` event at each ffmpeg restart (7 in 12 s), because the error text has changing addresses (`[in#0 @ 0x...]`, `webcam_stream.py:346`) and `webcam_key` compares the full text (`ui/page_push.py:25-27`). About 0.5 events per second to a remote page. Idea: remove the addresses before the comparison.
+- N97 (low: backlog): a browser can send one capture POST again when a reused connection closes with no answer (the helper's proxy got 3 POSTs from Chromium and 10 from Firefox for one key press that it dropped). A tunnel that forwards the POST and then loses the answer can give a duplicate capture (not seen in these runs; the gate stays on the safe side). Idea: a capture id made by the page and sent with the POST.
+- Note: `/api/staged` and the webcam info at stream open run once more on the old page just before a version reload (B2); harmless.
+
+### Summary
+
+- Tests: pytest 1147 passed, 1 skipped; prek passes and leaves the tree unchanged (332 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18765, 18766, or the tunnel.
+- The round 54 items work as briefed: the meter crop image in every pop (crop only), SSE with one stream and no polls, the loads at stream open and after a reconnect, the pushes of other processes, the hidden-tab pause, "sending…" and the refusal text, and the exact tunnel origin with the old default.
+- New: N94 and N95 (fix now, privacy), N96 and N97 (backlog).
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N94 | low | privacy (another local page can clear the crop box) | **fix now** | `ui/origins.py:64-66`, `ui/app.py` `LocalOnly` |
+| N95 | low | privacy (the docs read as if a tunnel is closed without the setting) | **fix now** (text, and a check of the user's tunnel) | `mcp/README.md:191`, `.env.example` |
+| N96 | low | none | backlog | `webcam_stream.py:346`, `ui/page_push.py:25-27` |
+| N97 | low | none (a duplicate capture at most) | backlog | `app.js` capture POST, `ui/routes/staged.py` |
+
+N74, N83, N87, and the older backlog stay as written there.
+
+### What to do next
+
+1. Fix N94: `LocalOnly` takes a write only from the exact page origin or an allowed origin (a request without Origin stays allowed).
+2. Fix N95: the README and `.env.example` text; the user checks that the frpc tunnel has a login.
+3. Then a short check: my origin matrix again (with the local other-port rows), pytest, and prek.

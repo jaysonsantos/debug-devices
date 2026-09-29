@@ -405,13 +405,16 @@ header kbd { font-size: 11px; padding: 0 4px; border: 1px solid var(--border); b
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  max-width: 360px;
+  max-width: 460px;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 12px;
 }
-#staged-list li img { width: 96px; height: auto; border-radius: 4px; }
+/* The phone photo, then the meter image (the crop box: wide and low). */
+#staged-list li img { flex: none; width: 96px; height: auto; border-radius: 4px; }
+#staged-list li img.staged-meter { width: 112px; }
+#staged-message.error { color: var(--error); }
 #staged-list li .staged-value { font-weight: 600; font-size: 14px; }
 #staged-list li.failed .staged-value, #staged-list li .staged-bench { color: var(--error); }
 /* The bench notice is long: two lines here, the full text in the tooltip. */

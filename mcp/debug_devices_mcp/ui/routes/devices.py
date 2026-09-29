@@ -1,7 +1,6 @@
 """The Devices part of the phone panel: list, select, disconnect, switch to Wi-Fi, pair, and connect (user actions)."""
 
 from http import HTTPStatus
-from urllib.parse import urlsplit
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -9,6 +8,7 @@ from starlette.routing import Route
 
 from debug_devices_mcp.ui.constants import http
 from debug_devices_mcp.ui.device_panel import ConnectBody, PairBody, SelectBody
+from debug_devices_mcp.ui.origins import PageOrigins
 from debug_devices_mcp.ui.routes import error_response, json_response, monitor_of
 from debug_devices_mcp.ui.routes.phone import parse
 
@@ -17,11 +17,12 @@ NOT_THE_PAGE = "only the monitor page can change the phone (a same-origin reques
 
 
 def from_the_page(request: Request) -> bool:
-    """A browser sends Origin with every POST; the page's own origin is this server. A local process without Origin
-    (for example curl or an agent) cannot select, pair, connect, switch, or disconnect a device (S4 of QA round 4).
+    """A browser sends Origin with every POST; the page's own origin is this server, or an origin of
+    --ui-allowed-origin (a tunnel). A local process without Origin (for example curl or an agent) cannot select, pair,
+    connect, switch, or disconnect a device (S4 of QA round 4).
     """
-    origin = request.headers.get(http.ORIGIN_HEADER)
-    return origin is not None and urlsplit(origin).netloc == request.headers.get(http.HOST_HEADER)
+    origins = PageOrigins.of(monitor_of(request).options.allowed_origins)
+    return origins.from_the_page(request.headers.get(http.ORIGIN_HEADER), request.headers.get(http.HOST_HEADER))
 
 
 def refused(request: Request, message: str = NOT_THE_PAGE) -> JSONResponse | None:

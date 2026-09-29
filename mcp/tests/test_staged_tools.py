@@ -4,6 +4,8 @@ of an agent photo during a capture), N89 (the crop cleared during a capture), N9
 (the refusal text). Fakes only."""
 
 import asyncio
+import base64
+import io
 import os
 import time
 from pathlib import Path
@@ -11,17 +13,26 @@ from pathlib import Path
 import httpx
 import pytest
 from mcp import Client
+from PIL import Image as PilImage
 
 from debug_devices_mcp.bench_state import BenchStateStore
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.images import transform_jpeg
-from debug_devices_mcp.server import CROP_REMOVED, META_STAGED, STAGED_METER_FRAME, STAGED_PHOTO, build_server
+from debug_devices_mcp.server import (
+    CROP_REMOVED,
+    META_STAGED,
+    STAGED_METER_CROP,
+    STAGED_METER_FRAME,
+    STAGED_PHOTO,
+    build_server,
+)
 from debug_devices_mcp.staged import STAGED_NOTE, StagedStore
 from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions
 from debug_devices_mcp.ui.settings import SettingsStore
 from debug_devices_mcp.ui.staged_capture import StagedCapturer
 
+from .conftest import make_jpeg
 from .test_bench_state import call, identity_board
 from .test_markings import START
 from .test_multimeter import READING
@@ -71,20 +82,50 @@ async def test_multimeter_read_pops_all_oldest_first_then_reads_live(settings: S
     assert batch["note"] == STAGED_NOTE
     assert all(item["meter"]["value"] == 4.98 for item in batch["staged"])
     assert all(item["age_s"] >= 0 for item in batch["staged"])
-    # Each capture: its photo, then (include_image) its two meter frames, each with its capture id.
+    # Each capture: its photo, its meter image, then (include_image) its other meter frame, each with its capture id.
     kinds = [(meta["capture_id"], meta[META_STAGED]) for meta in images(popped)]
     assert kinds == [
         (ids[0], STAGED_PHOTO),
-        (ids[0], STAGED_METER_FRAME),
+        (ids[0], STAGED_METER_CROP),
         (ids[0], STAGED_METER_FRAME),
         (ids[1], STAGED_PHOTO),
-        (ids[1], STAGED_METER_FRAME),
+        (ids[1], STAGED_METER_CROP),
         (ids[1], STAGED_METER_FRAME),
     ]
     # The queue is empty: the next call reads live.
     assert live.structured_content is not None
     assert live.structured_content["status"] == "confirmed"
     assert vision.requests == before_live + 2
+
+
+class NumberedWebcam(MeterWebcam):
+    """Each meter frame has another width (21, 22, ... px), so a test sees which frame an image is."""
+
+    async def capture_jpeg(self) -> bytes:
+        self.captures += 1
+        return make_jpeg(20 + self.captures, 10)
+
+
+async def test_a_staged_pop_has_the_photo_the_meter_image_and_the_reading(settings: Settings, tmp_path: Path) -> None:
+    # The user's request: each staged capture gives the phone photo, the meter picture, and the reading, also without
+    # include_image.
+    capturer, services, _, _ = capture_setup(settings, tmp_path)
+    capturer.store = services.staged
+    services.webcam = NumberedWebcam(CROP)
+    [capture_id] = await stage(capturer, 1)
+    async with Client(build_server(services)) as client:
+        popped = await client.call_tool("multimeter_read", {})
+    assert popped.structured_content is not None
+    [reading] = popped.structured_content["staged"]
+    assert (reading["meter"]["value"], reading["meter"]["unit"]) == (4.98, "V")
+    blocks = [block for block in popped.content if block.type == "image"]
+    assert [((block.meta or {})["capture_id"], (block.meta or {})[META_STAGED]) for block in blocks] == [
+        (capture_id, STAGED_PHOTO),
+        (capture_id, STAGED_METER_CROP),
+    ]
+    # The meter image is the crop frame that gave the reading: the first frame (its capture id is the result's).
+    with PilImage.open(io.BytesIO(base64.b64decode(blocks[1].data))) as meter_image:
+        assert meter_image.size == (21, 10)
 
 
 async def test_live_true_skips_the_queue(settings: Settings, tmp_path: Path) -> None:
