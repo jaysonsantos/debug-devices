@@ -179,11 +179,14 @@ class QueueFullError(Exception):
 
 
 class Capturer(Protocol):
-    """What the page routes need from the capture (ui/staged_capture.py): the store, and a new capture."""
+    """What the page routes need from the capture (ui/staged_capture.py): the store, and a new capture (one for each
+    request id of the page)."""
 
     store: StagedStore
 
-    async def capture(self) -> StagedCapture: ...
+    def knows(self, request_id: str | None) -> bool: ...
+
+    async def capture(self, request_id: str | None = None) -> StagedCapture: ...
 
 
 type Clock = Callable[[], datetime]

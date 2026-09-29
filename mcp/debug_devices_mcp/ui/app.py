@@ -11,7 +11,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from debug_devices_mcp.ui.constants import INDEX_FILE, STATIC_DIR, http
-from debug_devices_mcp.ui.origins import PageOrigins
+from debug_devices_mcp.ui.origins import PageOrigins, page_origin
 from debug_devices_mcp.ui.routes import (
     bench,
     board,
@@ -31,26 +31,33 @@ if TYPE_CHECKING:
     from debug_devices_mcp.ui.monitor import Monitor
 
 BAD_HOST = "forbidden: this host name is not the monitor page (127.0.0.1, localhost, or --ui-allowed-origin)"
-BAD_ORIGIN = "forbidden: a change from the origin {origin} (only 127.0.0.1, localhost, or --ui-allowed-origin)"
+BAD_ORIGIN = "forbidden: a change from the origin {origin}: only from the page itself ({page}) or --ui-allowed-origin"
 
 
 class LocalOnly:
-    """Refuse requests for another host name (DNS rebinding) and writes from another site (CSRF). The error is JSON,
-    so the page shows it."""
+    """Refuse requests for another host name (DNS rebinding) and writes from another site (CSRF): a browser write
+    only from the page itself or an allowed origin, not from a local page on another port or scheme (N94). A request
+    without Origin (a local process, another MCP server) passes here; the routes check it. The error is JSON, so the
+    page shows it."""
 
     def __init__(self, app: ASGIApp, origins: PageOrigins) -> None:
         self.app = app
         self.origins = origins
 
+    def foreign_write(self, method: str, origin: str | None, host: str) -> bool:
+        """A browser change (it has an Origin) that is not from the page itself or an allowed origin."""
+        return method not in http.SAFE_METHODS and origin is not None and not self.origins.from_the_page(origin, host)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             request = Request(scope)
             origin = request.headers.get(http.ORIGIN_HEADER)
+            host = request.headers.get(http.HOST_HEADER)
             error = None
-            if not self.origins.host_allowed(request.headers.get(http.HOST_HEADER)):
+            if not host or not self.origins.host_allowed(host):
                 error = BAD_HOST
-            elif request.method not in http.SAFE_METHODS and origin is not None:
-                error = None if self.origins.origin_allowed(origin) else BAD_ORIGIN.format(origin=origin)
+            elif self.foreign_write(request.method, origin, host):
+                error = BAD_ORIGIN.format(origin=origin, page=page_origin(host))
             if error is not None:
                 await JSONResponse({"error": error}, status_code=HTTPStatus.FORBIDDEN)(scope, receive, send)
                 return

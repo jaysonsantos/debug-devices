@@ -1,5 +1,6 @@
 """The page through an https tunnel (--ui-allowed-origin): off by default; with it, the Host and Origin checks accept
-the exact origins, and every other origin is still refused. Fakes only."""
+the exact origins, and every other origin is still refused. A browser write comes only from the page itself: a local
+page on another port or scheme is refused (N94). Fakes only."""
 
 import os
 from pathlib import Path
@@ -8,12 +9,13 @@ import httpx
 import pytest
 
 from debug_devices_mcp.config import Settings
-from debug_devices_mcp.ui.app import BAD_HOST
+from debug_devices_mcp.ui.app import BAD_HOST, BAD_ORIGIN
 from debug_devices_mcp.ui.constants import defaults as ui_defaults
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions
 from debug_devices_mcp.ui.origins import PageOrigins, normalize_origin
-from debug_devices_mcp.ui.settings import SettingsStore
+from debug_devices_mcp.ui.settings import SettingsStore, UiSettings
 from debug_devices_mcp.ui.setup import build_monitor
+from debug_devices_mcp.webcam import Crop
 
 from .conftest import free_port
 from .test_markings import START
@@ -74,6 +76,15 @@ def test_page_origins() -> None:
     assert not origins.from_the_page("http://bench.example.org", LOCAL_HOST)
     assert not origins.from_the_page("https://bench.example.org:8443", LOCAL_HOST)
     assert not origins.from_the_page(None, TUNNEL_HOST)
+    # A local page on another port or scheme, or the other local name, is not the page (N94).
+    assert origins.from_the_page("http://127.0.0.1:18766", LOCAL_HOST)
+    for other in (
+        "http://localhost:8080",
+        "https://127.0.0.1:18766",
+        "http://127.0.0.1:5173",
+        "http://localhost:18766",
+    ):
+        assert not origins.from_the_page(other, LOCAL_HOST), other
 
 
 # endregion: the setting
@@ -130,3 +141,50 @@ async def test_the_local_page_still_works_with_the_setting(settings: Settings, t
 
 
 # endregion: the checks
+
+
+# region: N94 a local page on another port
+
+
+def crop_monitor(tmp_path: Path, origins: tuple[str, ...]) -> Monitor:
+    options = MonitorOptions(open_browser=False, port=0, allowed_origins=origins)
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), options)
+    monitor.update_settings(UiSettings(webcam_crop=Crop(x=0, y=0, width=10, height=6)))
+    return monitor
+
+
+@pytest.mark.parametrize("origins", [(), (TUNNEL,)])
+async def test_a_local_page_on_another_port_cannot_clear_the_crop(tmp_path: Path, origins: tuple[str, ...]) -> None:
+    # dd-qa's probe: another local web page (a dev server, a local tool) must not clear the crop box, or the next
+    # multimeter_read sends the whole frame to the vision model.
+    monitor = crop_monitor(tmp_path, origins)
+    async with page_client(monitor) as client:
+        refused = [
+            await client.delete("/api/settings/crop", headers={"Origin": other})
+            for other in ("http://localhost:8080", "https://127.0.0.1:5173", "https://127.0.0.1:18766", "null")
+        ]
+    assert [response.status_code for response in refused] == [403, 403, 403, 403]
+    assert refused[0].json()["error"] == BAD_ORIGIN.format(origin="http://localhost:8080", page=BASE_URL)
+    assert SettingsStore.in_dir(tmp_path).load().webcam_crop is not None
+
+
+async def test_the_page_and_a_local_process_can_still_clear_the_crop(tmp_path: Path) -> None:
+    monitor = crop_monitor(tmp_path, ())
+    async with page_client(monitor) as client:
+        page = await client.delete("/api/settings/crop", headers={"Origin": BASE_URL})
+        monitor.update_settings(UiSettings(webcam_crop=Crop(x=0, y=0, width=10, height=6)))
+        # No Origin (a local process): as before.
+        local = await client.delete("/api/settings/crop")
+    assert (page.status_code, local.status_code) == (200, 200)
+    assert SettingsStore.in_dir(tmp_path).load().webcam_crop is None
+
+
+async def test_the_tunnel_origin_can_clear_the_crop_with_the_setting(tmp_path: Path) -> None:
+    monitor = crop_monitor(tmp_path, (TUNNEL,))
+    async with page_client(monitor) as client:
+        response = await client.delete("/api/settings/crop", headers={"Host": LOCAL_HOST, "Origin": TUNNEL})
+    assert response.status_code == 200
+    assert SettingsStore.in_dir(tmp_path).load().webcam_crop is None
+
+
+# endregion: N94 a local page on another port

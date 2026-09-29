@@ -14,6 +14,7 @@ The photo and the meter part run at the same time, like bench_measure:
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 from uuid import uuid7
 
@@ -34,6 +35,8 @@ logger = logging.getLogger(__name__)
 NO_CROP = "no meter reading: no crop box is set (only the crop box goes to the vision model; set it on the page)"
 NO_PHOTO = "no phone photo: {reason}"
 NO_METER = "no meter reading: {reason}"
+# The request ids of the last key presses that the capture keeps (a browser sends a POST again within seconds).
+REQUEST_MEMORY = 64
 
 
 class PhotoPart(BaseModel):
@@ -56,9 +59,42 @@ class StagedCapturer:
         self.store = store
         self._origin = origin
         self._tasks: set[asyncio.Task[None]] = set()
+        # The page's request id of each key press and its first answer (N97).
+        self._requests: OrderedDict[str, asyncio.Future[StagedCapture]] = OrderedDict()
 
-    async def capture(self) -> StagedCapture:
-        """Stage one capture now (pending) and fill it in the background. Raises QueueFullError."""
+    def knows(self, request_id: str | None) -> bool:
+        """A request id that came before: a browser can send a POST again when its connection closes with no answer
+        (for example through a tunnel)."""
+        return request_id is not None and request_id in self._requests
+
+    async def capture(self, request_id: str | None = None) -> StagedCapture:
+        """Stage one capture now (pending) and fill it in the background. Raises QueueFullError. The same request id
+        again gets the first answer (the capture or the error), not a second capture (N97)."""
+        if request_id is None:
+            return await self._start()
+        if (first := self._requests.get(request_id)) is not None:
+            await asyncio.wait([first])
+            if not first.cancelled():
+                return first.result()
+        answer: asyncio.Future[StagedCapture] = asyncio.get_running_loop().create_future()
+        self._requests[request_id] = answer
+        while len(self._requests) > REQUEST_MEMORY:
+            self._requests.popitem(last=False)
+        try:
+            capture = await self._start()
+        except asyncio.CancelledError:
+            answer.cancel()
+            self._requests.pop(request_id, None)
+            raise
+        except Exception as exc:
+            answer.set_exception(exc)
+            # Retrieved here: no "never retrieved" log when no repeat comes.
+            answer.exception()
+            raise
+        answer.set_result(capture)
+        return capture
+
+    async def _start(self) -> StagedCapture:
         capture = StagedCapture(capture_id=str(uuid7()), captured_at=utc_now(), origin=self._origin())
         await self.store.add(capture)
         task = asyncio.create_task(self._fill(capture), name="staged-capture")

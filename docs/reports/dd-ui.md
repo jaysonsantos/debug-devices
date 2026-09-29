@@ -2093,3 +2093,60 @@ With the orchestrator's go for `server.py`. I did not edit `bench_state.py` or `
 - The webcam MJPEG (10 frames per second, the full frame) is the largest load. The server sends only the newest frame to a slow reader, but the tunnel buffers (the 4 MB send queue) can still add seconds of delay. The hidden-tab pause helps. A possible next step: a lower frame rate and size for a page that is not local (for example `stream.mjpg?fps=2&max_side=640`). I did not do it in this round. Tell me if you want it.
 
 No commit.
+
+## Round 55: QA round 54 fixes N94, N95, and N97 (docs/reports/dd-qa.md "Round 54 (SSE, tunnel origin): check")
+
+### N94: a browser change comes only from the page itself
+
+- `ui/origins.py`: `PageOrigins.from_the_page` accepts two cases:
+  - The page itself: only for a local Host (127.0.0.1 or localhost), and the Origin must be `http://` plus the Host of the request (both in the form that a browser sends).
+  - An exact origin of `--ui-allowed-origin`.
+- I removed `origin_allowed`. It accepted any port and any scheme for a local host name.
+- `LocalOnly` now uses `from_the_page` for each change (POST, DELETE) that has an Origin. These origins get 403:
+  - a local web page on another port or scheme, for example `http://localhost:8080`, `https://127.0.0.1:5173`, or `https://127.0.0.1:18766`;
+  - the other local name, for example `http://localhost:18766` with the Host `127.0.0.1:18766`;
+  - `null`.
+- A request without Origin (a local process, another MCP server) works as before, and the routes check it.
+- A tunnel Host is not "the page itself". With the setting, only the exact allowed origin passes. So `http://bench.example.org` with the Host `bench.example.org` is still refused.
+- The error text names the page origin, for example: "forbidden: a change from the origin http://localhost:8080: only from the page itself (http://127.0.0.1:18766) or --ui-allowed-origin".
+
+### N95: any tunnel needs its own login
+
+- `mcp/README.md` "Use through a tunnel" says, in bold, that any tunnel to the page must have its own login, also without `--ui-allowed-origin`. The reason: a tunnel that writes the Host `127.0.0.1` reaches every read (the page, the webcam stream, the phone screen, the photos), and the Host check cannot see it. The setting only lets the changes through too.
+- The README also has a list of the checks (Host, a browser change, no Origin).
+- `.env.example`, the config table, and the `--help` text of the setting say the same.
+- For the user: check that the frpc tunnel has a login now.
+
+### N97: one capture for each key press
+
+- Page: `newRequestId()` makes a UUID (version 4) for each key press, and the capture POST sends `{"request_id": ...}`. It uses `crypto.getRandomValues`, because `crypto.randomUUID` needs https or localhost, and an http tunnel page has neither.
+- Server:
+  - `CaptureBody`: `request_id` must be a UUID in its standard form, else 400. An empty body works as before.
+  - `StagedCapturer.capture(request_id)` keeps the first answer for each id (the last 64 ids, in memory). A repeat gets the same answer: the same capture (202, the same `capture_id`) or the same error (409). It never makes a second capture.
+  - A plain repeat adds no second log row (`knows`).
+  - Two copies that come at the same time wait for the one answer.
+  - A cancelled first request forgets its id.
+- README (the staged captures part): the request id.
+
+### Tests
+
+- `mcp/tests/test_ui_origins.py`:
+  - `from_the_page` refuses `http://localhost:8080`, `https://127.0.0.1:18766`, `http://127.0.0.1:5173`, and `http://localhost:18766` for the Host `127.0.0.1:18766`.
+  - dd-qa's probe: `DELETE /api/settings/crop` with `http://localhost:8080`, `https://127.0.0.1:5173`, `https://127.0.0.1:18766`, or `null` gets 403, and the crop stays. This is tested without and with the setting, and the error text is checked.
+  - The page itself and a request without Origin can still clear the crop.
+  - The tunnel origin with the setting (Host `127.0.0.1`) can clear it.
+- `mcp/tests/test_staged_capture.py`:
+  - The same `request_id` two times gives one capture and the same `capture_id`, and the plain repeat adds no log row.
+  - Two copies at the same time give one capture.
+  - A bad id gets 400.
+  - A repeat of a refused capture (full queue) is refused too.
+- Playwright (Firefox headless, fakes, a private state folder, port 0; no webcam lookup, so nothing asked 18766):
+  - The local page: the same results as in round 54.
+  - The frpc-like proxy: without the setting, 403, and the page shows the new error text in red. With the setting, 202 and "1 staged".
+  - N97: a TCP proxy like a bad tunnel (Host rewritten) sends the first capture POST to the server and drops the answer; 1 s later, the browser connection closes. Firefox sent the POST again (2 POSTs through the proxy).
+    - Now: 1 capture, 1 log row, and the page shows "1 staged" with no error.
+    - The old behavior (the script patched the server so it ignores the id): 2 captures from one key press.
+  - Chromium is not installed here, so I did not check it.
+- `uv run pytest`: 1153 passed, 1 skipped. ruff check and format: pass. `prek run --files` on each changed file: pass. `XDG_RUNTIME_DIR=<private dir> scripts/qa_mcp_stdio.py --skip-webcam`: 15/15, and the private runtime folder stayed empty.
+
+N96 stays in the backlog. No commit.

@@ -179,9 +179,10 @@ class Settings(BaseSettings):
     ui_allowed_origins: Annotated[list[str], NoDecode, BeforeValidator(_parse_origins)] = Field(
         default=[],
         validation_alias=AliasChoices("ui_allowed_origin", env.UI_ALLOWED_ORIGINS.lower()),
-        description="Exact origins (comma list, or the flag again) that may also use the page, for example an https "
-        "tunnel: https://bench.example.org. Empty: only 127.0.0.1 and localhost. The tunnel must have its own login: "
-        "the page has none, and it controls the phone and the camera.",
+        description="Exact origins (comma list, or the flag again) that can also make changes on the page, for example "
+        "an https tunnel: https://bench.example.org. Empty: only 127.0.0.1 and localhost. Any tunnel to the page must "
+        "have its own login, also without this setting: the page has none, and a tunnel that writes the Host "
+        "127.0.0.1 reaches every read (the webcam stream, the phone screen, the photos).",
     )
     phone_screen: bool = Field(
         default=True, description="Show the phone screen in the monitor page after phone_connect (scrcpy server)."

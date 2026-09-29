@@ -2,17 +2,19 @@
 reading of the key press, the privacy rule (no crop box: no meter part, no vision call), the bench gate at capture
 time, and the page routes. Fakes only."""
 
+import asyncio
 import json
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from debug_devices_mcp.config import Settings
 from debug_devices_mcp.instructions import EVIDENCE_RULES
-from debug_devices_mcp.staged import MAX_STAGED, StagedState, StagedStore
+from debug_devices_mcp.staged import MAX_STAGED, QueueFullError, StagedState, StagedStore
 from debug_devices_mcp.ui.app import create_app
 from debug_devices_mcp.ui.constants import tools
 from debug_devices_mcp.ui.monitor import Monitor, MonitorOptions
@@ -182,6 +184,49 @@ async def test_a_full_queue_is_a_page_message(
         await capturer.wait()
     assert full.status_code == 409
     assert "multimeter_read" in full.json()["error"]
+
+
+async def test_a_repeated_capture_post_is_one_capture(settings: Settings, tmp_path: Path) -> None:
+    # N97: the browser can send one key press again (a connection that closed with no answer, a tunnel).
+    capturer, _, _, _ = capture_setup(settings, tmp_path)
+    monitor = Monitor(START, SettingsStore.in_dir(tmp_path), MonitorOptions(open_browser=False, port=0))
+    monitor.staged = capturer
+    press = {"request_id": str(uuid4())}
+
+    def rows() -> int:
+        return len([call for call in monitor.bus.calls() if call.tool == tools.STAGED_CAPTURE])
+
+    async with page_client(monitor) as client:
+        first = await client.post("/api/staged", headers=PAGE, json=press)
+        rows_after_first = rows()
+        again = await client.post("/api/staged", headers=PAGE, json=press)
+        # The plain repeat adds no log row.
+        assert rows() == rows_after_first == 1
+        # Two copies at the same time (the repeat while the first still runs).
+        other = {"request_id": str(uuid4())}
+        both = await asyncio.gather(*(client.post("/api/staged", headers=PAGE, json=other) for _ in range(2)))
+        bad = await client.post("/api/staged", headers=PAGE, json={"request_id": "../x"})
+        await capturer.wait()
+    assert (first.status_code, again.status_code) == (202, 202)
+    assert again.json()["capture_id"] == first.json()["capture_id"]
+    assert [response.status_code for response in both] == [202, 202]
+    assert both[0].json()["capture_id"] == both[1].json()["capture_id"]
+    assert bad.status_code == 400
+    assert len(await capturer.store.list()) == 2
+
+
+async def test_a_repeat_of_a_refused_capture_is_refused_too(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("debug_devices_mcp.staged.MAX_STAGED", 1)
+    capturer, _, _, _ = capture_setup(settings, tmp_path)
+    await capturer.capture()
+    press = str(uuid4())
+    for _ in range(2):
+        with pytest.raises(QueueFullError):
+            await capturer.capture(press)
+    await capturer.wait()
+    assert len(await capturer.store.list()) == 1
 
 
 # endregion: the page routes

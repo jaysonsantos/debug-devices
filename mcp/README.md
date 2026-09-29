@@ -188,9 +188,18 @@ What stays: the webcam MJPEG stream and the phone screen stream (H.264, or MJPEG
 
 ### Use through a tunnel
 
-The page has no login, and it controls the phone and the camera. Thus it accepts only the host names 127.0.0.1 and localhost, and a change (POST, DELETE) only from those origins. To use the page through a tunnel (for example `frpc` to `127.0.0.1:18766` behind `https://bench.example.org`), set `--ui-allowed-origin https://bench.example.org` (or `DEBUG_DEVICES_UI_ALLOWED_ORIGINS`, a comma list). It is off by default.
+The page has no login. It shows the full webcam frame (it can show people), the phone screen, and the photos, and it controls the phone and the camera.
 
-- The tunnel must have its own login (for example HTTP basic auth or an access proxy in front of it). Without one, anyone who knows the URL sees the full webcam frame (it can show people) and the phone, and controls them.
+**Any tunnel to the page must have its own login** (for example HTTP basic auth or an access proxy in front of it), also without `--ui-allowed-origin`. The Host check cannot see a tunnel that writes the Host `127.0.0.1` (for example the `frpc` `hostHeaderRewrite`). Such a tunnel reaches every read of the page without the setting: the page, the webcam stream, the phone screen, and the photos. The setting only lets the changes through too. Without a login, anyone who knows the URL sees all of it.
+
+The checks:
+
+- Host: 127.0.0.1 and localhost (any port), and the hosts of `--ui-allowed-origin`. Another host name (DNS rebinding) is refused.
+- A change (POST, DELETE) from a browser (it sends `Origin`): only from the page itself (`http://` and the local Host of the request) or an exact origin of `--ui-allowed-origin`. A local web page on another port or scheme (for example `http://localhost:8080`, another dev server or local tool) is refused, so it cannot clear the crop box or use the page actions.
+- A request without `Origin` (a local process, another MCP server) is not refused here; the routes check it (the device and staged routes accept only the page).
+
+To make changes through a tunnel (for example `frpc` to `127.0.0.1:18766` behind `https://bench.example.org`: captures, the crop box, the phone controls), set `--ui-allowed-origin https://bench.example.org` (or `DEBUG_DEVICES_UI_ALLOWED_ORIGINS`, a comma list). It is off by default.
+
 - The origin must be exact: the scheme, the host, and the port (`https://bench.example.org` is not `http://bench.example.org` or `https://bench.example.org:8443`). Every other origin is still refused.
 - The Host header can stay the tunnel host, or the tunnel can write `127.0.0.1` (the `frpc` `hostHeaderRewrite`): both work with the setting.
 - The page and the MCP server still listen on 127.0.0.1 only.
@@ -240,7 +249,7 @@ The page has these parts:
 - **Staged captures** (while the user holds the probes): `Space` or `C` on the page (also a USB foot pedal that sends Space), or the "Capture" button in the header, captures the phone photo and the multimeter reading of that moment. The keys do nothing in a text field or with a modifier; a held key gives one capture. The page flashes and shows "sending…" at once. It beeps when the server took the capture; a refused or failed capture shows its error text and plays a low sound. The list shows each capture (the time, the phone photo, the meter image of the reading, the value when the vision result comes, the bench notice, notes); × removes one, "Clear all" all. The list changes come through the event stream (see "Live updates").
   - One capture: the phone still of `phone_snapshot` (the same turn and flips; it does not become the agent's last snapshot, and it does not change the camera view of the agent's photos), and the meter path of `multimeter_read` (the frames, the vision call, the checks, the bench limits). So an unsafe voltage closes the bench gate at capture time, not when the agent reads it.
   - Without a crop box: no meter part and no vision call. The crop is checked again at each frame: a crop box cleared during the capture stops the meter part, and no frame without the crop goes to the vision model or the queue.
-  - The queue: `~/.local/state/debug-devices/staged/` (folder 0700, files 0600, a file lock), so every MCP server of the user reads it. At most 10 captures (the page refuses the 11th); each lives 30 minutes. A capture, a delete, and a clear accept only a same-origin request from the page (or from an origin of `--ui-allowed-origin`).
+  - The queue: `~/.local/state/debug-devices/staged/` (folder 0700, files 0600, a file lock), so every MCP server of the user reads it. At most 10 captures (the page refuses the 11th); each lives 30 minutes. A capture, a delete, and a clear accept only a same-origin request from the page (or from an origin of `--ui-allowed-origin`). The page sends a new `request_id` with each capture: when the browser sends the same POST again (a connection that closed with no answer, for example through a tunnel), the server gives the first answer and takes no second capture.
   - The agent's next `multimeter_read` returns all captures, oldest first, and removes them; it waits while one is still pending (the vision call runs). For each capture, the result has the reading, the phone photo (`_meta.staged` `phone_photo`), and the meter image of the reading (`meter_crop`: the crop box of the frame that gave the value, never the full webcam frame); `include_image` also adds the other meter frames (`meter_frame`). A staged photo and value are evidence of their capture time only (`captured_at`, `age_s`). `live: true` reads the meter now and leaves the queue. `staged_captures` lists the queue.
   - The popping server keeps each staged meter result under the staged `capture_id`, its meter capture id, and its frame ids, so `bench_record_measurement` works there with any of them: also in a server that did not take the capture (the bench session, a secondary) and after a restart of the page server. An unsafe staged reading gets its point name that way.
   - `expected_mode`, `expected_value`, `source`, and `frames` apply only to a live read: a staged batch names the given ones in `not_applied` (with a note), because the captures were read at capture time without them.
@@ -328,7 +337,7 @@ Each setting has a CLI flag, an environment variable, and a default. The server 
 | `--webcam-idle-timeout` | `DEBUG_DEVICES_WEBCAM_IDLE_TIMEOUT` | `300`. Lazy mode: seconds without users before the webcam stream stops. `0` keeps it on. |
 | `--ui-port` | `DEBUG_DEVICES_UI_PORT` | `18766`. If the port is busy, the server takes a free port. |
 | `--ui-open-browser`, `--no-ui-open-browser` | `DEBUG_DEVICES_UI_OPEN_BROWSER` | on |
-| `--ui-allowed-origin` | `DEBUG_DEVICES_UI_ALLOWED_ORIGINS` | empty: only 127.0.0.1 and localhost. Exact origins (a comma list, or the flag again) that can also use the page, for example an https tunnel. The tunnel must have its own login. See "Use through a tunnel". |
+| `--ui-allowed-origin` | `DEBUG_DEVICES_UI_ALLOWED_ORIGINS` | empty: only 127.0.0.1 and localhost. Exact origins (a comma list, or the flag again) that can also make changes on the page, for example an https tunnel. Any tunnel to the page must have its own login, also without this setting. See "Use through a tunnel". |
 | `--phone-screen`, `--no-phone-screen` | `DEBUG_DEVICES_PHONE_SCREEN` | on |
 | `--phone-screen-max-size` | `DEBUG_DEVICES_PHONE_SCREEN_MAX_SIZE` | `1280` |
 | `--scrcpy-window`, `--no-scrcpy-window` | `DEBUG_DEVICES_SCRCPY_WINDOW` | off |

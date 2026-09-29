@@ -1,8 +1,12 @@
 """Which requests reach the page: the Host and Origin checks.
 
-The page listens on 127.0.0.1 only and accepts the host names 127.0.0.1 and localhost. `--ui-allowed-origin` adds
-exact origins (for example `https://bench.example.org`, an https tunnel to the page). It is off by default. A tunnel
-must have its own login: the page has none, and it controls the phone and the camera.
+The page listens on 127.0.0.1 only and accepts the host names 127.0.0.1 and localhost. A change with a browser Origin
+comes only from the page itself: `http://` and the Host of the request. A local page on another port or scheme is
+another site (N94). `--ui-allowed-origin` adds exact origins (for example `https://bench.example.org`, an https tunnel
+to the page). It is off by default.
+
+Any tunnel to the page must have its own login, also without the setting: the page has none, and a tunnel that writes
+the Host 127.0.0.1 reaches every read (the page, the webcam stream, the phone screen, the photos) (N95).
 """
 
 from dataclasses import dataclass
@@ -38,7 +42,7 @@ def host_name(host_header: str) -> str | None:
 
 @dataclass(frozen=True)
 class PageOrigins:
-    """The local host names (any port, as before) and the exact origins of `--ui-allowed-origin`."""
+    """The local host names (any port) and the exact origins of `--ui-allowed-origin`."""
 
     allowed: frozenset[str] = frozenset()
 
@@ -61,13 +65,25 @@ class PageOrigins:
         host = host_name(host_header)
         return host in http.ALLOWED_HOSTS or host in {urlsplit(origin).hostname for origin in self.allowed}
 
-    def origin_allowed(self, origin: str) -> bool:
-        """A write from this origin can be the page: a local host name, or an exact allowed origin."""
-        return urlsplit(origin).hostname in http.ALLOWED_HOSTS or self.is_allowed(origin)
-
     def from_the_page(self, origin: str | None, host_header: str | None) -> bool:
-        """A same-origin request (the Origin names this Host), or a request from an allowed origin: a tunnel can
-        change the Host header (for example to 127.0.0.1), so the origin alone decides there."""
-        if origin is None:
+        """The page itself (a local Host, and the Origin is `http://` and that Host), or an exact allowed origin: a
+        tunnel can change the Host header (for example to 127.0.0.1), so the origin alone decides there. A local
+        page on another port or scheme is another site (N94)."""
+        if origin is None or not host_header:
             return False
-        return urlsplit(origin).netloc == host_header or self.is_allowed(origin)
+        return is_page_origin(origin, host_header) or self.is_allowed(origin)
+
+
+def page_origin(host_header: str) -> str:
+    """The origin of the page that this Host header names: the page is plain http on 127.0.0.1."""
+    return f"{http.SCHEME}://{host_header}"
+
+
+def is_page_origin(origin: str, host_header: str) -> bool:
+    """The page on a local host name. A tunnel host is not the page itself: only its exact allowed origin counts."""
+    if host_name(host_header) not in http.ALLOWED_HOSTS:
+        return False
+    try:
+        return normalize_origin(origin) == normalize_origin(page_origin(host_header))
+    except ValueError:
+        return False

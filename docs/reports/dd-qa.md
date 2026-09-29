@@ -1993,3 +1993,96 @@ N74, N83, N87, and the older backlog stay as written there.
 1. Fix N94: `LocalOnly` takes a write only from the exact page origin or an allowed origin (a request without Origin stays allowed).
 2. Fix N95: the README and `.env.example` text; the user checks that the frpc tunnel has a login.
 3. Then a short check: my origin matrix again (with the local other-port rows), pytest, and prek.
+
+## Round 55: check
+
+Date: 2026-09-29. A short check. Scope: dd-ui round 55 (N94, N95, N97; `docs/reports/dd-ui.md` "Round 55"). The working tree on commit `e30d6b6` with the uncommitted changes; `main` is equal to `origin/main`. dd-ui had stopped editing. No Gradle run and no phone run. My probes used ASGI requests (no open port), the test fakes, and tmp folders. The browser tests ran in a helper agent in a private network namespace (`unshare -rn`), with its own test servers, a copy of the package without `.env`, `scripts/fake_adb.py`, and a webcam device that does not exist. Nothing contacted 18765, 18766, or the user's frpc tunnel. The repo `bench-state.json` was not used. I did not change product code, and I did not commit.
+
+### 1. Tests and hooks
+
+| Command | Result |
+|---|---|
+| `uv run pytest -q -p no:cacheprovider` | 1153 passed, 1 skipped |
+| `nix develop --command prek run --all-files`, first on a copy (new files added in the copy only) | All 15 hooks pass; no file changed in the copy |
+| The same in the real tree, with `sha256sum` of every file and `git status --porcelain` before and after | All 15 hooks pass; hashes (332 files) and git status unchanged |
+| `XDG_RUNTIME_DIR=<private dir> uv run python scripts/qa_mcp_stdio.py --skip-webcam --scratch <dir>` | 15/15, with `fire-tv`; the private runtime dir stayed empty |
+
+### 2. N94: every write route
+
+The real `LocalOnly` middleware around a stub app (no route handler runs; some write routes start processes), for each of the 34 write routes of the real app (settings, crop, phone, board, devices, staged, multimeter, bench, ingest), Host `127.0.0.1:18766`:
+
+| Origin | Without the setting | With `https://bench.example.org` |
+|---|---|---|
+| `http://127.0.0.1:18766` (the page itself) | passes (34 of 34) | passes |
+| `http://localhost:8080` | 403 (34 of 34) | 403 |
+| `https://127.0.0.1:5173` | 403 | 403 |
+| `https://127.0.0.1:18766` (another scheme) | 403 | 403 |
+| `http://localhost:18766` (the other local name) | 403 | 403 |
+| `null` | 403 | 403 |
+| no Origin (a local process, another MCP server) | passes the middleware (as designed) | passes |
+| `https://bench.example.org` | 403 | passes |
+
+Also: Host `localhost:18766` with `http://localhost:18766` passes (the page opened as localhost), and with `http://127.0.0.1:18766` gets 403; Host `bench.example.org` with `https://bench.example.org` passes only with the setting, and with `http://bench.example.org` always gets 403.
+
+The real app on the safe routes: `DELETE /api/settings/crop` gives 200 for the page itself and for no Origin, 403 for every foreign origin (the crop stays), and 200 for the tunnel origin only with the setting; `POST /api/staged` and `POST /api/devices/disconnect` give 403 for every foreign origin and for no Origin (the route check). The error text: "forbidden: a change from the origin http://localhost:8080: only from the page itself (http://127.0.0.1:18766) or --ui-allowed-origin".
+
+N94 is fixed.
+
+### 3. N95: the texts
+
+- `mcp/README.md` "Use through a tunnel": in bold, "Any tunnel to the page must have its own login ... also without `--ui-allowed-origin`", with the reason (a tunnel that writes the Host `127.0.0.1` reaches every read), and a list of the checks.
+- `.env.example:66-69` and `--help` of `--ui-allowed-origin`: the same, in short.
+
+N95 is fixed (text). The user still has to check that the frpc tunnel has a login.
+
+### 4. N97: the request id
+
+Probes on the real app (fakes):
+
+| Case | Result |
+|---|---|
+| The same `request_id` 3 times (once with another body field) | 202 three times, the same `capture_id`, 1 capture, 1 log row |
+| 5 copies at the same time | 5 x 202, 1 capture id, 1 capture |
+| 2 new ids | 2 captures |
+| Bad ids: `../x`, empty, upper-case UUID, a number | 400 |
+| No id, or no body (a page from before) | 202, a new capture each time |
+| `DELETE /api/staged/<request_id>` | `changed: 0`: a request id is not a capture id |
+| 100 more ids (most refused: the queue is full) | the id memory stays at 64 |
+| An id that dropped out of the memory (64 later), sent again | a new capture (as designed) |
+| A recent id whose first answer was 409 (full queue), sent again after a clear | 409 again: the same answer. A new key press has a new id, so the page is not blocked. |
+
+N97 is fixed on the server side.
+
+### 5. The page (helper agent: headless Chromium 141 and Firefox 155, private network namespace)
+
+38 of 38 checks pass in both browsers, without and with the setting.
+
+| Case | Result |
+|---|---|
+| The local page at `http://127.0.0.1:<port>/` and at `http://localhost:<port>/` | Space: POST 202 with `{"request_id": "<uuid4>"}`, "1 staged" through SSE; "Clear crop": DELETE 200, the crop is gone; Settings "Save": PUT 200. The page itself is never refused under either name. |
+| N94 from a browser: an attacker page on another local port (`http://localhost:<other>/evil.html` and `http://127.0.0.1:<other>/evil.html`) | Each POST (torch with two bodies, a no-cors staged fetch, a form POST to `/api/staged`) arrived with `Origin: http://localhost:<other>` and got 403 "forbidden: a change from the origin http://localhost:<other>: only from the page itself (...) or --ui-allowed-origin". Nothing changed: the crop, `ui-settings.json`, 0 staged, no new call rows, 0 adb calls. A browser cannot send a cross-site DELETE (no-cors refuses it; the CORS preflight gets 405); the same requests without a browser got 403, and the crop stayed. An https attacker origin was not tested (no TLS here). |
+| N97 through a bad tunnel (the proxy passes the first capture POST, drops the answer, and closes the connection after 1 s with RST or FIN) | Chromium and Firefox each sent the POST 2 times, with the same `request_id`; the server answered 202 two times with the same `capture_id`; 1 capture, 1 call row; the page shows "1 staged" and no error. dd-ui could test only Firefox. |
+| Two key presses (Space, then C 1 s later) | 2 captures, 2 different request ids, "2 staged". |
+| The tunnel page (`http://bench.example.org:<port>/`, Host rewritten) | Without the setting: POST 403 and in red "Capture failed: forbidden: a change from the origin http://bench.example.org:<port>: only from the page itself (http://127.0.0.1:<port>) or --ui-allowed-origin", the low sound, 0 staged. With the exact origin: 202, "1 staged". |
+
+### 6. New finding
+
+- N98 (low: backlog): after a network error, the page says that a capture failed that the server took. Case: the bad tunnel, with `Connection: close` on each answer, so the capture POST uses a new connection. Chromium then does not send the POST again (`net::ERR_EMPTY_RESPONSE`): the server made 1 capture, and the list shows "1 staged", but the page shows in red "Capture failed: Failed to fetch" and plays the low sound. If the user then presses again, the new request id makes a second capture. Firefox sends the POST again with the same id and shows no error. Cause: the `catch` of `stagedCapture` treats a network error like a refusal (`app.js:1963-1966`). Idea: after a network error (not an HTTP error), send the POST once more with the same `request_id`; the server gives the first answer.
+
+### Summary
+
+- Tests: pytest 1153 passed, 1 skipped; prek passes and leaves the tree unchanged (332 file hashes and the git status); MCP stdio 15/15. Nothing contacted 18765, 18766, or the tunnel.
+- N94, N95 (text), and N97 are fixed, also in Chromium. The user still has to check that the frpc tunnel has a login.
+- New: N98 (backlog). No fix-now item is open.
+
+| Id | Severity | Risk | Decision | Where |
+|---|---|---|---|---|
+| N98 | low | none (a false error text; at most a duplicate capture after a second press) | backlog | `ui/static/app.js:1956-1967` |
+
+N74, N83, N87, N96, and the older backlog stay as written there.
+
+### What to do next
+
+1. Commit round 55.
+2. The user checks that the frpc tunnel has its own login.
+3. The backlog when there is time (N98 is a small change in `stagedCapture`).

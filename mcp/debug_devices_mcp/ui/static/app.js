@@ -1893,6 +1893,12 @@ const STAGED_ERROR_BEEP = { frequency: 220, seconds: 0.4, gain: 0.2, type: "squa
 // The server answers a capture at once (the photo and the reading follow): no answer in this time is an error.
 const STAGED_POST_TIMEOUT_MS = 10000;
 const STAGED_SENDING = "sending…";
+// A UUID (version 4) for each key press, from crypto.getRandomValues (crypto.randomUUID needs https or localhost).
+const UUID_BYTES = 16;
+const UUID_VERSION = { index: 6, mask: 0x0f, bits: 0x40 };
+const UUID_VARIANT = { index: 8, mask: 0x3f, bits: 0x80 };
+const UUID_GROUPS = [8, 4, 4, 4, 12];
+const HEX = 16;
 const staged = { audio: null, flashTimer: null, rendered: new Map() };
 
 function stagedKey(event) {
@@ -1935,12 +1941,23 @@ function stagedMessage(text, isError = false) {
   if (text) $("staged-panel").hidden = false;
 }
 
-// The list itself comes as a `staged` event (the server pushes each change).
+function newRequestId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(UUID_BYTES));
+  bytes[UUID_VERSION.index] = (bytes[UUID_VERSION.index] & UUID_VERSION.mask) | UUID_VERSION.bits;
+  bytes[UUID_VARIANT.index] = (bytes[UUID_VARIANT.index] & UUID_VARIANT.mask) | UUID_VARIANT.bits;
+  const hex = [...bytes].map((byte) => byte.toString(HEX).padStart(2, "0")).join("");
+  let start = 0;
+  return UUID_GROUPS.map((length) => hex.slice(start, (start += length))).join("-");
+}
+
+// The list itself comes as a `staged` event (the server pushes each change). The request id is new for each key
+// press: when the browser sends the same POST again (a connection that closed with no answer, for example through a
+// tunnel), the server gives the first answer and takes no second capture.
 async function stagedCapture() {
   stagedFlash();
   stagedMessage(STAGED_SENDING);
   try {
-    await api("POST", API.staged, undefined, STAGED_POST_TIMEOUT_MS);
+    await api("POST", API.staged, { request_id: newRequestId() }, STAGED_POST_TIMEOUT_MS);
     stagedBeep(STAGED_BEEP);
     if ($("staged-message").textContent === STAGED_SENDING) stagedMessage("");
   } catch (error) {
