@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- The HTTP server opens a socket on 127.0.0.1. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The app turns its own Do Not Disturb rule on while it is visible. The user gives the access. -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
     <application
         android:allowBackup="false"
@@ -23,5 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Android binds it while the app has the Do Not Disturb access, and starts the process again after it dies. -->
+        <service
+            android:name=".QuietModeGuard"
+            android:exported="true"
+            android:permission="android.permission.BIND_CONDITION_PROVIDER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.ConditionProviderService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

@@ -26,6 +26,7 @@ Always give the serial of the phone. Do not install on other devices.
 adb devices -l
 adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s <serial> shell pm grant dev.jayson.debugdevices.camera android.permission.CAMERA
+adb -s <serial> shell cmd notification allow_dnd dev.jayson.debugdevices.camera
 adb -s <serial> shell am start -n dev.jayson.debugdevices.camera/.MainActivity
 ```
 
@@ -33,6 +34,10 @@ On Xiaomi phones (MIUI, HyperOS), turn on "Install via USB" in Developer options
 Without it, `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`.
 
 If you do not grant the permission with `pm grant`, the app asks for it on the screen at start.
+
+`allow_dnd` gives the app Do Not Disturb access, so it can silence notifications while it is visible (see Behavior).
+You can also give it on the phone: Settings, "Do Not Disturb access" (the search finds it), "Debug Camera".
+The app does not ask for it on the screen. Without the access, notifications stay on, and the app works as before.
 
 ## Check the API
 
@@ -108,5 +113,22 @@ curl -s -o snapshot.jpg localhost:8765/v1/snapshot
   the tall screen and cuts off the sides of the 3:4 image). `OverlayLogic.previewRegion` computes it from the view
   size, the scale type, and the rotations; zoom and flips do not change it.
 - When the activity is not in the foreground (resumed), the camera endpoints return `503 camera_not_ready`.
+- While the app is visible (`onStart` to `onStop`), notifications are silent: no sound, no vibration, and no
+  heads-up notification over the preview. This includes calls and messages. Alarms and media still play. The app
+  turns its own Do Not Disturb rule ("Debug Camera quiet mode") on and off (`QuietMode`, `ZenRules`), so your Do Not
+  Disturb settings do not change. Android shows the notifications again when the app leaves the screen.
+  It needs Android 10 or later and the Do Not Disturb access (see Install and start). When you give the access while
+  the app is visible, the rule goes on in about 1 s. `adb -s <serial> logcat -s DebugCamera:I` shows each change.
+  To turn it off, disable the rule in the Do Not Disturb settings of the phone, or remove the access
+  (`cmd notification disallow_dnd`).
+- The rule also goes off when the app process dies while the app is visible (a crash, a kill, `am force-stop`, a new
+  `adb install`). A dead process cannot turn its rule off, so `QuietModeGuard` does it: Android binds this condition
+  provider service while the app has the Do Not Disturb access, and it starts the process again after the process
+  dies. A process that starts with no visible activity turns the rule off (`QuietMode.reset`). On the S22
+  (Android 16) this takes 1 s to 10 s. The cost: the app process stays in memory while the app has the access. It
+  starts no camera and no server, because those follow the activity.
+  A phone that does not let Android start the process again (a vendor autostart rule, a low-RAM device) keeps the
+  rule on until the next app start. Then start the app and leave it, or turn the rule off in the Do Not Disturb
+  settings.
 - The activity is `singleTask`, so `am start` does not open a second server on the same port.
 - All values with a meaning are in `Constants.kt`.

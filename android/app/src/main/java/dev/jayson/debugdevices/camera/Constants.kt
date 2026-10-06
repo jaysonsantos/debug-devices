@@ -152,6 +152,11 @@ object Constants {
         const val SNAPSHOT_READY_WAIT_MILLIS = 5_000L
     }
 
+    object QuietMode {
+        /** Last part of the condition id of the app's Do Not Disturb rule: `condition://<package>/visible`. */
+        const val CONDITION_PATH = "visible"
+    }
+
     object Start {
         /** After an app start the torch is off. The zoom starts at 1x, or at the minimum when 1x is outside the range (see [ZoomLogic.startRatio]). */
         const val TORCH_ENABLED = false
@@ -193,6 +198,14 @@ object Constants {
         const val SERVER_STOP_FAILED = "API server stop failed"
         const val ROTATION_LAYOUT_TIMEOUT = "Rotation response without overlay_region: no layout pass in ms: "
         const val START_STATE_FAILED = "Camera bind or start state failed"
+        const val QUIET_ON = "Notifications are silent while the app is visible (Do Not Disturb rule on)"
+        const val QUIET_OFF = "Do Not Disturb rule off"
+        const val QUIET_RESET = "Do Not Disturb rule off: the process started with no visible instance"
+        const val QUIET_NO_ACCESS =
+            "No Do Not Disturb access, notifications stay on. Give it: adb shell cmd notification allow_dnd <package>"
+        const val QUIET_UNSUPPORTED = "Notifications stay on: the Do Not Disturb rule needs Android 10"
+        const val QUIET_FAILED = "Do Not Disturb rule failed, notifications stay on"
+        const val QUIET_OFF_FAILED = "Do Not Disturb rule did not go off"
         const val EXPECTED_NUMBER = "Expected a JSON number"
         const val EXPECTED_INTEGER = "Expected a JSON integer"
         const val ROTATION_NEEDS_ONE_FIELD = "Send exactly one of 'degrees' or 'auto'"

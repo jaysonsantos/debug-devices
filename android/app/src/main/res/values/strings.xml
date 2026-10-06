@@ -8,5 +8,7 @@
     <string name="flip_vertical">flip V</string>
     <string name="torch_on">on</string>
     <string name="torch_off">off</string>
+    <string name="quiet_rule_name">Debug Camera quiet mode</string>
+    <string name="quiet_condition_summary">Debug Camera is on the screen</string>
     <string name="permission_denied">Camera permission denied. The API returns camera_not_ready.</string>
 </resources>

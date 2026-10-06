@@ -50,6 +50,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var safeArea: FrameLayout
     private lateinit var overlay: FrameLayout
     private lateinit var orientationListener: OrientationEventListener
+
+    /** Silences notifications while this instance is visible (onStart to onStop). */
+    private lateinit var quietMode: QuietMode
+    private var quietState = QuietState.UNSUPPORTED
     private var zoomRatio = 1f
     private var torchEnabled = false
 
@@ -142,11 +146,14 @@ class MainActivity : ComponentActivity() {
             Log.e(Constants.Log.TAG, Constants.Messages.UNEXPECTED, cause)
         }
         server.start()
+        quietMode = ProcessQuietMode.of(this)
         // The focus distance changes without an event, so the label reads it again while the app is visible.
+        // The user can give the Do Not Disturb access while the app is visible, so the same loop tries again.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 while (true) {
                     renderStatus()
+                    if (quietState == QuietState.NO_ACCESS) quietState = quietMode.enter(this@MainActivity)
                     delay(Constants.Focus.LABEL_REFRESH_MILLIS)
                 }
             }
@@ -189,6 +196,16 @@ class MainActivity : ComponentActivity() {
 
     private fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    override fun onStart() {
+        super.onStart()
+        quietState = quietMode.enter(this)
+    }
+
+    override fun onStop() {
+        quietMode.leave(this)
+        super.onStop()
+    }
 
     override fun onResume() {
         super.onResume()
