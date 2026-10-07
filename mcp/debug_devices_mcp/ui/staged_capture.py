@@ -1,5 +1,6 @@
-"""One staged capture: the key press on the monitor page (Space, C, or the Capture button) takes the phone photo and
-the multimeter reading of that moment, and the queue (staged.py) keeps them for the agent's next `multimeter_read`.
+"""One staged capture: the key press on the monitor page (Space, Enter, C, or the Capture button) takes the phone
+photo and the multimeter reading of that moment, and the queue (staged.py) keeps them for the agent's next
+`multimeter_read`.
 
 The photo and the meter part run at the same time, like bench_measure:
 

@@ -27,7 +27,7 @@ def connect_services(monitor: Monitor, services: Services) -> None:
     services.pointing.add_listener(monitor.tracking_changed)
     services.add_restart_listener(monitor.app_restarted)
     services.add_status_listener(monitor.status_seen)
-    # Space, C, or the Capture button on the page stage the phone photo and the meter reading (staged.py).
+    # Space, Enter, C, or the Capture button on the page stage the phone photo and the meter reading (staged.py).
     monitor.staged = StagedCapturer(services, services.staged, monitor.origin)
     # A capture, its result, a delete, or a pop by this server: the page gets the new list at once (SSE).
     services.staged.listeners.append(monitor.staged_changed)

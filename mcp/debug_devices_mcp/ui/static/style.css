@@ -361,7 +361,7 @@ form label { display: block; margin-bottom: 8px; }
   background: linear-gradient(135deg, transparent 50%, rgba(255, 255, 255, 0.6) 50%);
   cursor: nwse-resize;
 }
-/* A capture (Space or C) in full screen: the page flash is outside the full screen view. */
+/* A capture (Space, Enter, or C) in full screen: the page flash is outside the full screen view. */
 .meter-pip.flash { animation: meter-pip-flash 250ms ease-out; }
 @keyframes meter-pip-flash {
   from { box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.9); }

@@ -1,5 +1,5 @@
-"""Staged captures on the page: capture (Space, C, or the Capture button), list, the phone photo and the meter crop
-image of one capture, delete one, and clear. The page gets the list changes as `staged` events (ui/page_push.py).
+"""Staged captures on the page: capture (Space, Enter, C, or the Capture button), list, the phone photo and the meter
+crop image of one capture, delete one, and clear. The page gets the list changes as `staged` events (ui/page_push.py).
 
 A capture, a delete, and a clear accept only a same-origin request from the page (like the device actions): an
 agent gets the captures only through `multimeter_read` and `staged_captures`.

@@ -1347,7 +1347,7 @@ function meterPipStaged(list) {
   }
 }
 
-// Space or C in full screen: the page flash and the staged message are outside the full screen view.
+// Space, Enter, or C in full screen: the page flash and the staged message are outside the full screen view.
 function meterPipFlash() {
   const panel = $("meter-pip");
   panel.classList.remove("flash");
@@ -2229,8 +2229,9 @@ function setupBoard() {
 
 // region: staged captures
 
-// Space (also a USB foot pedal that sends Space) and C capture; never in a text field or with a modifier.
-const STAGED_KEYS = new Set([" ", "c", "C"]);
+// Space (also a USB foot pedal that sends Space), Enter (also the numeric keypad), and C capture; never in a text
+// field or with a modifier.
+const STAGED_KEYS = new Set([" ", "Enter", "c", "C"]);
 const STAGED_FLASH_MS = 250;
 // The capture sound plays only after the server took the capture (202); a refused or failed capture has another one.
 const STAGED_BEEP = { frequency: 880, seconds: 0.08, gain: 0.15, type: "sine" };
@@ -2424,7 +2425,7 @@ function setupStaged() {
   });
   document.addEventListener("keydown", (event) => {
     if (!stagedKey(event)) return;
-    // Also for a focused button: Space captures, it does not click the button or scroll the page.
+    // Also for a focused button: Space and Enter capture, they do not click the button or scroll the page.
     event.preventDefault();
     if (!event.repeat) stagedCapture();
   });

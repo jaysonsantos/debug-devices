@@ -263,7 +263,7 @@ class Monitor:
     markings_setter: Callable[[bool], Awaitable[Any]] | None = None
     # The MCP client name from initialize (for example "codex").
     client_name: str | None = None
-    # The staged captures of the page (Space, C, or the Capture button); setup sets it.
+    # The staged captures of the page (Space, Enter, C, or the Capture button); setup sets it.
     staged: Capturer | None = None
     # Finds the primary (the page on this server's own --ui-port) and nothing else; setup sets it. The webcam lookup
     # (`shared.remote`) also asks other page ports, so it must not decide primary or secondary (N50 of QA round 12).

@@ -1330,8 +1330,8 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
     ) -> CallToolResult:
         """Read the multimeter, then check the reading. This is the only tool for meter values.
 
-        Staged captures first: when the user captured on the monitor page (Space, C, or Capture), this returns ALL
-        waiting captures, oldest first, and removes them (`staged`: each with `capture_id`, `captured_at`, `age_s`,
+        Staged captures first: when the user captured on the monitor page (Space, Enter, C, or Capture), this returns
+        ALL waiting captures, oldest first, and removes them (`staged`: each with `capture_id`, `captured_at`, `age_s`,
         the checked `meter` result with its bench notice, and the phone `photo`). For each capture, the phone photo
         and the meter crop image of its reading follow as images (`_meta` has the `capture_id` and `staged`:
         "phone_photo" or "meter_crop"); `include_image` also adds the other meter frames ("meter_frame"). The photo
@@ -1397,8 +1397,8 @@ def register_webcam_tools(server: MCPServer, services: Services) -> None:
 
     @server.tool()
     async def staged_captures() -> StagedCapturesResult:
-        """List the staged captures that wait (the user pressed Space, C, or Capture on the monitor page), oldest
-        first, without removing them: each with `capture_id`, `captured_at`, `age_s`, `state` (pending while the
+        """List the staged captures that wait (the user pressed Space, Enter, C, or Capture on the monitor page),
+        oldest first, without removing them: each with `capture_id`, `captured_at`, `age_s`, `state` (pending while the
         vision call runs), the meter result, and the photo facts. multimeter_read returns them with their images and
         removes them. A staged photo and value show the moment of the capture, not now."""
         now = utc_now()
